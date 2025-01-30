@@ -1,126 +1,130 @@
 package com.example.watchoffline
 
-import java.util.Collections
-import java.util.Timer
-import java.util.TimerTask
-
+import android.app.Activity
+import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.drawable.Drawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import androidx.leanback.app.BackgroundManager
-import androidx.leanback.app.BrowseSupportFragment
-import androidx.leanback.widget.ArrayObjectAdapter
-import androidx.leanback.widget.HeaderItem
-import androidx.leanback.widget.ImageCardView
-import androidx.leanback.widget.ListRow
-import androidx.leanback.widget.ListRowPresenter
-import androidx.leanback.widget.OnItemViewClickedListener
-import androidx.leanback.widget.OnItemViewSelectedListener
-import androidx.leanback.widget.Presenter
-import androidx.leanback.widget.Row
-import androidx.leanback.widget.RowPresenter
-import androidx.core.app.ActivityOptionsCompat
-import androidx.core.content.ContextCompat
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.TextView
 import android.widget.Toast
-
+import androidx.core.app.ActivityOptionsCompat
+import androidx.core.content.ContextCompat
+import androidx.leanback.app.BackgroundManager
+import androidx.leanback.app.BrowseSupportFragment
+import androidx.leanback.widget.*
 import com.bumptech.glide.Glide
 import com.bumptech.glide.request.target.SimpleTarget
 import com.bumptech.glide.request.transition.Transition
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
+import java.util.*
 
-/**
- * Loads a grid of cards with movies to browse.
- */
 class MainFragment : BrowseSupportFragment() {
 
-    private val mHandler = Handler(Looper.myLooper()!!)
+    private val mHandler = Handler(Looper.getMainLooper())
     private lateinit var mBackgroundManager: BackgroundManager
     private var mDefaultBackground: Drawable? = null
     private lateinit var mMetrics: DisplayMetrics
     private var mBackgroundTimer: Timer? = null
     private var mBackgroundUri: String? = null
 
+    private val REQUEST_CODE_IMPORT_JSON = 1001
+    private val jsonDataManager = JsonDataManager()
+
     override fun onActivityCreated(savedInstanceState: Bundle?) {
-        Log.i(TAG, "onCreate")
         super.onActivityCreated(savedInstanceState)
+        Log.i(TAG, "onCreate")
 
         prepareBackgroundManager()
-
         setupUIElements()
-
         loadRows()
-
         setupEventListeners()
+
+        jsonDataManager.loadData(requireContext()) // Los datos persisten aquí
+
+        loadRows() // Forzar recarga después de cargar datos
+
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        Log.d(TAG, "onDestroy: " + mBackgroundTimer?.toString())
         mBackgroundTimer?.cancel()
     }
 
     private fun prepareBackgroundManager() {
-
-        mBackgroundManager = BackgroundManager.getInstance(activity)
-        mBackgroundManager.attach(activity!!.window)
-        mDefaultBackground = ContextCompat.getDrawable(activity!!, R.drawable.default_background)
-        mMetrics = DisplayMetrics()
-        activity!!.windowManager.defaultDisplay.getMetrics(mMetrics)
+        mBackgroundManager = BackgroundManager.getInstance(requireActivity())
+        mBackgroundManager.attach(requireActivity().window)
+        mDefaultBackground = ContextCompat.getDrawable(requireContext(), R.drawable.default_background)
+        mMetrics = DisplayMetrics().apply {
+            requireActivity().windowManager.defaultDisplay.getMetrics(this)
+        }
     }
 
     private fun setupUIElements() {
         title = getString(R.string.browse_title)
-        // over title
         headersState = BrowseSupportFragment.HEADERS_ENABLED
         isHeadersTransitionOnBackEnabled = true
-
-        // set fastLane (or headers) background color
-        brandColor = ContextCompat.getColor(activity!!, R.color.fastlane_background)
-        // set search icon color
-        searchAffordanceColor = ContextCompat.getColor(activity!!, R.color.search_opaque)
+        brandColor = ContextCompat.getColor(requireContext(), R.color.fastlane_background)
+        searchAffordanceColor = ContextCompat.getColor(requireContext(), R.color.search_opaque)
     }
 
     private fun loadRows() {
-        val list = MovieList.list
-
         val rowsAdapter = ArrayObjectAdapter(ListRowPresenter())
         val cardPresenter = CardPresenter()
 
-        for (i in 0 until NUM_ROWS) {
-            if (i != 0) {
-                Collections.shuffle(list)
+        // JSON Importados
+        jsonDataManager.getImportedJsons().forEach { json ->
+            ArrayObjectAdapter(cardPresenter).apply {
+                json.videos.forEach { add(it.toMovie()) }
+                rowsAdapter.add(ListRow(
+                    HeaderItem(json.fileName.hashCode().toLong(), json.fileName), // <- Nombre aquí
+                    this
+                ))
             }
-            val listRowAdapter = ArrayObjectAdapter(cardPresenter)
-            for (j in 0 until NUM_COLS) {
-                listRowAdapter.add(list[j % 5])
-            }
-            val header = HeaderItem(i.toLong(), MovieList.MOVIE_CATEGORY[i])
-            rowsAdapter.add(ListRow(header, listRowAdapter))
         }
 
-        val gridHeader = HeaderItem(NUM_ROWS.toLong(), "PREFERENCES")
+        // Películas originales
+        MovieList.list.let { movies ->
+            for (i in 0 until NUM_ROWS) {
+                Collections.shuffle(movies)
+                ArrayObjectAdapter(cardPresenter).apply {
+                    addAll(0, movies.subList(0, NUM_COLS.coerceAtMost(movies.size)))
+                    rowsAdapter.add(ListRow(HeaderItem(i.toLong(), MovieList.MOVIE_CATEGORY[i % MovieList.MOVIE_CATEGORY.size]), this))
+                }
+            }
+        }
 
-        val mGridPresenter = GridItemPresenter()
-        val gridRowAdapter = ArrayObjectAdapter(mGridPresenter)
-        gridRowAdapter.add(resources.getString(R.string.grid_view))
-        gridRowAdapter.add(getString(R.string.error_fragment))
-        gridRowAdapter.add(resources.getString(R.string.personal_settings))
-        rowsAdapter.add(ListRow(gridHeader, gridRowAdapter))
+        // Preferencias
+        ArrayObjectAdapter(GridItemPresenter()).apply {
+            add(getString(R.string.import_json))
+            add(getString(R.string.erase_json))
+            add(getString(R.string.personal_settings))
+            rowsAdapter.add(ListRow(HeaderItem(-1, "PREFERENCES"), this))
+        }
 
         adapter = rowsAdapter
     }
 
+    private fun VideoItem.toMovie() = Movie(
+        title = title,
+        videoUrl = videoSrc,
+        cardImageUrl = imgSml,
+        backgroundImageUrl = imgBig,
+        skipToSecond = skipToSecond,
+        description = "Imported from JSON"
+    )
+
     private fun setupEventListeners() {
         setOnSearchClickedListener {
-            Toast.makeText(activity!!, "Implement your own in-app search", Toast.LENGTH_LONG)
-                .show()
+            Toast.makeText(requireContext(), "Implement your own in-app search", Toast.LENGTH_LONG).show()
         }
 
         onItemViewClickedListener = ItemViewClickedListener()
@@ -134,100 +138,203 @@ class MainFragment : BrowseSupportFragment() {
             rowViewHolder: RowPresenter.ViewHolder,
             row: Row
         ) {
+            when (item) {
+                is Movie -> navigateToDetails(itemViewHolder, item)
+                is String -> handleStringAction(item)
+            }
+        }
 
-            if (item is Movie) {
-                Log.d(TAG, "Item: " + item.toString())
-                val intent = Intent(activity!!, DetailsActivity::class.java)
-                intent.putExtra(DetailsActivity.MOVIE, item)
-
-                val bundle = ActivityOptionsCompat.makeSceneTransitionAnimation(
-                    activity!!,
+        private fun navigateToDetails(itemViewHolder: Presenter.ViewHolder, movie: Movie) {
+            Intent(requireContext(), DetailsActivity::class.java).apply {
+                putExtra(DetailsActivity.MOVIE, movie)
+                val options = ActivityOptionsCompat.makeSceneTransitionAnimation(
+                    requireActivity(),
                     (itemViewHolder.view as ImageCardView).mainImageView,
                     DetailsActivity.SHARED_ELEMENT_NAME
                 )
-                    .toBundle()
-                startActivity(intent, bundle)
-            } else if (item is String) {
-                if (item.contains(getString(R.string.error_fragment))) {
-                    val intent = Intent(activity!!, BrowseErrorActivity::class.java)
-                    startActivity(intent)
-                } else {
-                    Toast.makeText(activity!!, item, Toast.LENGTH_SHORT).show()
+                startActivity(this, options.toBundle())
+            }
+        }
+
+        private fun handleStringAction(item: String) {
+            when (item) {
+                getString(R.string.import_json) -> openFilePicker()
+                getString(R.string.erase_json) -> showDeleteDialog()
+                else -> Toast.makeText(requireContext(), item, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun openFilePicker() {
+        Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            startActivityForResult(this, REQUEST_CODE_IMPORT_JSON)
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_CODE_IMPORT_JSON && resultCode == Activity.RESULT_OK) {
+            data?.data?.let { uri ->
+                requireContext().contentResolver.openInputStream(uri)?.use { stream ->
+                    val jsonString = stream.bufferedReader().use { it.readText() }
+                    val videos = Gson().fromJson(jsonString, Array<VideoItem>::class.java).toList()
+
+                    // Obtener nombre real del archivo
+                    val fileName = JsonUtils.getFileNameFromUri(requireContext(), uri)
+                        ?: "imported_${System.currentTimeMillis()}"
+
+                    jsonDataManager.addJson(requireContext(), fileName, videos)
+                    refreshUI()
                 }
             }
         }
     }
 
+    private fun showDeleteDialog() {
+        val items = jsonDataManager.getImportedJsons().map { it.fileName }.toTypedArray()
+        AlertDialog.Builder(requireContext()).apply {
+            setTitle("Eliminar JSON")
+            setItems(items) { _, which ->
+                jsonDataManager.removeJson(requireContext(), items[which])
+                refreshUI()
+            }
+            setNegativeButton("Cancelar", null)
+            show()
+        }
+    }
+
+    private fun refreshUI() {
+        jsonDataManager.loadData(requireContext()) // Recargar datos
+        loadRows()
+        startBackgroundTimer()
+    }
+
     private inner class ItemViewSelectedListener : OnItemViewSelectedListener {
         override fun onItemSelected(
-            itemViewHolder: Presenter.ViewHolder?, item: Any?,
-            rowViewHolder: RowPresenter.ViewHolder, row: Row
+            itemViewHolder: Presenter.ViewHolder?,
+            item: Any?,
+            rowViewHolder: RowPresenter.ViewHolder,
+            row: Row
         ) {
-            if (item is Movie) {
-                mBackgroundUri = item.backgroundImageUrl
+            (item as? Movie)?.let {
+                mBackgroundUri = it.backgroundImageUrl
                 startBackgroundTimer()
             }
         }
     }
 
     private fun updateBackground(uri: String?) {
-        val width = mMetrics.widthPixels
-        val height = mMetrics.heightPixels
-        Glide.with(activity!!)
+        Glide.with(requireActivity())
             .load(uri)
             .centerCrop()
             .error(mDefaultBackground)
-            .into<SimpleTarget<Drawable>>(
-                object : SimpleTarget<Drawable>(width, height) {
-                    override fun onResourceReady(
-                        drawable: Drawable,
-                        transition: Transition<in Drawable>?
-                    ) {
-                        mBackgroundManager.drawable = drawable
-                    }
-                })
+            .into(object : SimpleTarget<Drawable>(mMetrics.widthPixels, mMetrics.heightPixels) {
+                override fun onResourceReady(resource: Drawable, transition: Transition<in Drawable>?) {
+                    mBackgroundManager.drawable = resource
+                }
+            })
         mBackgroundTimer?.cancel()
     }
 
     private fun startBackgroundTimer() {
         mBackgroundTimer?.cancel()
-        mBackgroundTimer = Timer()
-        mBackgroundTimer?.schedule(UpdateBackgroundTask(), BACKGROUND_UPDATE_DELAY.toLong())
+        mBackgroundTimer = Timer().apply {
+            schedule(UpdateBackgroundTask(), BACKGROUND_UPDATE_DELAY.toLong())
+        }
     }
 
     private inner class UpdateBackgroundTask : TimerTask() {
-
         override fun run() {
             mHandler.post { updateBackground(mBackgroundUri) }
         }
     }
 
     private inner class GridItemPresenter : Presenter() {
-        override fun onCreateViewHolder(parent: ViewGroup): Presenter.ViewHolder {
-            val view = TextView(parent.context)
-            view.layoutParams = ViewGroup.LayoutParams(GRID_ITEM_WIDTH, GRID_ITEM_HEIGHT)
-            view.isFocusable = true
-            view.isFocusableInTouchMode = true
-            view.setBackgroundColor(ContextCompat.getColor(activity!!, R.color.default_background))
-            view.setTextColor(Color.WHITE)
-            view.gravity = Gravity.CENTER
-            return Presenter.ViewHolder(view)
+        override fun onCreateViewHolder(parent: ViewGroup): ViewHolder {
+            return TextView(parent.context).apply {
+                layoutParams = ViewGroup.LayoutParams(GRID_ITEM_WIDTH, GRID_ITEM_HEIGHT)
+                isFocusable = true
+                isFocusableInTouchMode = true
+                setBackgroundColor(ContextCompat.getColor(context, R.color.default_background))
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+            }.let { ViewHolder(it) }
         }
 
-        override fun onBindViewHolder(viewHolder: Presenter.ViewHolder, item: Any) {
+        override fun onBindViewHolder(viewHolder: ViewHolder, item: Any) {
             (viewHolder.view as TextView).text = item as String
         }
 
-        override fun onUnbindViewHolder(viewHolder: Presenter.ViewHolder) {}
+        override fun onUnbindViewHolder(viewHolder: ViewHolder) {}
     }
 
     companion object {
-        private val TAG = "MainFragment"
+        private const val TAG = "MainFragment"
+        private const val BACKGROUND_UPDATE_DELAY = 300
+        private const val GRID_ITEM_WIDTH = 200
+        private const val GRID_ITEM_HEIGHT = 200
+        private const val NUM_ROWS = 6
+        private const val NUM_COLS = 15
+    }
+}
 
-        private val BACKGROUND_UPDATE_DELAY = 300
-        private val GRID_ITEM_WIDTH = 200
-        private val GRID_ITEM_HEIGHT = 200
-        private val NUM_ROWS = 6
-        private val NUM_COLS = 15
+// Clases externas
+data class VideoItem(
+    val title: String,
+    val skipToSecond: Int,
+    val imgBig: String,
+    val imgSml: String,
+    val videoSrc: String
+)
+
+data class ImportedJson(
+    val fileName: String,
+    val videos: List<VideoItem>
+)
+
+class JsonDataManager {
+    private val importedJsons = mutableListOf<ImportedJson>()
+    
+    // Añade un JSON usando el nombre real del archivo
+    fun addJson(context: Context, fileName: String, videos: List<VideoItem>) {
+        if (importedJsons.none { it.fileName == fileName }) {
+            importedJsons.add(ImportedJson(fileName, videos))
+            saveData(context)
+        }
+    }
+
+    fun removeJson(context: Context, fileName: String) {
+        importedJsons.removeAll { it.fileName == fileName }
+        saveData(context)
+    }
+
+    fun getImportedJsons(): List<ImportedJson> = importedJsons.toList()
+
+
+    fun loadData(context: Context) {
+        try {
+            val json = context.getSharedPreferences("json_data", Context.MODE_PRIVATE)
+                .getString("imported", null) ?: return
+
+            val type = object : TypeToken<List<ImportedJson>>() {}.type
+            importedJsons.clear()
+            importedJsons.addAll(Gson().fromJson(json, type))
+        } catch (e: Exception) {
+            Log.e("JsonDataManager", "Error loading JSON data", e)
+        }
+    }
+
+    fun saveData(context: Context) {
+        try {
+            val json = Gson().toJson(importedJsons)
+            context.getSharedPreferences("json_data", Context.MODE_PRIVATE).edit()
+                .putString("imported", json)
+                .apply()
+        } catch (e: Exception) {
+            Log.e("JsonDataManager", "Error saving JSON data", e)
+        }
     }
 }

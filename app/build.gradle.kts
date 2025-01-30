@@ -41,7 +41,12 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.leanback)
     implementation(libs.glide)
-    implementation("com.google.android.exoplayer:exoplayer:2.19.0")
     implementation(libs.androidx.media3.exoplayer)
     implementation("androidx.appcompat:appcompat:1.4.0")
+    implementation("com.google.code.gson:gson:2.10.1")
+    // ExoPlayer
+    implementation("com.google.android.exoplayer:exoplayer-core:2.19.1")
+    implementation("com.google.android.exoplayer:exoplayer-ui:2.19.1")
+
+
 }

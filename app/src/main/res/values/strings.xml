@@ -2,8 +2,8 @@
     <string name="app_name">WatchOffline</string>
     <string name="browse_title">Videos by Your Company</string>
     <string name="related_movies">Related Videos</string>
-    <string name="grid_view">Grid View</string>
-    <string name="error_fragment">Error Fragment</string>
+    <string name="import_json">Import JSON</string>
+    <string name="erase_json">Erase JSON</string>
     <string name="personal_settings">Personal Settings</string>
     <string name="watch_trailer_1">Watch trailer</string>
     <string name="watch_trailer_2">FREE</string>

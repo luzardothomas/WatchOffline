@@ -59,6 +59,15 @@ object MovieList {
             "https://commondatastorage.googleapis.com/android-tv/Sample%20videos/April%20Fool's%202013/Introducing%20Google%20Nose/card.jpg"
         )
 
+        val skip = arrayOf(
+            60,
+            0,
+            15,
+            25,
+            30,
+            40
+        )
+
         val list = title.indices.map {
             buildMovieInfo(
                 title[it],
@@ -66,7 +75,8 @@ object MovieList {
                 studio[it],
                 videoUrl[it],
                 cardImageUrl[it],
-                bgImageUrl[it]
+                bgImageUrl[it],
+                skip[it]
             )
         }
 
@@ -79,7 +89,8 @@ object MovieList {
         studio: String,
         videoUrl: String,
         cardImageUrl: String,
-        backgroundImageUrl: String
+        backgroundImageUrl: String,
+        skipToSecond: Int
     ): Movie {
         val movie = Movie()
         movie.id = count++
@@ -89,6 +100,7 @@ object MovieList {
         movie.cardImageUrl = cardImageUrl
         movie.backgroundImageUrl = backgroundImageUrl
         movie.videoUrl = videoUrl
+        movie.skipToSecond = skipToSecond
         return movie
     }
 }
