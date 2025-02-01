@@ -43,14 +43,12 @@ class MainFragment : BrowseSupportFragment() {
         super.onActivityCreated(savedInstanceState)
         Log.i(TAG, "onCreate")
 
+        jsonDataManager.loadData(requireContext()) // Los datos persisten aquí
+
         prepareBackgroundManager()
         setupUIElements()
         loadRows()
         setupEventListeners()
-
-        jsonDataManager.loadData(requireContext()) // Los datos persisten aquí
-
-        loadRows() // Forzar recarga después de cargar datos
 
     }
 
@@ -91,22 +89,10 @@ class MainFragment : BrowseSupportFragment() {
             }
         }
 
-        // Películas originales
-        MovieList.list.let { movies ->
-            for (i in 0 until NUM_ROWS) {
-                Collections.shuffle(movies)
-                ArrayObjectAdapter(cardPresenter).apply {
-                    addAll(0, movies.subList(0, NUM_COLS.coerceAtMost(movies.size)))
-                    rowsAdapter.add(ListRow(HeaderItem(i.toLong(), MovieList.MOVIE_CATEGORY[i % MovieList.MOVIE_CATEGORY.size]), this))
-                }
-            }
-        }
-
         // Preferencias
         ArrayObjectAdapter(GridItemPresenter()).apply {
             add(getString(R.string.import_json))
             add(getString(R.string.erase_json))
-            add(getString(R.string.personal_settings))
             rowsAdapter.add(ListRow(HeaderItem(-1, "PREFERENCES"), this))
         }
 
@@ -297,7 +283,7 @@ data class ImportedJson(
 
 class JsonDataManager {
     private val importedJsons = mutableListOf<ImportedJson>()
-    
+
     // Añade un JSON usando el nombre real del archivo
     fun addJson(context: Context, fileName: String, videos: List<VideoItem>) {
         if (importedJsons.none { it.fileName == fileName }) {
