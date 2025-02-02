@@ -28,6 +28,7 @@
 
         <activity
             android:name=".MainActivity"
+            android:theme="@style/Theme.MyApp"
             android:banner="@drawable/app_icon_your_company"
             android:exported="true"
             android:icon="@drawable/app_icon_your_company"
@@ -36,18 +37,21 @@
             android:screenOrientation="landscape">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
+                <category android:name="android.intent.category.LAUNCHER" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
         <activity
             android:name=".DetailsActivity"
+            android:theme="@style/Theme.MyApp"
             android:exported="false" />
         <activity
             android:name=".PlaybackActivity"
+            android:theme="@style/Theme.MyApp"
             android:exported="false" />
         <activity
             android:name=".BrowseErrorActivity"
+            android:theme="@style/Theme.MyApp"
             android:exported="false" />
     </application>
 
