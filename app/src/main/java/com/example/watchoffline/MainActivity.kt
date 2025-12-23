@@ -34,10 +34,17 @@ class MainActivity : FragmentActivity() {
         startServer()
 
         if (savedInstanceState == null) {
+            val fragment = if (isTvDevice()) {
+                MainFragment()          // TV (Leanback)
+            } else {
+                MobileMainFragment()    // Celular (touch)
+            }
+
             supportFragmentManager.beginTransaction()
-                .replace(R.id.main_browse_fragment, MainFragment())
+                .replace(R.id.main_browse_fragment, fragment)
                 .commitNow()
         }
+
 
         if (!isTvDevice()) {
             enterImmersiveMode()
