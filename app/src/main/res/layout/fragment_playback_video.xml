@@ -1,25 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
-<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:background="@android:color/black">
 
-    <!-- PlayerView -->
-    <com.google.android.exoplayer2.ui.PlayerView
+    <!-- VIDEO (VLC) -->
+    <org.videolan.libvlc.util.VLCVideoLayout
         android:id="@+id/player_view"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:background="@android:color/black" />
+        android:layout_height="match_parent" />
 
-    <!-- Botón Skip Intro en la esquina inferior derecha -->
+    <!-- CONTROLES -->
+    <include
+        android:id="@+id/controls_include"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
     <Button
         android:id="@+id/skip_intro_button"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_alignParentBottom="true"
-        android:layout_alignParentRight="true"
-        android:layout_marginRight="16dp"
-        android:layout_marginBottom="30dp"
-        android:text="Skip Intro"
-        android:visibility="gone" />
+        android:text="SKIP INTRO"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="24dp"
+        android:layout_marginBottom="110dp"
+        android:visibility="gone"
+        android:focusable="true"
+        android:focusableInTouchMode="true"/>
 
-</RelativeLayout>
+
+</FrameLayout>
