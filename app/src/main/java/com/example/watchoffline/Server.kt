@@ -1,11 +1,12 @@
 package com.example.watchoffline
 
-import android.content.Context
 import fi.iki.elonen.NanoHTTPD
 import java.io.File
 import java.io.FileInputStream
 
-class BackgroundServer(context: Context, port: Int = 8080) : NanoHTTPD("0.0.0.0", port) {
+class BackgroundServer(
+    port: Int = 8080
+) : NanoHTTPD("0.0.0.0", port) {
 
     private val rootDir = File("/storage")
 
@@ -17,7 +18,13 @@ class BackgroundServer(context: Context, port: Int = 8080) : NanoHTTPD("0.0.0.0"
 
     override fun serve(session: IHTTPSession): Response {
         return try {
-            val requestedFile = File(session.uri)
+            val uri = session.uri ?: "/"
+            val relativePath = uri.removePrefix("/")
+
+            val requestedFile =
+                if (relativePath.isBlank()) rootDir
+                else File(rootDir, relativePath)
+
             when {
                 !requestedFile.exists() -> notFound()
                 requestedFile.isDirectory -> listFiles(requestedFile)
@@ -35,21 +42,21 @@ class BackgroundServer(context: Context, port: Int = 8080) : NanoHTTPD("0.0.0.0"
     )
 
     private fun listFiles(dir: File): Response {
-        val files = dir.listFiles()
-            ?.sortedBy { it.name }
-            ?.toList()
-            ?: emptyList()
+        val files = dir.listFiles()?.sortedBy { it.name } ?: emptyList()
 
         val items = buildString {
             files.forEach { file ->
-                appendLine("""
-                <li>
-                    <a href='${file.absolutePath}'>
-                        ${if (file.isDirectory) "📁" else "📄"} 
-                        ${file.name}${if (file.isDirectory) "/" else ""}
-                    </a>
-                </li>
-                """.trimIndent())
+                val relPath = file.relativeTo(rootDir).path.replace(File.separatorChar, '/')
+                val href = "/$relPath" + if (file.isDirectory) "/" else ""
+                appendLine(
+                    """
+                    <li>
+                        <a href="$href">
+                            ${if (file.isDirectory) "📁" else "📄"} ${file.name}${if (file.isDirectory) "/" else ""}
+                        </a>
+                    </li>
+                    """.trimIndent()
+                )
             }
         }
 
@@ -66,16 +73,16 @@ class BackgroundServer(context: Context, port: Int = 8080) : NanoHTTPD("0.0.0.0"
     }
 
     private fun serveFile(file: File): Response {
-        return try {
-            val mime = when (file.extension.lowercase()) {
-                "mp4" -> "video/mp4"
-                "mkv" -> "video/x-matroska"
-                "avi" -> "video/x-msvideo"
-                "jpg", "jpeg" -> "image/jpeg"
-                "png" -> "image/png"
-                else -> "application/octet-stream"
-            }
+        val mime = when (file.extension.lowercase()) {
+            "mp4" -> "video/mp4"
+            "mkv" -> "video/x-matroska"
+            "avi" -> "video/x-msvideo"
+            "jpg", "jpeg" -> "image/jpeg"
+            "png" -> "image/png"
+            else -> "application/octet-stream"
+        }
 
+        return try {
             newChunkedResponse(
                 Response.Status.OK,
                 mime,
@@ -89,10 +96,10 @@ class BackgroundServer(context: Context, port: Int = 8080) : NanoHTTPD("0.0.0.0"
         }
     }
 
-    private fun errorResponse(e: Exception) = newFixedLengthResponse(
-        Response.Status.INTERNAL_ERROR,
-        "text/plain",
-        "Error del servidor: ${e.message ?: "Desconocido"}"
-    )
-
+    private fun errorResponse(e: Exception) =
+        newFixedLengthResponse(
+            Response.Status.INTERNAL_ERROR,
+            "text/plain",
+            "Error del servidor: ${e.message ?: "Desconocido"}"
+        )
 }
