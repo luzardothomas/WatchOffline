@@ -33,9 +33,6 @@ import java.util.LinkedHashMap
 import java.util.Timer
 import java.util.TimerTask
 import java.util.UUID
-import androidx.leanback.widget.Presenter
-import androidx.leanback.widget.PresenterSelector
-
 
 class MainFragment : BrowseSupportFragment() {
 
@@ -49,6 +46,9 @@ class MainFragment : BrowseSupportFragment() {
     private val REQUEST_CODE_IMPORT_JSON = 1001
     private val jsonDataManager = JsonDataManager()
 
+    private val coverCache = mutableMapOf<String, ApiCover?>()
+
+
     // ✅ SMB
     private lateinit var smbGateway: SmbGateway
 
@@ -61,7 +61,6 @@ class MainFragment : BrowseSupportFragment() {
         smbGateway = SmbGateway(requireContext())
         val ok = smbGateway.ensureProxyStarted(8081)
         Log.e(TAG, "SMB proxy started? $ok port=${smbGateway.getProxyPort()}")
-
 
         prepareBackgroundManager()
         resetBackgroundToDefault()
@@ -117,8 +116,6 @@ class MainFragment : BrowseSupportFragment() {
             add(getString(R.string.erase_json))
             add("Erase ALL JSON")
             add("Connect SMB")
-
-            // ✅ NUEVO
             add("Importar automáticamente")
         }
         rowsAdapter.add(ListRow(HeaderItem(-1, "PREFERENCES"), prefAdapter))
@@ -174,10 +171,7 @@ class MainFragment : BrowseSupportFragment() {
                 getString(R.string.erase_json) -> showDeleteDialog()
                 "Erase ALL JSON" -> showDeleteAllDialog()
                 "Connect SMB" -> openSmbConnectFlow()
-
-                // ✅ NUEVO
-                "Importar automáticamente" -> autoImportPreviewFromSmb()
-
+                "Importar automáticamente" -> autoImportFromSmb()
                 else -> Toast.makeText(requireContext(), item, Toast.LENGTH_SHORT).show()
             }
         }
@@ -197,12 +191,11 @@ class MainFragment : BrowseSupportFragment() {
                 jsonDataManager.removeAll(requireContext())
                 refreshUI()
                 resetBackgroundToDefault()
-                Toast.makeText(requireContext(), "JSONs eliminados ✅", Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), "JSONs eliminados", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Cancelar", null)
             .show()
     }
-
 
     // =========================
     // ✅ SMB CONNECT FLOW
@@ -319,23 +312,13 @@ class MainFragment : BrowseSupportFragment() {
                         smbGateway.saveCreds(server.id, server.host, creds)
                         smbGateway.saveLastShare(server.id, share)
 
-                        requireActivity().runOnUiThread {
+                        activity?.runOnUiThread {
                             Toast.makeText(requireContext(), "SMB conectado ✅", Toast.LENGTH_LONG).show()
                             dialog.dismiss()
-
-                            AlertDialog.Builder(requireContext())
-                                .setTitle("SMB conectado ✅")
-                                .setMessage(
-                                    "Probá debug:\nhttp://127.0.0.1:8081/debug\n\n" +
-                                            "lastServerId=${smbGateway.getLastServerId()}\n" +
-                                            "lastShare=${smbGateway.getLastShare(server.id)}"
-                                )
-                                .setPositiveButton("OK", null)
-                                .show()
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "SMB connect FAILED", e)
-                        requireActivity().runOnUiThread {
+                        activity?.runOnUiThread {
                             Toast.makeText(requireContext(), "Error SMB: ${e.message}", Toast.LENGTH_LONG).show()
                         }
                     }
@@ -344,6 +327,55 @@ class MainFragment : BrowseSupportFragment() {
         }
 
         dialog.show()
+    }
+
+    private fun parseSeasonFromFolderOrName(name: String): Int? {
+        val n = name.lowercase().replace("_", " ").trim()
+
+        // temporada 1 / temporada 01
+        Regex("""temporada\s*(\d{1,2})""").find(n)?.let {
+            return it.groupValues[1].toInt()
+        }
+
+        // temp 1 / temp1
+        Regex("""temp\s*(\d{1,2})""").find(n)?.let {
+            return it.groupValues[1].toInt()
+        }
+
+        // season 1 / season1
+        Regex("""season\s*(\d{1,2})""").find(n)?.let {
+            return it.groupValues[1].toInt()
+        }
+
+        // s01 / s1
+        Regex("""\bs(\d{1,2})\b""").find(n)?.let {
+            return it.groupValues[1].toInt()
+        }
+
+        // carpeta "1", "2", "3" (Rick & Morty)
+        if (n.matches(Regex("""\d{1,2}"""))) {
+            return n.toInt()
+        }
+
+        return null
+    }
+
+    private fun fetchCoverFromApiCached(q: String): ApiCover? {
+        if (coverCache.containsKey(q)) {
+            return coverCache[q]
+        }
+
+        val cover = fetchCoverFromApi(q)
+        coverCache[q] = cover
+        return cover
+    }
+
+    private fun filterAlreadyImported(previews: List<PreviewJson>): List<PreviewJson> {
+        val existing = jsonDataManager.getImportedJsons()
+            .map { it.fileName }
+            .toSet()
+
+        return previews.filter { it.fileName !in existing }
     }
 
     // =========================
@@ -361,128 +393,352 @@ class MainFragment : BrowseSupportFragment() {
         val url: String? = null
     )
 
-    private fun autoImportPreviewFromSmb() {
-        Toast.makeText(requireContext(), "Analizando SMB... (máx 10 videos)", Toast.LENGTH_LONG).show()
+    private data class PreviewJson(
+        val fileName: String,
+        val videos: List<VideoItem>,
+        val debug: String
+    )
+
+    private data class SeriesSeasonKey(
+        val seriesId: String,
+        val season: Int
+    )
+
+    private data class MovieSagaKey(
+        val sagaName: String
+    )
+
+    private data class RootFolderInfo(
+        val root: String,
+        val seasonDirs: Map<Int, String>
+    )
+
+    private fun autoImportFromSmb() {
+        Toast.makeText(requireContext(), "Importando desde SMB…", Toast.LENGTH_LONG).show()
 
         Thread {
             try {
                 val serverId = smbGateway.getLastServerId()
-                if (serverId.isNullOrBlank()) {
-                    uiToast("No hay SMB guardado (lastServerId vacío). Conectá SMB primero.")
-                    return@Thread
-                }
+                    ?: return@Thread uiToast("No hay SMB configurado")
 
                 val share = smbGateway.getLastShare(serverId)
-                if (share.isNullOrBlank()) {
-                    uiToast("No hay share guardado (lastShare vacío). Re-conectá SMB.")
-                    return@Thread
-                }
+                    ?: return@Thread uiToast("No hay share configurado")
 
                 val cached = smbGateway.loadCreds(serverId)
-                if (cached == null) {
-                    uiToast("No hay credenciales cacheadas para serverId=$serverId")
-                    return@Thread
-                }
+                    ?: return@Thread uiToast("No hay credenciales")
 
                 val host = cached.first
                 val creds = cached.second
 
-                val mp4s = smbListMp4(host, creds, share, max = 10)
+                // 🔥 SIN LÍMITE
+                val files = smbListMp4(host, creds, share, max = Int.MAX_VALUE)
+                if (files.isEmpty()) return@Thread uiToast("No se encontraron videos")
 
-                val results = mutableListOf<String>()
-                for (p in mp4s) {
-                    val q = buildQueryForPath(p)
-                    val cover = fetchCoverFromApi(q)
+                data class RawItem(
+                    val path: String,
+                    val title: String,
+                    val img: String,
+                    val skip: Int,
+                    val videoSrc: String
+                )
 
-                    val title = cover?.id?.takeIf { it.isNotBlank() } ?: p.substringAfterLast("/").substringBeforeLast(".")
-                    val img = cover?.url.orEmpty()
-                    val skip = cover?.skipToSecond ?: 0
+                val rawItems = mutableListOf<RawItem>()
 
-                    val videoSrc = "http://127.0.0.1:8081/smb/$serverId/$share/${smbGateway.encodePath(p)}"
+                files.forEachIndexed { idx, path ->
 
-                    val json = """
-[
-  {
-    "title": ${jsonQuote(title)},
-    "skipToSecond": $skip,
-    "imgBig": ${jsonQuote(img)},
-    "imgSml": ${jsonQuote(img)},
-    "videoSrc": ${jsonQuote(videoSrc)}
-  }
-]
-""".trim()
+                    val q = buildQueryForPathSmart(path)
+                    val cover = fetchCoverFromApiCached(q)
 
-                    results.add("q=$q\nmp4=$p\n\n$json")
+                    rawItems.add(
+                        RawItem(
+                            path = path,
+                            title = cover?.id ?: path.substringAfterLast("/").substringBeforeLast("."),
+                            img = cover?.url.orEmpty(),
+                            skip = cover?.skipToSecond ?: 0,
+                            videoSrc = "http://127.0.0.1:8081/smb/$serverId/$share/${smbGateway.encodePath(path)}"
+                        )
+                    )
                 }
 
-                requireActivity().runOnUiThread {
-                    if (results.isEmpty()) {
-                        AlertDialog.Builder(requireContext())
-                            .setTitle("Importar automáticamente")
-                            .setMessage("No encontré .mp4 en el share '$share'.")
-                            .setPositiveButton("OK", null)
-                            .show()
-                    } else {
-                        val labels = results.mapIndexed { idx, txt ->
-                            val first = txt.lineSequence().firstOrNull().orEmpty()
-                            "${idx + 1}) $first"
-                        }.toTypedArray()
+                // ================= SERIES =================
+                val seriesMap = linkedMapOf<Pair<String, Int>, MutableList<RawItem>>()
+                val movies = mutableListOf<RawItem>()
 
-                        AlertDialog.Builder(requireContext())
-                            .setTitle("Preview JSONs (SMB) - ${results.size} items")
-                            .setItems(labels) { _, which ->
-                                AlertDialog.Builder(requireContext())
-                                    .setTitle("JSON a importar (preview)")
-                                    .setMessage(results[which])
-                                    .setPositiveButton("OK", null)
-                                    .show()
-                            }
-                            .setPositiveButton("Cerrar", null)
-                            .show()
+                for (it in rawItems) {
+                    val parts = it.path.replace("\\", "/").split("/")
+                    if (parts.size >= 3) {
+                        val series = parts[parts.size - 3]
+                        val season = parseSeasonFromFolderOrName(parts[parts.size - 2])
+                        if (season != null) {
+                            seriesMap.getOrPut(series to season) { mutableListOf() }.add(it)
+                            continue
+                        }
                     }
+                    movies.add(it)
+                }
+
+                val previews = mutableListOf<PreviewJson>()
+
+                // Series → 1 JSON por temporada
+                for ((key, items) in seriesMap.toList()
+                    .sortedWith(compareBy({ normalizeName(it.first.first) }, { it.first.second }))) {
+
+                    val (series, season) = key
+                    previews.add(
+                        PreviewJson(
+                            fileName = "${normalizeName(series)}_s${pad2(season)}.json",
+                            videos = items.sortedWith(
+                                compareBy<RawItem>(
+                                    { parseSeasonEpisode(it.path)?.second ?: Int.MAX_VALUE },
+                                    { it.path.lowercase() }
+                                )
+                            ).map {
+                                VideoItem(it.title, it.skip, it.img, it.img, it.videoSrc)
+                            },
+                            debug = "SERIES $series S$season"
+                        )
+                    )
+                }
+
+
+                // ================= MOVIES =================
+                val sagaMap = linkedMapOf<String, MutableList<RawItem>>()
+                for (m in movies) {
+                    sagaMap.getOrPut(inferSagaNameFromPath(m.path)) { mutableListOf() }.add(m)
+                }
+
+                for ((saga, items) in sagaMap.toList()
+                    .sortedWith(compareBy({ normalizeName(it.first) }))) {
+
+                    val videosSorted = items.sortedWith(
+                        compareBy<RawItem>(
+                            { extractMovieSortKey(it.path, it.title) }, // ASC por número si existe
+                            { normalizeName(it.title) },                // ASC por título
+                            { it.path.lowercase() }                     // fallback
+                        )
+                    ).map {
+                        VideoItem(it.title, it.skip, it.img, it.img, it.videoSrc)
+                    }
+
+                    previews.add(
+                        PreviewJson(
+                            fileName = if (items.size > 1)
+                                "saga_${normalizeName(saga).replace(" ", "_")}.json"
+                            else
+                                "${normalizeName(items.first().title).replace(" ", "_")}.json",
+                            videos = videosSorted,
+                            debug = "AUTO IMPORT"
+                        )
+                    )
+                }
+
+
+                // 🚫 Evitar duplicados
+                val toImport = filterAlreadyImported(previews)
+
+                if (toImport.isEmpty()) {
+                    uiToast("Todo ya estaba importado")
+                    return@Thread
+                }
+
+                importAllPreviews(toImport)
+
+                requireActivity().runOnUiThread {
+                    refreshUI()
+                    Toast.makeText(
+                        requireContext(),
+                        "Importados ${toImport.size} JSON",
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
 
             } catch (e: Exception) {
-                Log.e(TAG, "autoImportPreviewFromSmb failed", e)
+                Log.e(TAG, "Auto import failed", e)
                 uiToast("Error: ${e.message}")
             }
         }.start()
     }
 
-    /** Heurística simple:
-     *  - si hay ".../<serie>/<temporada>/archivo.mp4" y temporada parece t1/s01/season1 -> q="serie temporada"
-     *  - si no -> q=filename sin extensión
-     */
-    private fun buildQueryForPath(path: String): String {
-        val clean = path.replace("\\", "/").trim('/')
-        val parts = clean.split("/").filter { it.isNotBlank() }
 
-        fun norm(s: String): String =
-            s.lowercase().replace(Regex("""\s+"""), " ").trim()
 
-        if (parts.size >= 3) {
-            val parent2 = norm(parts[parts.size - 3])
-            val parent1 = norm(parts[parts.size - 2])
+    // =========================
+    // ✅ STRUCTURE-FIRST SERIES DETECTION
+    // =========================
 
-            val looksSeason =
-                parent1.matches(Regex("""(t|temp|season)\s*\d+""")) ||
-                        parent1.matches(Regex("""s\d{1,2}"""))
+    /** Si el nombre parece una temporada, devuelve el número (1..99). Si no, null. */
+    private fun isSeasonFolder(name: String): Int? {
+        val n = normalizeName(name)
 
-            return if (looksSeason) {
-                "${parent2} ${parent1}".replace(" ", "+")
-            } else {
-                norm(parts.last().substringBeforeLast(".")).replace(" ", "+")
+        return when {
+            n.matches(Regex("""temporada[_\s-]*(\d{1,2})""")) ->
+                Regex("""(\d{1,2})""").find(n)?.groupValues?.get(1)?.toInt()
+
+            n.matches(Regex("""season[_\s-]*(\d{1,2})""")) ->
+                Regex("""(\d{1,2})""").find(n)?.groupValues?.get(1)?.toInt()
+
+            n.matches(Regex("""\b(s|t)(\d{1,2})\b""")) ->
+                Regex("""(\d{1,2})""").find(n)?.groupValues?.get(1)?.toInt()
+
+            n.matches(Regex("""^\d{1,2}$""")) ->
+                n.toInt()
+
+            else -> null
+        }
+    }
+
+    /** Detecta roots que tienen 2+ subcarpetas que parecen temporadas. */
+    private fun detectSeriesRoots(paths: List<String>): Map<String, RootFolderInfo> {
+        val byRoot = paths.groupBy { p ->
+            p.replace("\\", "/").trim('/').split("/").firstOrNull().orEmpty()
+        }
+
+        val result = mutableMapOf<String, RootFolderInfo>()
+
+        for ((root, files) in byRoot) {
+            if (root.isBlank()) continue
+
+            val subdirs = files.mapNotNull { p ->
+                val parts = p.replace("\\", "/").trim('/').split("/")
+                parts.getOrNull(1)
+            }.distinct()
+
+            val seasons = mutableMapOf<Int, String>()
+            for (d in subdirs) {
+                val s = isSeasonFolder(d)
+                if (s != null) seasons[s] = d
+            }
+
+            if (seasons.size >= 2) {
+                result[root] = RootFolderInfo(root, seasons)
             }
         }
 
-        return norm(parts.last().substringBeforeLast(".")).replace(" ", "+")
+        return result
     }
+
+    // =========================
+    // ✅ HELPERS (GROUPING / SORT)
+    // =========================
+
+    private fun pad2(n: Int): String = n.toString().padStart(2, '0')
+
+    private fun normalizeName(s: String): String =
+        s.trim()
+            .replace('_', ' ')
+            .replace(Regex("""\s+"""), " ")
+            .lowercase()
+
+    /** Devuelve (season, episode) si puede inferirlo desde path o filename */
+
+    private fun extractMovieSortKey(path: String, title: String): Int {
+        val name = path.substringAfterLast("/").substringBeforeLast(".")
+        // Ej: [01] algo.mp4  -> 1
+        Regex("""\[(\d{1,3})]""").find(name)?.let { return it.groupValues[1].toInt() }
+        // Ej: "1-..." o "01 ..." o "1...."
+        Regex("""^(\d{1,3})\D""").find(name)?.let { return it.groupValues[1].toInt() }
+        // Ej: "... part 2" / "parte 2"
+        Regex("""(?i)\b(part|parte)\s*(\d{1,3})\b""").find(name)?.let { return it.groupValues[2].toInt() }
+
+        // si no hay número, que quede al final pero ordenado por nombre
+        return Int.MAX_VALUE
+    }
+
+    private fun parseSeasonEpisode(path: String): Pair<Int, Int>? {
+        val clean = path.replace("\\", "/")
+        val file = clean.substringAfterLast("/")
+        val fileNoExt = file.substringBeforeLast(".", file)
+
+        // s01e02 / S1E2
+        Regex("""(?i)s(\d{1,2})\s*e(\d{1,2})""").find(fileNoExt)?.let {
+            return it.groupValues[1].toInt() to it.groupValues[2].toInt()
+        }
+
+        // 2x01 / 10x25
+        Regex("""(?i)\b(\d{1,2})x(\d{1,3})\b""").find(fileNoExt)?.let {
+            return it.groupValues[1].toInt() to it.groupValues[2].toInt()
+        }
+
+        // s01-02 / s01 02 / s01_02
+        Regex("""(?i)s(\d{1,2})[^\d]{0,3}(\d{1,2})""").find(fileNoExt)?.let {
+            return it.groupValues[1].toInt() to it.groupValues[2].toInt()
+        }
+
+        // ".../t1/...cap 01..." (fallback)
+        val parts = clean.trim('/').split("/").filter { it.isNotBlank() }
+        if (parts.size >= 2) {
+            val seasonDir = normalizeName(parts[parts.size - 2])
+            val seasonNum =
+                Regex("""(?i)\b(t|temp|season)\s*(\d{1,2})\b""").find(seasonDir)?.groupValues?.getOrNull(2)?.toIntOrNull()
+                    ?: Regex("""(?i)\bs(\d{1,2})\b""").find(seasonDir)?.groupValues?.getOrNull(1)?.toIntOrNull()
+
+            if (seasonNum != null) {
+                val epNum =
+                    Regex("""(?i)\b(ep|e|cap|c)\s*(\d{1,3})\b""").find(fileNoExt)?.groupValues?.getOrNull(2)?.toIntOrNull()
+                        ?: Regex("""(?i)\b(\d{1,3})\b""").find(fileNoExt)?.groupValues?.getOrNull(1)?.toIntOrNull()
+
+                if (epNum != null) return seasonNum to epNum
+            }
+        }
+
+        return null
+    }
+
+    /** Heurística para saga:
+     *  - si el parent parece "Harry Potter 1" y existe grandparent -> saga = grandparent
+     *  - sino saga = parent directo
+     */
+    private fun inferSagaNameFromPath(path: String): String {
+        val clean = path.replace("\\", "/").trim('/')
+        val parts = clean.split("/").filter { it.isNotBlank() }
+        if (parts.size < 2) return "Películas"
+
+        val parent = parts[parts.size - 2]
+        val grand = parts.getOrNull(parts.size - 3)
+
+        val parentNorm = normalizeName(parent)
+        val looksLikePart =
+            parentNorm.matches(Regex(""".*\b(\d{1,2}|i{1,6}|iv|v|vi)\b.*""")) ||
+                    parentNorm.contains("part") ||
+                    parentNorm.contains("parte")
+
+        return if (looksLikePart && !grand.isNullOrBlank()) grand else parent
+    }
+
+    /** Query más “inteligente”:
+     * - si puedo inferir season+episode: "<serie> s01 02"
+     * - sino: filename sin ext (para movies)
+     */
+    private fun buildQueryForPathSmart(path: String): String {
+        val clean = path.replace("\\", "/").trim('/')
+        val parts = clean.split("/").filter { it.isNotBlank() }
+        val fileNoExt = parts.last().substringBeforeLast(".")
+
+        val se = parseSeasonEpisode(path)
+        if (se != null && parts.size >= 3) {
+            val seriesName = parts[parts.size - 3] // .../<serie>/<temporada>/<archivo>
+            val (season, ep) = se
+            return "${normalizeName(seriesName)} s${pad2(season)} ${pad2(ep)}"
+        }
+
+        return normalizeName(fileNoExt)
+    }
+
+    /** Comparator para ordenar episodios por número si el API lo trajo, sino por parse, sino por path */
+    private fun episodeSortKey(path: String, cover: ApiCover?): Int {
+        val apiEp = cover?.episode
+        if (apiEp != null) return apiEp
+        return parseSeasonEpisode(path)?.second ?: Int.MAX_VALUE
+    }
+
+    // =========================
+    // SMB LIST + API
+    // =========================
 
     private fun smbListMp4(
         host: String,
         creds: SmbGateway.SmbCreds,
         shareName: String,
-        max: Int = 10
+        max: Int = 100
     ): List<String> {
         val out = mutableListOf<String>()
 
@@ -509,7 +765,6 @@ class MainFragment : BrowseSupportFragment() {
                     else -> false
                 }
             }
-
 
             fun walk(dir: String) {
                 if (out.size >= max) return
@@ -563,23 +818,43 @@ class MainFragment : BrowseSupportFragment() {
         }
     }
 
-    private fun jsonQuote(s: String): String {
-        val escaped = s
-            .replace("\\", "\\\\")
-            .replace("\"", "\\\"")
-            .replace("\n", "\\n")
-        return "\"$escaped\""
-    }
+    // =========================
+    // IMPORT ACTIONS
+    // =========================
 
     private fun uiToast(msg: String) {
-        requireActivity().runOnUiThread {
+        activity?.runOnUiThread {
             Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show()
         }
     }
 
+    private fun uniqueJsonName(base: String): String {
+        val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toSet()
+        if (!existing.contains(base)) return base
+
+        val dot = base.lastIndexOf(".json")
+        val prefix = if (dot >= 0) base.substring(0, dot) else base
+        var i = 2
+        while (true) {
+            val candidate = "${prefix}_$i.json"
+            if (!existing.contains(candidate)) return candidate
+            i++
+        }
+    }
+
+    private fun importPreview(preview: PreviewJson) {
+        val safeName = uniqueJsonName(preview.fileName)
+        jsonDataManager.addJson(requireContext(), safeName, preview.videos)
+    }
+
+    private fun importAllPreviews(previews: List<PreviewJson>) {
+        previews.forEach { importPreview(it) }
+    }
+
     // =========================
-    // JSON IMPORT
+    // JSON IMPORT (MANUAL)
     // =========================
+
     private fun openFilePicker() {
         Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
@@ -620,29 +895,24 @@ class MainFragment : BrowseSupportFragment() {
         }
     }
 
+    // =========================
+    // BACKGROUND / UI
+    // =========================
+
     private fun resetBackgroundToDefault() {
         mBackgroundTimer?.cancel()
         mBackgroundTimer = null
         mBackgroundUri = null
-
-        // ✅ fuerza tu imagen default real (evita el degradado de Leanback)
         mBackgroundManager.drawable = mDefaultBackground
     }
-
-
 
     private fun refreshUI() {
         jsonDataManager.loadData(requireContext())
         loadRows()
 
         val hasAnyMovie = jsonDataManager.getImportedJsons().any { it.videos.isNotEmpty() }
-        if (!hasAnyMovie) {
-            resetBackgroundToDefault()
-        } else {
-            startBackgroundTimer()
-        }
+        if (!hasAnyMovie) resetBackgroundToDefault() else startBackgroundTimer()
     }
-
 
     private inner class ItemViewSelectedListener : OnItemViewSelectedListener {
         override fun onItemSelected(
@@ -656,14 +926,10 @@ class MainFragment : BrowseSupportFragment() {
                     mBackgroundUri = item.backgroundImageUrl
                     startBackgroundTimer()
                 }
-                else -> {
-                    // ✅ cualquier cosa que NO sea Movie (ej: Preferences) vuelve al fondo default
-                    resetBackgroundToDefault()
-                }
+                else -> resetBackgroundToDefault()
             }
         }
     }
-
 
     private fun updateBackground(uri: String?) {
         Glide.with(requireActivity())
@@ -755,7 +1021,6 @@ class JsonDataManager {
         saveData(context)
     }
 
-
     fun getImportedJsons(): List<ImportedJson> = importedJsons.toList()
 
     fun loadData(context: Context) {
@@ -782,3 +1047,4 @@ class JsonDataManager {
         }
     }
 }
+
