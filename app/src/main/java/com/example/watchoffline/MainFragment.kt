@@ -431,7 +431,7 @@ class MainFragment : BrowseSupportFragment() {
                 val creds = cached.second
 
                 // 🔥 SIN LÍMITE
-                val files = smbListVideos(host, creds, share, max = Int.MAX_VALUE)
+                val files = smbListMp4(host, creds, share, max = Int.MAX_VALUE)
                 if (files.isEmpty()) return@Thread uiToast("No se encontraron videos")
 
                 data class RawItem(
@@ -734,7 +734,7 @@ class MainFragment : BrowseSupportFragment() {
     // SMB LIST + API
     // =========================
 
-    private fun smbListVideos(
+    private fun smbListMp4(
         host: String,
         creds: SmbGateway.SmbCreds,
         shareName: String,
@@ -782,24 +782,9 @@ class MainFragment : BrowseSupportFragment() {
                     if (directory) {
                         walk(childPath)
                     } else {
-                        val lower = name.lowercase()
-                        val isVideo = lower.endsWith(".mp4")
-                                || lower.endsWith(".mkv")
-                                || lower.endsWith(".avi")
-                                || lower.endsWith(".webm")
-                                || lower.endsWith(".mov")
-                                || lower.endsWith(".flv")
-                                || lower.endsWith(".mpg")
-                                || lower.endsWith(".mpeg")
-                                || lower.endsWith(".m4v")
-                                || lower.endsWith(".ts")
-                                || lower.endsWith(".3gp")
-                                || lower.endsWith(".wmv")
-
-                        if (isVideo) {
+                        if (name.lowercase().endsWith(".mp4")) {
                             out.add(childPath)
                         }
-
                     }
                 }
             }
@@ -871,25 +856,13 @@ class MainFragment : BrowseSupportFragment() {
     // =========================
 
     private fun openFilePicker() {
-        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+        Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = "application/json"
-        }
-
-        try {
-            startActivityForResult(
-                Intent.createChooser(intent, "Seleccionar JSON"),
-                REQUEST_CODE_IMPORT_JSON
-            )
-        } catch (e: Exception) {
-            Toast.makeText(
-                requireContext(),
-                "Esta función no está disponible en Android TV",
-                Toast.LENGTH_LONG
-            ).show()
+            type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            startActivityForResult(this, REQUEST_CODE_IMPORT_JSON)
         }
     }
-
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)

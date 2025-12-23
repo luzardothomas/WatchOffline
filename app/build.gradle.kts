@@ -11,8 +11,8 @@ android {
 
     defaultConfig {
         applicationId = "com.example.watchoffline"
-        minSdk = 23
-        targetSdk = 34
+        minSdk = 21
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
 
@@ -65,8 +65,6 @@ dependencies {
 
     implementation("androidx.leanback:leanback:1.1.0")
     implementation(libs.leanback)
-    implementation(libs.androidx.media3.ui.leanback)
 
-    implementation("org.videolan.android:libvlc-all:3.5.1")
-    implementation("com.google.android.material:material:1.12.0")
+    implementation("org.videolan.android:libvlc-all:3.6.0")
 }

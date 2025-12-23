@@ -7,8 +7,6 @@
     <string name="watch_trailer_1">Watch video</string>
     <string name="watch_trailer_2">Video</string>
     <string name="movie">Movie</string>
-    <string name="exo_controls_play_pause">Play/Pause</string>
-
 
     <!-- Error messages -->
     <string name="error_fragment_message">An error occurred</string>

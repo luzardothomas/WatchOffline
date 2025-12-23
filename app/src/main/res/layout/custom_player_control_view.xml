@@ -1,108 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/player_controls_root"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:clickable="false"
-    android:focusable="false">
+    android:layout_height="wrap_content"
+    android:layout_alignParentBottom="true">
 
-    <!-- Barra inferior -->
-    <LinearLayout
-        android:id="@+id/bottom_controls"
-        android:layout_width="match_parent"
+    <Button
+        android:id="@+id/skip_intro_button"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_gravity="bottom"
-        android:orientation="vertical"
-        android:paddingStart="28dp"
-        android:paddingEnd="28dp"
-        android:paddingTop="12dp"
-        android:paddingBottom="22dp"
-        android:background="#2A000000">
-
-        <!-- SeekBar arriba -->
-        <SeekBar
-            android:id="@+id/seek_bar"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:max="1000"
-            android:splitTrack="false"
-            android:focusable="true"
-            android:focusableInTouchMode="true" />
-
-        <!-- Botones abajo -->
-        <LinearLayout
-            android:id="@+id/controls_row"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:orientation="horizontal"
-            android:gravity="center">
-
-            <ImageButton
-                android:id="@+id/btn_rew"
-                android:layout_width="56dp"
-                android:layout_height="56dp"
-                android:background="@android:drawable/btn_default"
-                android:src="@android:drawable/ic_media_rew"
-                android:contentDescription="Rewind"
-                android:scaleType="centerInside"
-                android:padding="10dp"
-                android:focusable="true"
-                android:focusableInTouchMode="true" />
-
-            <ImageButton
-                android:id="@+id/btn_seek_back"
-                android:layout_width="56dp"
-                android:layout_height="56dp"
-                android:layout_marginStart="12dp"
-                android:background="@android:drawable/btn_default"
-                android:src="@android:drawable/ic_media_previous"
-                android:contentDescription="Back 10s"
-                android:scaleType="centerInside"
-                android:padding="10dp"
-                android:focusable="true"
-                android:focusableInTouchMode="true" />
-
-            <ImageButton
-                android:id="@+id/btn_play_pause"
-                android:layout_width="64dp"
-                android:layout_height="64dp"
-                android:layout_marginStart="14dp"
-                android:layout_marginEnd="14dp"
-                android:background="@android:drawable/btn_default"
-                android:src="@android:drawable/ic_media_play"
-                android:contentDescription="Play/Pause"
-                android:scaleType="centerInside"
-                android:padding="12dp"
-                android:focusable="true"
-                android:focusableInTouchMode="true" />
-
-            <ImageButton
-                android:id="@+id/btn_seek_fwd"
-                android:layout_width="56dp"
-                android:layout_height="56dp"
-                android:layout_marginEnd="12dp"
-                android:background="@android:drawable/btn_default"
-                android:src="@android:drawable/ic_media_next"
-                android:contentDescription="Forward 10s"
-                android:scaleType="centerInside"
-                android:padding="10dp"
-                android:focusable="true"
-                android:focusableInTouchMode="true" />
-
-            <ImageButton
-                android:id="@+id/btn_ff"
-                android:layout_width="56dp"
-                android:layout_height="56dp"
-                android:background="@android:drawable/btn_default"
-                android:src="@android:drawable/ic_media_ff"
-                android:contentDescription="Fast forward"
-                android:scaleType="centerInside"
-                android:padding="10dp"
-                android:focusable="true"
-                android:focusableInTouchMode="true" />
-
-        </LinearLayout>
-    </LinearLayout>
+        android:text="Skip Intro"
+        android:layout_gravity="center" />
 
 </FrameLayout>
