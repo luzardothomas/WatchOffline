@@ -1,6 +1,5 @@
 package com.example.watchoffline
 
-import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
@@ -14,7 +13,6 @@ import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.google.gson.Gson
 import java.util.LinkedHashMap
 import java.util.UUID
 
@@ -59,12 +57,8 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                     "__action_erase_json__" -> showDeleteDialog()
                     "__action_erase_all_json__" -> showDeleteAllDialog()
                     "__action_connect_smb__" -> openSmbConnectFlow()
-
-                    // ✅ ahora usa helper compartido
                     "__action_auto_import__" -> runAutoImport()
                     "__action_auto_import_local__" -> runLocalAutoImport()
-
-
                     else -> {
                         startActivity(
                             Intent(requireContext(), DetailsActivity::class.java).apply {
@@ -91,13 +85,14 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                 actionCard("Borrar todos los JSON", "__action_erase_all_json__"),
                 actionCard("Conectarse al SMB", "__action_connect_smb__"),
                 actionCard("Importar de SMB", "__action_auto_import__"),
-                actionCard("Importar de DISPOSITIVO","__action_auto_import_local__")
+                actionCard("Importar de DISPOSITIVO", "__action_auto_import_local__")
             )
         )
 
         val contentSections = jsonDataManager.getImportedJsons().map { imported ->
             MobileSection(
-                title = imported.fileName,
+                // ✅ título normalizado (sin .json y "_" -> " ")
+                title = prettyTitle(imported.fileName),
                 items = imported.videos.map { it.toMovie() }
             )
         }
@@ -107,8 +102,8 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
     private fun actionCard(title: String, actionId: String) = Movie(
         title = title,
-        videoUrl = actionId,           // 🔥 usamos videoUrl como "id de acción"
-        cardImageUrl = "",             // vacío => se dibuja “caja” en el adapter (sin logos)
+        videoUrl = actionId,
+        cardImageUrl = "",
         backgroundImageUrl = "",
         skipToSecond = 0,
         description = ""
@@ -134,11 +129,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             onError = { err -> activity?.runOnUiThread { Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() } }
         )
     }
-
-
-    // =========================
-    // ✅ AUTO IMPORT (Shared helper)
-    // =========================
 
     private fun runAutoImport() {
         AutoImporter(
@@ -167,16 +157,20 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     }
 
     private fun showDeleteDialog() {
-        val items = jsonDataManager.getImportedJsons().map { it.fileName }.toTypedArray()
-        if (items.isEmpty()) {
+        val imported = jsonDataManager.getImportedJsons()
+        if (imported.isEmpty()) {
             Toast.makeText(requireContext(), "No hay JSONs para borrar", Toast.LENGTH_SHORT).show()
             return
         }
 
+        // ✅ mostramos nombres lindos, pero borramos por fileName real
+        val labels = imported.map { prettyTitle(it.fileName) }.toTypedArray()
+
         AlertDialog.Builder(requireContext()).apply {
             setTitle("Eliminar JSON")
-            setItems(items) { _, which ->
-                jsonDataManager.removeJson(requireContext(), items[which])
+            setItems(labels) { _, which ->
+                val realName = imported[which].fileName
+                jsonDataManager.removeJson(requireContext(), realName)
                 refreshUI()
             }
             setNegativeButton("Cancelar", null)
@@ -289,7 +283,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         val dialog = AlertDialog.Builder(requireContext())
             .setTitle("Login SMB: ${server.host}")
             .setView(layout)
-            .setPositiveButton("Conectar", null) // no autoclose
+            .setPositiveButton("Conectar", null)
             .setNegativeButton("Cancelar", null)
             .create()
 
@@ -341,3 +335,17 @@ data class MobileSection(
     val title: String,
     val items: List<Movie>
 )
+
+// ✅ misma normalización que TV
+private fun prettyTitle(raw: String): String {
+    var s = raw.trim()
+
+    if (s.lowercase().endsWith(".json")) {
+        s = s.dropLast(5)
+    }
+
+    s = s.replace("_", " ")
+    s = s.replace(Regex("\\s+"), " ").trim()
+
+    return s.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+}
