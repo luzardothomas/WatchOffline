@@ -9,6 +9,12 @@ import com.hierynomus.msfscc.FileAttributes
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.util.ArrayDeque
+import java.util.Collections
+import java.util.LinkedHashMap
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
 
 class AutoImporter(
     private val context: Context,
@@ -17,6 +23,10 @@ class AutoImporter(
     private val proxyPort: Int = 8081
 ) {
     private val tag = "AutoImporter"
+
+    // =========================
+    // Models
+    // =========================
 
     private data class RawItem(
         val serverId: String,
@@ -41,22 +51,55 @@ class AutoImporter(
         @SerializedName("dir") val dir: String? = null,
         @SerializedName("season") val season: Int? = null,
         @SerializedName("episode") val episode: Int? = null,
-
-        // ✅ la API manda "skipSeconds"
         @SerializedName("skipSeconds") val skipToSecond: Int? = null,
-
         @SerializedName("file") val file: String? = null,
         @SerializedName("url") val url: String? = null
     )
 
-    private val coverCache = mutableMapOf<String, ApiCover?>()
+    // =========================
+    // Constants / fast helpers
+    // =========================
 
-    // ✅ si no hay url, guardamos "" y la UI muestra el drawable
-    private fun resolveCoverUrl(apiUrl: String?): String {
-        val u = apiUrl?.trim()
-        return if (!u.isNullOrEmpty()) u else ""
-    }
+    private val gson = Gson()
 
+    // LRU cache para no crecer infinito
+    private val coverCache = Collections.synchronizedMap(object : LinkedHashMap<String, ApiCover?>(256, 0.75f, true) {
+        private val MAX = 600 // ajustá según tu librería
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ApiCover?>?): Boolean = size > MAX
+    })
+
+    // Pool controlado para calls HTTP de covers
+    private val coverPool = Executors.newFixedThreadPool(8) // 6-10 suele ir bien
+    private val COVER_TIMEOUT_MS = 8000
+
+    private val videoExt = hashSetOf(
+        "mp4","mkv","avi","webm","mov","flv","mpg","mpeg","m4v","ts","3gp","wmv"
+    )
+
+    // =========================
+    // Regex precompiladas (evita recompilar siempre)
+    // =========================
+
+    private val reSeason1 = Regex("""(?i)temporada\s*(\d{1,2})""")
+    private val reSeason2 = Regex("""(?i)\btemp\s*(\d{1,2})""")
+    private val reSeason3 = Regex("""(?i)\bseason\s*(\d{1,2})""")
+    private val reSeason4 = Regex("""(?i)\bs(\d{1,2})\b""")
+
+    private val reSE1 = Regex("""(?i)\bs(\d{1,2})\s*[._\- ]*\s*e(\d{1,3})\b""")
+    private val reSE2 = Regex("""(?i)\b(\d{1,2})\s*x\s*(\d{1,3})\b""")
+
+    private val reEpWords = Regex("""(?i)\b(?:ep|e|cap|c|episode)\s*0*(\d{1,3})\b""")
+    private val reEpTail = Regex("""(?i)(?:[_\-\s])0*(\d{1,3})\s*$""")
+
+    private val reSagaLooksLikePart = Regex(""".*\b(\d{1,2}|i{1,6}|iv|v|vi)\b.*""", RegexOption.IGNORE_CASE)
+
+    private val reMovieKey1 = Regex("""\[(\d{1,3})]""")
+    private val reMovieKey2 = Regex("""^(\d{1,3})\D""")
+    private val reMovieKey3 = Regex("""(?i)\b(part|parte)\s*(\d{1,3})\b""")
+
+    // =========================
+    // Public API
+    // =========================
 
     fun run(
         toast: (String) -> Unit,
@@ -66,7 +109,6 @@ class AutoImporter(
         Thread {
             try {
                 toast("Importando desde SMB…")
-
                 smbGateway.ensureProxyStarted(proxyPort)
 
                 val serverIds = smbGateway.listCachedServerIds()
@@ -75,7 +117,7 @@ class AutoImporter(
                     return@Thread
                 }
 
-                val allRawItems = mutableListOf<RawItem>()
+                val allRawItems = ArrayList<RawItem>(512)
                 var scannedServers = 0
 
                 for (serverId in serverIds) {
@@ -89,20 +131,25 @@ class AutoImporter(
                     toast("Escaneando SMB ($scannedServers/${serverIds.size})… $share")
 
                     val smbFiles = listSmbVideos(serverId, share)
+                    if (smbFiles.isEmpty()) continue
 
-                    for (smbPath in smbFiles) {
-                        val q = buildQueryForPathSmart(smbPath)
-                        val cover = fetchCoverFromApiCached(q)
+                    // 1) construir queries (barato)
+                    val jobs = ArrayList<Pair<String, String>>(smbFiles.size) // (path, query)
+                    for (p in smbFiles) jobs.add(p to buildQueryForPathSmart(p))
 
-                        val url = buildProxyUrl(serverId, share, smbPath)
-                        val finalImg = resolveCoverUrl(cover?.url)
-                        val displayTitle = buildDisplayTitleForItem(smbPath, cover)
+                    // 2) pedir covers concurrente (caro)
+                    val coverMap = fetchCoversBatch(jobs.map { it.second }.distinct())
 
-                        // ✅ SKIP:
-                        // - Movies: siempre 0
-                        // - Series: usar lo que viene de la API (skipSeconds -> skipToSecond)
-                        val skipFinal = if (cover?.type?.lowercase() == "series") {
-                            cover.skipToSecond ?: 0
+                    // 3) armar items
+                    for ((smbPath, q) in jobs) {
+                        val cover = coverMap[q] // puede ser null
+
+                        val videoUrl = buildProxyUrl(serverId, share, smbPath)
+                        val img = resolveCoverUrl(cover?.url)
+                        val title = buildDisplayTitleForItem(smbPath, cover)
+
+                        val skipFinal = if (cover?.type.equals("series", ignoreCase = true)) {
+                            cover?.skipToSecond ?: 0
                         } else 0
 
                         allRawItems.add(
@@ -110,10 +157,10 @@ class AutoImporter(
                                 serverId = serverId,
                                 share = share,
                                 smbPath = smbPath,
-                                title = displayTitle,
-                                img = finalImg,
+                                title = title,
+                                img = img,
                                 skip = skipFinal,
-                                videoSrc = url
+                                videoSrc = videoUrl
                             )
                         )
                     }
@@ -124,40 +171,47 @@ class AutoImporter(
                     return@Thread
                 }
 
+                // Dedupe por videoSrc (por si hay repetidos)
+                val unique = LinkedHashMap<String, RawItem>(allRawItems.size)
+                for (ri in allRawItems) unique.putIfAbsent(ri.videoSrc, ri)
+                val itemsUnique = unique.values.toList()
+
+                // Clasificar en series vs movies con un solo parse del path
                 val seriesMap = linkedMapOf<Pair<String, Int>, MutableList<RawItem>>()
-                val movies = mutableListOf<RawItem>()
+                val movies = ArrayList<RawItem>(itemsUnique.size)
 
-                for (ri in allRawItems) {
-                    val parts = ri.smbPath.replace("\\", "/")
-                        .split("/")
-                        .filter { it.isNotBlank() }
-
+                for (ri in itemsUnique) {
+                    val parts = splitPathParts(ri.smbPath)
                     if (parts.size >= 3) {
                         val series = parts[parts.size - 3]
                         val season = parseSeasonFromFolderOrName(parts[parts.size - 2])
                         if (season != null) {
-                            seriesMap.getOrPut(series to season) { mutableListOf() }.add(ri)
+                            seriesMap.getOrPut(series to season) { ArrayList() }.add(ri)
                             continue
                         }
                     }
                     movies.add(ri)
                 }
 
-                val previews = mutableListOf<PreviewJson>()
+                val previews = ArrayList<PreviewJson>(seriesMap.size + 16)
 
                 // Series → 1 JSON por temporada
-                for ((key, items) in seriesMap.toList()
-                    .sortedWith(compareBy({ normalizeName(it.first.first) }, { it.first.second }))) {
+                val seriesEntries = seriesMap.entries.toList()
+                    .sortedWith(compareBy({ normalizeName(it.key.first) }, { it.key.second }))
 
+                for ((key, list) in seriesEntries) {
                     val (series, season) = key
 
-                    val videos = items.sortedWith(
+                    list.sortWith(
                         compareBy<RawItem>(
                             { parseEpisodeForSort(it.smbPath) ?: Int.MAX_VALUE },
                             { it.smbPath.lowercase() }
                         )
-                    ).map { r ->
-                        VideoItem(r.title, r.skip, r.img, r.img, r.videoSrc)
+                    )
+
+                    val videos = ArrayList<VideoItem>(list.size)
+                    for (r in list) {
+                        videos.add(VideoItem(r.title, r.skip, r.img, r.img, r.videoSrc))
                     }
 
                     previews.add(
@@ -172,34 +226,32 @@ class AutoImporter(
                 // Movies → agrupar por saga
                 val sagaMap = linkedMapOf<String, MutableList<RawItem>>()
                 for (m in movies) {
-                    sagaMap.getOrPut(inferSagaNameFromPath(m.smbPath)) { mutableListOf() }.add(m)
+                    sagaMap.getOrPut(inferSagaNameFromPath(m.smbPath)) { ArrayList() }.add(m)
                 }
 
-                for ((saga, items) in sagaMap.toList()
-                    .sortedWith(compareBy({ normalizeName(it.first) }))) {
+                val sagaEntries = sagaMap.entries.toList()
+                    .sortedWith(compareBy({ normalizeName(it.key) }))
 
-                    val videosSorted = items.sortedWith(
+                for ((saga, list) in sagaEntries) {
+                    list.sortWith(
                         compareBy<RawItem>(
                             { extractMovieSortKey(it.smbPath, it.title) },
                             { normalizeName(it.title) },
                             { it.smbPath.lowercase() }
                         )
-                    ).map { r ->
-                        // ✅ movies ya vienen con skip=0
-                        VideoItem(r.title, r.skip, r.img, r.img, r.videoSrc)
-                    }
+                    )
+
+                    val videos = ArrayList<VideoItem>(list.size)
+                    for (r in list) videos.add(VideoItem(r.title, r.skip, r.img, r.img, r.videoSrc))
 
                     val fileName =
-                        if (items.size > 1) {
-                            "saga_${normalizeName(saga).replace(" ", "_")}.json"
-                        } else {
-                            "${normalizeName(items.first().title).replace(" ", "_")}.json"
-                        }
+                        if (list.size > 1) "saga_${normalizeName(saga).replace(" ", "_")}.json"
+                        else "${normalizeName(list.first().title).replace(" ", "_")}.json"
 
                     previews.add(
                         PreviewJson(
                             fileName = fileName,
-                            videos = videosSorted,
+                            videos = videos,
                             debug = "SMB MOVIES"
                         )
                     )
@@ -212,12 +264,18 @@ class AutoImporter(
                     return@Thread
                 }
 
+                // Solo una lectura de existentes (y lo vamos actualizando)
+                val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toHashSet()
+
+                var imported = 0
                 for (p in toImport) {
-                    val safeName = uniqueJsonName(p.fileName)
+                    val safeName = uniqueJsonNameFast(p.fileName, existing)
                     jsonDataManager.addJson(context, safeName, p.videos)
+                    existing.add(safeName)
+                    imported++
                 }
 
-                onDone(toImport.size)
+                onDone(imported)
 
             } catch (e: Exception) {
                 Log.e(tag, "FAILED", e)
@@ -227,16 +285,93 @@ class AutoImporter(
     }
 
     // =========================
-    // SMB listing
+    // Cover resolving
+    // =========================
+
+    // ✅ si no hay url, guardamos "" y la UI muestra el drawable
+    private fun resolveCoverUrl(apiUrl: String?): String {
+        val u = apiUrl?.trim()
+        return if (!u.isNullOrEmpty()) u else ""
+    }
+
+    private fun fetchCoversBatch(queries: List<String>): Map<String, ApiCover?> {
+        // si es chico, no hace falta pool
+        if (queries.isEmpty()) return emptyMap()
+
+        val out = LinkedHashMap<String, ApiCover?>(queries.size)
+
+        // 1) cache hit primero
+        val missing = ArrayList<String>()
+        for (q in queries) {
+            val cached = coverCache[q]
+            if (cached != null || coverCache.containsKey(q)) {
+                out[q] = cached
+            } else {
+                missing.add(q)
+            }
+        }
+        if (missing.isEmpty()) return out
+
+        // 2) pedir concurrente pero controlado
+        val futures = ArrayList<Future<Pair<String, ApiCover?>>>(missing.size)
+        for (q in missing) {
+            futures.add(coverPool.submit(Callable {
+                q to fetchCoverFromApiSafe(q)
+            }))
+        }
+
+        for (f in futures) {
+            val (q, cover) = runCatching { f.get() }.getOrElse { ("" to null) }
+            if (q.isNotBlank()) {
+                coverCache[q] = cover
+                out[q] = cover
+            }
+        }
+
+        return out
+    }
+
+    private fun fetchCoverFromApiSafe(q: String): ApiCover? {
+        return runCatching { fetchCoverFromApi(q) }.getOrNull()
+    }
+
+    private fun fetchCoverFromApi(q: String): ApiCover? {
+        val base = "https://api-watchoffline.luzardo-thomas.workers.dev/cover?q="
+        val full = base + URLEncoder.encode(q.replace("+", " "), "UTF-8")
+
+        val conn = (URL(full).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = COVER_TIMEOUT_MS
+            readTimeout = COVER_TIMEOUT_MS
+            setRequestProperty("Accept", "application/json")
+        }
+
+        return try {
+            val code = conn.responseCode
+            if (code !in 200..299) return null
+
+            val body = conn.inputStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            if (body.isBlank()) return null
+
+            gson.fromJson(body, ApiCover::class.java)
+        } catch (_: Exception) {
+            null
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    // =========================
+    // SMB listing (iterativo, rápido)
     // =========================
 
     private fun listSmbVideos(serverId: String, shareName: String): List<String> {
-        val out = mutableListOf<String>()
-
-        val videoExt = setOf("mp4","mkv","avi","webm","mov","flv","mpg","mpeg","m4v","ts","3gp","wmv")
+        val out = ArrayList<String>(512)
 
         fun isVideo(name: String): Boolean {
-            val ext = name.substringAfterLast(".", "").lowercase()
+            val dot = name.lastIndexOf('.')
+            if (dot <= 0 || dot == name.length - 1) return false
+            val ext = name.substring(dot + 1).lowercase()
             return ext in videoExt
         }
 
@@ -248,14 +383,18 @@ class AutoImporter(
         }
 
         smbGateway.withDiskShare(serverId, shareName) { share ->
-            fun walk(dir: String) {
+            val stack = ArrayDeque<String>()
+            stack.addLast("") // root
+
+            while (stack.isNotEmpty()) {
+                val dir = stack.removeLast()
                 val cleanDir = dir.trim('\\', '/')
-                if (cleanDir.isNotEmpty() && shouldSkipFolder(cleanDir)) return
+                if (cleanDir.isNotEmpty() && shouldSkipFolder(cleanDir)) continue
 
                 val list = try {
                     if (cleanDir.isBlank()) share.list("") else share.list(cleanDir)
                 } catch (_: Exception) {
-                    return
+                    continue
                 }
 
                 for (f in list) {
@@ -267,16 +406,20 @@ class AutoImporter(
                     val attrs = f.fileAttributes.toLong()
                     val isDir = (attrs and FileAttributes.FILE_ATTRIBUTE_DIRECTORY.value.toLong()) != 0L
 
-                    if (isDir) walk(full) else if (isVideo(name)) out.add(full.replace("\\", "/"))
+                    if (isDir) {
+                        stack.addLast(full)
+                    } else if (isVideo(name)) {
+                        out.add(full.replace("\\", "/"))
+                    }
                 }
             }
-            walk("")
         }
 
         return out
     }
 
     private fun buildProxyUrl(serverId: String, share: String, smbPath: String): String {
+        // optimización: encode por segmento una sola vez
         val encodedPath = smbPath.split("/").joinToString("/") { seg ->
             URLEncoder.encode(seg, "UTF-8").replace("+", "%20")
         }
@@ -285,100 +428,55 @@ class AutoImporter(
     }
 
     // =========================
-    // Cover API + cache
-    // =========================
-
-    private fun fetchCoverFromApiCached(q: String): ApiCover? {
-        coverCache[q]?.let { return it }
-
-        val cover = runCatching {
-            fetchCoverFromApi(q)
-        }.getOrNull()
-
-        coverCache[q] = cover
-        return cover
-    }
-
-
-    private fun fetchCoverFromApi(q: String): ApiCover? {
-        val base = "https://api-watchoffline.luzardo-thomas.workers.dev/cover?q="
-        val full = base + URLEncoder.encode(q.replace("+", " "), "UTF-8")
-
-        val conn = (URL(full).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 8000
-            readTimeout = 8000
-            setRequestProperty("Accept", "application/json")
-        }
-
-        return try {
-            val code = conn.responseCode
-            if (code !in 200..299) return null
-
-            val body = conn.inputStream
-                ?.bufferedReader()
-                ?.use { it.readText() }
-                .orEmpty()
-
-            if (body.isBlank()) return null
-
-            Gson().fromJson(body, ApiCover::class.java)
-        } catch (_: Exception) {
-            null
-        } finally {
-            conn.disconnect()
-        }
-    }
-
-
-
-    // =========================
-    // Helpers (igual a lo que ya venías usando)
+    // Helpers
     // =========================
 
     private fun pad2(n: Int): String = n.toString().padStart(2, '0')
     private fun pad3(n: Int): String = n.toString().padStart(3, '0')
 
     private fun normalizeName(s: String): String =
-        s.trim().replace('_', ' ')
+        s.trim()
+            .replace('_', ' ')
             .replace(Regex("""\s+"""), " ")
             .lowercase()
 
+    private fun splitPathParts(path: String): List<String> {
+        // evita replace+split duplicado en varios lados
+        val clean = path.replace("\\", "/").trim('/')
+        if (clean.isBlank()) return emptyList()
+        return clean.split("/").filter { it.isNotBlank() }
+    }
+
     private fun parseSeasonFromFolderOrName(name: String): Int? {
         val n = name.lowercase().replace("_", " ").trim()
-        Regex("""temporada\s*(\d{1,2})""").find(n)?.let { return it.groupValues[1].toInt() }
-        Regex("""temp\s*(\d{1,2})""").find(n)?.let { return it.groupValues[1].toInt() }
-        Regex("""season\s*(\d{1,2})""").find(n)?.let { return it.groupValues[1].toInt() }
-        Regex("""\bs(\d{1,2})\b""").find(n)?.let { return it.groupValues[1].toInt() }
+        reSeason1.find(n)?.let { return it.groupValues[1].toInt() }
+        reSeason2.find(n)?.let { return it.groupValues[1].toInt() }
+        reSeason3.find(n)?.let { return it.groupValues[1].toInt() }
+        reSeason4.find(n)?.let { return it.groupValues[1].toInt() }
         if (n.matches(Regex("""\d{1,2}"""))) return n.toInt()
         return null
     }
 
+    private fun fileBaseName(path: String): String =
+        path.replace("\\", "/").substringAfterLast("/").substringBeforeLast(".")
+
     private fun parseSeasonEpisodeFromFilename(path: String): Pair<Int, Int>? {
-        val clean = path.replace("\\", "/")
-        val file = clean.substringAfterLast("/")
+        val file = path.replace("\\", "/").substringAfterLast("/")
         val name = file.substringBeforeLast(".", file)
 
-        Regex("""(?i)\bs(\d{1,2})\s*[._\- ]*\s*e(\d{1,3})\b""")
-            .find(name)?.let { return it.groupValues[1].toInt() to it.groupValues[2].toInt() }
-
-        Regex("""(?i)\b(\d{1,2})\s*x\s*(\d{1,3})\b""")
-            .find(name)?.let { return it.groupValues[1].toInt() to it.groupValues[2].toInt() }
+        reSE1.find(name)?.let { return it.groupValues[1].toInt() to it.groupValues[2].toInt() }
+        reSE2.find(name)?.let { return it.groupValues[1].toInt() to it.groupValues[2].toInt() }
 
         return null
     }
 
     private fun parseEpisodeOnlyFromFilename(path: String): Int? {
-        val clean = path.replace("\\", "/")
-        val file = clean.substringAfterLast("/")
+        val file = path.replace("\\", "/").substringAfterLast("/")
         val name = file.substringBeforeLast(".", file)
 
-        Regex("""(?i)\b(?:ep|e|cap|c|episode)\s*0*(\d{1,3})\b""")
-            .findAll(name).toList().lastOrNull()
-            ?.let { return it.groupValues[1].toInt() }
-
-        Regex("""(?i)(?:[_\-\s])0*(\d{1,3})\s*$""")
-            .find(name)?.let { return it.groupValues[1].toInt() }
+        // último match de ep words
+        reEpWords.findAll(name).toList().lastOrNull()?.let { return it.groupValues[1].toInt() }
+        reEpTail.find(name)?.let { return it.groupValues[1].toInt() }
 
         return null
     }
@@ -387,8 +485,7 @@ class AutoImporter(
         parseSeasonEpisodeFromFilename(path)?.second ?: parseEpisodeOnlyFromFilename(path)
 
     private fun inferSagaNameFromPath(path: String): String {
-        val clean = path.replace("\\", "/").trim('/')
-        val parts = clean.split("/").filter { it.isNotBlank() }
+        val parts = splitPathParts(path)
         if (parts.size < 2) return "Películas"
 
         val parent = parts[parts.size - 2]
@@ -396,7 +493,7 @@ class AutoImporter(
 
         val parentNorm = normalizeName(parent)
         val looksLikePart =
-            parentNorm.matches(Regex(""".*\b(\d{1,2}|i{1,6}|iv|v|vi)\b.*""")) ||
+            reSagaLooksLikePart.matches(parentNorm) ||
                     parentNorm.contains("part") ||
                     parentNorm.contains("parte")
 
@@ -405,18 +502,19 @@ class AutoImporter(
 
     private fun extractMovieSortKey(path: String, title: String): Int {
         val name = path.substringAfterLast("/").substringBeforeLast(".")
-        Regex("""\[(\d{1,3})]""").find(name)?.let { return it.groupValues[1].toInt() }
-        Regex("""^(\d{1,3})\D""").find(name)?.let { return it.groupValues[1].toInt() }
-        Regex("""(?i)\b(part|parte)\s*(\d{1,3})\b""").find(name)?.let { return it.groupValues[2].toInt() }
+        reMovieKey1.find(name)?.let { return it.groupValues[1].toInt() }
+        reMovieKey2.find(name)?.let { return it.groupValues[1].toInt() }
+        reMovieKey3.find(name)?.let { return it.groupValues[2].toInt() }
         return Int.MAX_VALUE
     }
 
     private fun buildQueryForPathSmart(path: String): String {
-        val clean = path.replace("\\", "/").trim('/')
-        val parts = clean.split("/").filter { it.isNotBlank() }
-        val fileNoExt = parts.last().substringBeforeLast(".")
+        val parts = splitPathParts(path)
+        if (parts.isEmpty()) return ""
 
+        val fileNoExt = parts.last().substringBeforeLast(".")
         val se = parseSeasonEpisodeFromFilename(path)
+
         if (se != null && parts.size >= 3) {
             val seriesName = parts[parts.size - 3]
             val (season, ep) = se
@@ -437,12 +535,15 @@ class AutoImporter(
         return normalizeName(fileNoExt)
     }
 
-    private fun uniqueJsonName(base: String): String {
-        val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toSet()
+    private fun filterAlreadyImported(previews: List<PreviewJson>): List<PreviewJson> {
+        val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toHashSet()
+        return previews.filter { it.fileName !in existing }
+    }
+
+    private fun uniqueJsonNameFast(base: String, existing: MutableSet<String>): String {
         if (!existing.contains(base)) return base
 
-        val dot = base.lastIndexOf(".json")
-        val prefix = if (dot >= 0) base.substring(0, dot) else base
+        val prefix = base.removeSuffix(".json")
         var i = 2
         while (true) {
             val candidate = "${prefix}_$i.json"
@@ -451,19 +552,11 @@ class AutoImporter(
         }
     }
 
-    private fun filterAlreadyImported(previews: List<PreviewJson>): List<PreviewJson> {
-        val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toSet()
-        return previews.filter { it.fileName !in existing }
-    }
-
     private fun prettyCap(ep: Int?): String? =
         if (ep == null || ep <= 0) null else "Cap ${ep.toString().padStart(2, '0')}"
 
     private fun prettyTemp(season: Int?): String? =
         if (season == null || season <= 0) null else "T${season.toString().padStart(2, '0')}"
-
-    private fun fileBaseName(path: String): String =
-        path.replace("\\", "/").substringAfterLast("/").substringBeforeLast(".")
 
     private fun buildDisplayTitleForItem(smbPath: String, cover: ApiCover?): String {
         val fallbackName = fileBaseName(smbPath)
@@ -476,7 +569,7 @@ class AutoImporter(
         val epFromFile = seFile?.second ?: epFileOnly
         val epFinal = epFromFile ?: cover?.episode
 
-        val isSeries = (cover?.type?.lowercase() == "series") ||
+        val isSeries = cover?.type.equals("series", ignoreCase = true) ||
                 (seasonFromFile != null) || (epFromFile != null) ||
                 (cover?.season != null) || (cover?.episode != null)
 
