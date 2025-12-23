@@ -187,8 +187,46 @@ class PlaybackVideoFragment : Fragment() {
         }
     }
 
+    private fun isTvDevice(): Boolean {
+        val uiMode = requireContext().resources.configuration.uiMode
+        val isTelevision =
+            (uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK) ==
+                    android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+
+        val pm = requireContext().packageManager
+        val hasLeanback = pm.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
+
+        return isTelevision || hasLeanback
+    }
+
     private fun setupRemoteHandlers() {
-        // ✅ root siempre puede capturar
+
+        // ✅ En celular: no forzar foco / no capturar DPAD -> scroll y gestos libres
+        if (!isTvDevice()) {
+            // importante: liberar cualquier captura previa
+            root.setOnKeyListener(null)
+            videoLayout.setOnKeyListener(null)
+            skipIntroButton.setOnKeyListener(null)
+            seekBar.setOnKeyListener(null)
+
+            // no fuerces foco en touch
+            root.isFocusable = false
+            root.isFocusableInTouchMode = false
+
+            videoLayout.isFocusable = false
+            videoLayout.isFocusableInTouchMode = false
+
+            skipIntroButton.isFocusable = false
+            skipIntroButton.isFocusableInTouchMode = false
+
+            // seekbar puede quedar focusable o no; en celular conviene NO forzarlo
+            seekBar.isFocusable = false
+            seekBar.isFocusableInTouchMode = false
+
+            return
+        }
+
+        // ✅ Android TV: mantenemos tu comportamiento actual (DPAD + foco)
         root.isFocusable = true
         root.isFocusableInTouchMode = true
         root.requestFocus()
@@ -196,7 +234,6 @@ class PlaybackVideoFragment : Fragment() {
         val keyListener = View.OnKeyListener { _, keyCode, event ->
             if (event.action != KeyEvent.ACTION_DOWN) return@OnKeyListener false
 
-            // cualquier interacción: si overlay visible, reinicia timeout
             if (controlsVisible) bumpControlsTimeout()
 
             val focused = root.findFocus()
@@ -221,19 +258,14 @@ class PlaybackVideoFragment : Fragment() {
             if (!controlsVisible) {
                 return@OnKeyListener when (keyCode) {
 
-                    // UP siempre muestra controles
                     KeyEvent.KEYCODE_DPAD_UP -> {
                         showOverlayAndFocusPlay()
                         true
                     }
 
-                    // OK:
-                    // - si skip visible => skip (sin pausar)
-                    // - si no => pausar + mostrar + foco play
                     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
                         if (skipIntroButton.visibility == View.VISIBLE) {
                             performSkipIntro()
-                            // no pausamos, y overlay sigue oculto
                             hideOverlayOnly()
                             true
                         } else {
@@ -247,7 +279,6 @@ class PlaybackVideoFragment : Fragment() {
                         }
                     }
 
-                    // LEFT/RIGHT: seek rápido sin overlay
                     KeyEvent.KEYCODE_DPAD_LEFT -> { seekByMs(-SEEK_STEP_MS); true }
                     KeyEvent.KEYCODE_DPAD_RIGHT -> { seekByMs(SEEK_STEP_MS); true }
 
@@ -275,53 +306,40 @@ class PlaybackVideoFragment : Fragment() {
                     }
                 }
 
-                else -> false // dejamos DPAD mover foco normal
-            }
-        }
-
-        // ✅ Aplicar el MISMO listener a los 3 lugares donde puede quedar el foco
-        root.setOnKeyListener(keyListener)
-        videoLayout.isFocusable = true
-        videoLayout.isFocusableInTouchMode = true
-        videoLayout.setOnKeyListener(keyListener)
-
-        skipIntroButton.setOnKeyListener(keyListener)
-
-        // ✅ DPAD directo en SeekBar: esto hace que la “pelotita” funcione con control remoto
-        seekBar.isFocusable = true
-        seekBar.isFocusableInTouchMode = true
-
-        seekBar.setOnKeyListener { _, keyCode, event ->
-            if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
-
-            // mientras tocás la barra, no queremos que se escondan controles
-            if (controlsVisible) bumpControlsTimeout()
-
-            when (keyCode) {
-                KeyEvent.KEYCODE_DPAD_LEFT -> {
-                    seekBarStep(-1)
-                    true
-                }
-                KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                    seekBarStep(+1)
-                    true
-                }
-
-                // opcional: OK sobre la barra no pausa (recomendado)
-                KeyEvent.KEYCODE_DPAD_CENTER,
-                KeyEvent.KEYCODE_ENTER -> true
-
-                // bajar oculta overlay como ya hacés
-                KeyEvent.KEYCODE_DPAD_DOWN -> {
-                    hideOverlayOnly()
-                    true
-                }
-
                 else -> false
             }
         }
 
+        // ✅ Aplicar listener a los lugares de foco
+        root.setOnKeyListener(keyListener)
+
+        videoLayout.isFocusable = true
+        videoLayout.isFocusableInTouchMode = true
+        videoLayout.setOnKeyListener(keyListener)
+
+        skipIntroButton.isFocusable = true
+        skipIntroButton.isFocusableInTouchMode = true
+        skipIntroButton.setOnKeyListener(keyListener)
+
+        // ✅ SeekBar con DPAD
+        seekBar.isFocusable = true
+        seekBar.isFocusableInTouchMode = true
+        seekBar.setOnKeyListener { _, keyCode, event ->
+            if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+
+            if (controlsVisible) bumpControlsTimeout()
+
+            when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_LEFT -> { seekBarStep(-1); true }
+                KeyEvent.KEYCODE_DPAD_RIGHT -> { seekBarStep(+1); true }
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER -> true
+                KeyEvent.KEYCODE_DPAD_DOWN -> { hideOverlayOnly(); true }
+                else -> false
+            }
+        }
     }
+
 
     private fun toggleControls() {
         if (controlsVisible) hideOverlayOnly() else showOverlayAndFocusPlay()

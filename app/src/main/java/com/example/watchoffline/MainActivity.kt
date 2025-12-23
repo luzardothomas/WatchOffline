@@ -18,6 +18,10 @@ import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+
 
 class MainActivity : FragmentActivity() {
 
@@ -34,7 +38,37 @@ class MainActivity : FragmentActivity() {
                 .replace(R.id.main_browse_fragment, MainFragment())
                 .commitNow()
         }
+
+        if (!isTvDevice()) {
+            enterImmersiveMode()
+        }
     }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && !isTvDevice()) {
+            enterImmersiveMode()
+        }
+    }
+
+    private fun isTvDevice(): Boolean {
+        val uiMode = resources.configuration.uiMode
+        val isTelevision =
+            (uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK) ==
+                    android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+
+        val hasLeanback = packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+        return isTelevision || hasLeanback
+    }
+
+    private fun enterImmersiveMode() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    }
+
 
     private fun startServer() {
         lifecycleScope.launch(Dispatchers.IO) {
