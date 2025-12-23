@@ -62,4 +62,7 @@ dependencies {
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     // SMB client
     implementation("com.hierynomus:smbj:0.11.5")
+
+    implementation("androidx.leanback:leanback:1.1.0")
+    implementation(libs.leanback)
 }

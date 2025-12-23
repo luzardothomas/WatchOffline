@@ -8,9 +8,7 @@ import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.hierynomus.msdtyp.AccessMask
-import com.hierynomus.msfscc.FileAttributes
 import com.hierynomus.mssmb2.SMB2CreateDisposition
-import com.hierynomus.mssmb2.SMB2CreateOptions
 import com.hierynomus.mssmb2.SMB2ShareAccess
 import com.hierynomus.smbj.SMBClient
 import com.hierynomus.smbj.auth.AuthenticationContext
@@ -24,7 +22,6 @@ import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
-import java.util.EnumSet
 import java.util.UUID
 import kotlin.math.min
 
@@ -50,32 +47,61 @@ class SmbGateway(private val context: Context) {
         )
     }
 
-    /** ✅ serverId determinístico a partir de host:port */
-    fun makeServerId(host: String, port: Int = 445): String =
-        UUID.nameUUIDFromBytes("$host:$port".toByteArray()).toString()
-
+    // ===== Keys =====
     private val KEY_SERVER_IDS = "server_ids_index"
     private val KEY_LAST_SERVER_ID = "last_server_id"
+    private val KEY_LAST_SHARE = "last_share"
+    private fun keyShareFor(serverId: String) = "share_$serverId"
+
+    /** ✅ serverId determinístico a partir de host:port (ej "192.168.1.33:445") */
+    fun makeServerId(host: String, port: Int = 445): String {
+        return UUID.nameUUIDFromBytes("$host:$port".toByteArray()).toString()
+    }
 
     fun listCachedServerIds(): List<String> {
         val set = prefs.getStringSet(KEY_SERVER_IDS, emptySet()) ?: emptySet()
         return set.toList().sorted()
     }
 
+    fun saveLastServerId(serverId: String) {
+        prefs.edit().putString(KEY_LAST_SERVER_ID, serverId).commit()
+    }
+
+    fun getLastServerId(): String? = prefs.getString(KEY_LAST_SERVER_ID, null)
+
+    fun saveLastShare(serverId: String, share: String) {
+        prefs.edit()
+            .putString(KEY_LAST_SHARE, share)
+            .putString(keyShareFor(serverId), share)
+            .commit()
+    }
+
+    fun getLastShare(serverId: String? = null): String? {
+        if (serverId != null) {
+            val s = prefs.getString(keyShareFor(serverId), null)
+            if (!s.isNullOrBlank()) return s
+        }
+        return prefs.getString(KEY_LAST_SHARE, null)
+    }
+
     fun saveCreds(serverId: String, host: String, creds: SmbCreds) {
         val blob = "${creds.username}\u0000${creds.password}\u0000${creds.domain.orEmpty()}\u0000$host"
         val enc = Base64.encodeToString(blob.toByteArray(StandardCharsets.UTF_8), Base64.NO_WRAP)
 
-        // 1) creds
-        prefs.edit().putString("creds_$serverId", enc).commit()
+        // ✅ 1) guardar credencial (commit inmediato)
+        prefs.edit()
+            .putString("creds_$serverId", enc)
+            .commit()
 
-        // 2) índice de ids
+        // ✅ 2) actualizar índice de serverIds (commit inmediato)
         val current = prefs.getStringSet(KEY_SERVER_IDS, emptySet())?.toMutableSet() ?: mutableSetOf()
         current.add(serverId)
-        prefs.edit().putStringSet(KEY_SERVER_IDS, current).commit()
+        prefs.edit()
+            .putStringSet(KEY_SERVER_IDS, current)
+            .commit()
 
-        // 3) último id (útil para debug)
-        prefs.edit().putString(KEY_LAST_SERVER_ID, serverId).commit()
+        // ✅ 3) recordar último serverId
+        saveLastServerId(serverId)
 
         Log.e(tag, "Saved SMB creds: serverId=$serverId host=$host user=${creds.username}")
     }
@@ -162,7 +188,7 @@ class SmbGateway(private val context: Context) {
     fun testLogin(host: String, creds: SmbCreds) {
         val (conn, sess) = connectSession(host, creds)
         try {
-            // si authenticate() pasó, el login ya está OK
+            // si authenticate() pasó, login OK
         } finally {
             try { sess.close() } catch (_: Exception) {}
             try { conn.close() } catch (_: Exception) {}
@@ -180,6 +206,7 @@ class SmbGateway(private val context: Context) {
         }
     }
 
+    // --- IP local sugerida (LAN) ---
     fun getBestLocalIpHint(): String? {
         try {
             val ifaces = NetworkInterface.getNetworkInterfaces().toList()
@@ -207,7 +234,7 @@ class SmbGateway(private val context: Context) {
         if (proxy != null) return true
         return try {
             proxy = HttpProxyServer(proxyPort).apply {
-                start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+                start(60_000, false)
             }
             Log.e(tag, "SMB proxy STARTED on 0.0.0.0:$proxyPort")
             true
@@ -226,29 +253,38 @@ class SmbGateway(private val context: Context) {
 
     fun getProxyPort(): Int = proxyPort
 
-    // --- Proxy HTTP con Range ---
+    // --- Proxy HTTP local con Range ---
     inner class HttpProxyServer(port: Int = 8081) : NanoHTTPD("0.0.0.0", port) {
 
         override fun serve(session: IHTTPSession): Response {
             return try {
                 val uri = session.uri ?: return badRequest("No URI")
+                val range = session.headers["range"]
+                Log.e(tag, "HTTP ${session.method} $uri range=$range")
 
-                // Diagnóstico
+                // ✅ endpoints de diagnóstico
                 if (uri == "/ping") {
                     return newFixedLengthResponse(Response.Status.OK, "text/plain", "ok")
                 }
                 if (uri == "/debug") {
                     val ids = listCachedServerIds()
-                    val last = prefs.getString(KEY_LAST_SERVER_ID, "") ?: ""
-                    val keys = prefs.all.keys.sorted().joinToString(",")
+                    val lastId = getLastServerId().orEmpty()
+                    val lastShare = getLastShare(lastId).orEmpty()
+
                     val sb = StringBuilder()
                     sb.append("cachedServerIds=").append(ids.joinToString(",")).append("\n")
-                    sb.append("lastServerId=").append(last).append("\n")
-                    sb.append("prefKeys=").append(keys).append("\n")
+                    sb.append("lastServerId=").append(lastId).append("\n")
+                    sb.append("lastShare=").append(lastShare).append("\n")
+
                     ids.forEach { id ->
                         val loaded = loadCreds(id)
-                        sb.append(" - ").append(id).append(" -> ").append(loaded?.first ?: "NO_HOST").append("\n")
+                        val shareFor = getLastShare(id).orEmpty()
+                        sb.append(" - ").append(id)
+                            .append(" host=").append(loaded?.first ?: "NO_HOST")
+                            .append(" share=").append(shareFor)
+                            .append("\n")
                     }
+
                     return newFixedLengthResponse(Response.Status.OK, "text/plain", sb.toString())
                 }
 
@@ -268,10 +304,7 @@ class SmbGateway(private val context: Context) {
                 val host = cached.first
                 val creds = cached.second
 
-                val rangeHeader = session.headers["range"]
-                Log.e(tag, "HTTP ${session.method} $uri range=$rangeHeader")
-
-                return streamSmbFile(host, shareName, smbPath, creds, rangeHeader)
+                streamSmbFile(host, creds, shareName, smbPath, session)
             } catch (e: Exception) {
                 Log.e(tag, "serve error", e)
                 internalError(e.message ?: "Unknown error")
@@ -280,52 +313,50 @@ class SmbGateway(private val context: Context) {
 
         private fun streamSmbFile(
             host: String,
+            creds: SmbCreds,
             shareName: String,
             smbPath: String,
-            creds: SmbCreds,
-            rangeHeader: String?
+            req: IHTTPSession
         ): Response {
 
+            val rangeHeader = req.headers["range"]
             val (conn, sess) = connectSession(host, creds)
+
             var share: DiskShare? = null
             var file: File? = null
 
             return try {
                 share = sess.connectShare(shareName) as DiskShare
 
-                // ✅ NO emptySet(): evita "Collection is empty"
+                // ✅ IMPORTANTE: no pasar sets vacíos que rompen en algunas versiones
                 file = share.openFile(
                     smbPath,
                     setOf(AccessMask.GENERIC_READ),
-                    EnumSet.noneOf(FileAttributes::class.java),
-                    EnumSet.of(SMB2ShareAccess.FILE_SHARE_READ),
+                    null, // <- en algunas builds emptySet() rompe, null es aceptado
+                    setOf(SMB2ShareAccess.FILE_SHARE_READ),
                     SMB2CreateDisposition.FILE_OPEN,
-                    EnumSet.noneOf(SMB2CreateOptions::class.java)
+                    null  // <- idem
                 )
 
                 val size = file.fileInformation.standardInformation.endOfFile
                 val (start, end) = parseRange(rangeHeader, size)
                 val contentLength = (end - start) + 1
 
-                // ✅ Stream estable: InputStream real del archivo + skip + limit
-                val base = file.getInputStream()
-                val inStream = SmbSkipLimitInputStream(base, start, contentLength)
-
+                val inStream = SmbRangedInputStream(file, start, end)
                 val mime = guessMime(smbPath)
 
-                val resp =
-                    if (rangeHeader != null) {
-                        newFixedLengthResponse(Response.Status.PARTIAL_CONTENT, mime, inStream, contentLength).apply {
-                            addHeader("Accept-Ranges", "bytes")
-                            addHeader("Content-Range", "bytes $start-$end/$size")
-                            addHeader("Content-Length", contentLength.toString())
-                        }
-                    } else {
-                        newFixedLengthResponse(Response.Status.OK, mime, inStream, size).apply {
-                            addHeader("Accept-Ranges", "bytes")
-                            addHeader("Content-Length", size.toString())
-                        }
+                val resp = if (rangeHeader != null) {
+                    newFixedLengthResponse(Response.Status.PARTIAL_CONTENT, mime, inStream, contentLength).apply {
+                        addHeader("Accept-Ranges", "bytes")
+                        addHeader("Content-Range", "bytes $start-$end/$size")
+                        addHeader("Content-Length", contentLength.toString())
                     }
+                } else {
+                    newFixedLengthResponse(Response.Status.OK, mime, inStream, size).apply {
+                        addHeader("Accept-Ranges", "bytes")
+                        addHeader("Content-Length", size.toString())
+                    }
+                }
 
                 inStream.onClose = {
                     try { file?.close() } catch (_: Exception) {}
@@ -340,13 +371,12 @@ class SmbGateway(private val context: Context) {
                 try { share?.close() } catch (_: Exception) {}
                 try { sess.close() } catch (_: Exception) {}
                 try { conn.close() } catch (_: Exception) {}
-                Log.e(tag, "serve error ctx=host=$host share=$shareName path=$smbPath", e)
-                internalError("SMB error: ${e.message}")
+                notFound("SMB error: ${e.message}")
             }
         }
 
         private fun parseRange(range: String?, total: Long): Pair<Long, Long> {
-            if (range.isNullOrBlank()) return 0L to (total - 1)
+            if (range == null) return 0L to (total - 1)
             val cleaned = range.trim().lowercase()
             if (!cleaned.startsWith("bytes=")) return 0L to (total - 1)
             val spec = cleaned.removePrefix("bytes=")
@@ -385,64 +415,69 @@ class SmbGateway(private val context: Context) {
             newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", msg)
     }
 
-    /**
-     * InputStream que:
-     * 1) hace skip exacto hasta "start"
-     * 2) solo deja leer "limit" bytes (para Range y para evitar cortar antes/after)
-     */
-    private class SmbSkipLimitInputStream(
-        private val inner: InputStream,
-        start: Long,
-        limit: Long
+    private class SmbRangedInputStream(
+        private val file: com.hierynomus.smbj.share.File,
+        private val start: Long,
+        private val end: Long
     ) : InputStream() {
 
         var onClose: (() -> Unit)? = null
-        private var remaining: Long = limit
-        private var skipped = false
-        private val startPos: Long = start
 
-        private fun ensureSkipped() {
-            if (skipped) return
-            var toSkip = startPos
-            while (toSkip > 0) {
-                val s = inner.skip(toSkip)
-                if (s <= 0) {
-                    // Si skip falla, intentamos leer y descartar
-                    val b = ByteArray(min(64 * 1024L, toSkip).toInt())
-                    val n = inner.read(b)
-                    if (n <= 0) throw java.io.EOFException("EOF while skipping to start=$startPos")
-                    toSkip -= n.toLong()
-                } else {
-                    toSkip -= s
-                }
-            }
-            skipped = true
+        private val stream: InputStream = file.getInputStream()
+        private var remaining: Long = (end - start) + 1
+
+        init {
+            // ✅ Saltar hasta el offset inicial (Long)
+            skipFully(stream, start)
         }
 
         override fun read(): Int {
-            ensureSkipped()
-            if (remaining <= 0) return -1
-            val v = inner.read()
-            if (v >= 0) remaining--
-            return v
+            val one = ByteArray(1)
+            val n = read(one, 0, 1)
+            return if (n <= 0) -1 else (one[0].toInt() and 0xFF)
         }
 
         override fun read(b: ByteArray, off: Int, len: Int): Int {
-            ensureSkipped()
             if (remaining <= 0) return -1
-            val toRead = min(len.toLong(), remaining).toInt()
-            val n = inner.read(b, off, toRead)
-            if (n > 0) remaining -= n.toLong()
+            if (len == 0) return 0
+
+            val toRead = minOf(len.toLong(), remaining).toInt()
+            val n = stream.read(b, off, toRead)
+            if (n <= 0) return -1
+
+            remaining -= n.toLong()
             return n
         }
 
         override fun close() {
             try {
-                try { inner.close() } catch (_: Exception) {}
+                try { stream.close() } catch (_: Exception) {}
                 onClose?.invoke()
             } finally {
                 super.close()
             }
         }
+
+        private fun skipFully(input: InputStream, bytes: Long) {
+            var left = bytes
+            val buf = ByteArray(64 * 1024)
+
+            while (left > 0) {
+                val skipped = input.skip(left)
+                if (skipped > 0) {
+                    left -= skipped
+                    continue
+                }
+
+                // Algunos streams devuelven skip=0 aunque no estén en EOF.
+                // Entonces consumimos leyendo.
+                val toRead = minOf(buf.size.toLong(), left).toInt()
+                val n = input.read(buf, 0, toRead)
+                if (n < 0) throw java.io.EOFException("EOF while skipping $bytes bytes")
+                left -= n.toLong()
+            }
+        }
     }
+
 }
+

@@ -1,4 +1,3 @@
-// MainFragment.kt
 package com.example.watchoffline
 
 import android.app.Activity
@@ -28,7 +27,15 @@ import com.bumptech.glide.request.target.SimpleTarget
 import com.bumptech.glide.request.transition.Transition
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
-import java.util.*
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.LinkedHashMap
+import java.util.Timer
+import java.util.TimerTask
+import java.util.UUID
+import androidx.leanback.widget.Presenter
+import androidx.leanback.widget.PresenterSelector
+
 
 class MainFragment : BrowseSupportFragment() {
 
@@ -51,14 +58,13 @@ class MainFragment : BrowseSupportFragment() {
 
         jsonDataManager.loadData(requireContext())
 
-        // ✅ usar applicationContext para prefs/crypto + evitar leaks
-        smbGateway = SmbGateway(requireContext().applicationContext)
-
-        // ✅ arranca proxy SMB en 8081 (no choca con tu server 8080)
+        smbGateway = SmbGateway(requireContext())
         val ok = smbGateway.ensureProxyStarted(8081)
-        Log.e(TAG, "SMB proxy started? $ok (port=${smbGateway.getProxyPort()})")
+        Log.e(TAG, "SMB proxy started? $ok port=${smbGateway.getProxyPort()}")
+
 
         prepareBackgroundManager()
+        resetBackgroundToDefault()
         setupUIElements()
         loadRows()
         setupEventListeners()
@@ -67,12 +73,8 @@ class MainFragment : BrowseSupportFragment() {
     override fun onDestroy() {
         super.onDestroy()
         mBackgroundTimer?.cancel()
-
-        // ✅ SMB
         try { smbGateway.stopDiscovery() } catch (_: Exception) {}
-        // no hace falta frenar el proxy acá si querés que quede vivo mientras la app está abierta,
-        // pero si querés cortarlo:
-        // try { smbGateway.stopProxy() } catch (_: Exception) {}
+        try { smbGateway.stopProxy() } catch (_: Exception) {}
     }
 
     private fun prepareBackgroundManager() {
@@ -86,7 +88,7 @@ class MainFragment : BrowseSupportFragment() {
 
     private fun setupUIElements() {
         title = getString(R.string.browse_title)
-        headersState = BrowseSupportFragment.HEADERS_ENABLED
+        headersState = HEADERS_ENABLED
         isHeadersTransitionOnBackEnabled = true
         brandColor = ContextCompat.getColor(requireContext(), R.color.fastlane_background)
         searchAffordanceColor = ContextCompat.getColor(requireContext(), R.color.search_opaque)
@@ -98,27 +100,28 @@ class MainFragment : BrowseSupportFragment() {
 
         // JSON Importados
         jsonDataManager.getImportedJsons().forEach { json ->
-            ArrayObjectAdapter(cardPresenter).apply {
+            val rowAdapter = ArrayObjectAdapter(cardPresenter).apply {
                 json.videos.forEach { add(it.toMovie()) }
-                rowsAdapter.add(
-                    ListRow(
-                        HeaderItem(json.fileName.hashCode().toLong(), json.fileName),
-                        this
-                    )
-                )
             }
+            rowsAdapter.add(
+                ListRow(
+                    HeaderItem(json.fileName.hashCode().toLong(), json.fileName),
+                    rowAdapter
+                )
+            )
         }
 
         // Preferencias
-        ArrayObjectAdapter(GridItemPresenter()).apply {
+        val prefAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
             add(getString(R.string.import_json))
             add(getString(R.string.erase_json))
-
-            // ✅ SMB
+            add("Erase ALL JSON")
             add("Connect SMB")
 
-            rowsAdapter.add(ListRow(HeaderItem(-1, "PREFERENCES"), this))
+            // ✅ NUEVO
+            add("Importar automáticamente")
         }
+        rowsAdapter.add(ListRow(HeaderItem(-1, "PREFERENCES"), prefAdapter))
 
         adapter = rowsAdapter
     }
@@ -136,7 +139,6 @@ class MainFragment : BrowseSupportFragment() {
         setOnSearchClickedListener {
             Toast.makeText(requireContext(), "Implement your own in-app search", Toast.LENGTH_LONG).show()
         }
-
         onItemViewClickedListener = ItemViewClickedListener()
         onItemViewSelectedListener = ItemViewSelectedListener()
     }
@@ -170,13 +172,41 @@ class MainFragment : BrowseSupportFragment() {
             when (item) {
                 getString(R.string.import_json) -> openFilePicker()
                 getString(R.string.erase_json) -> showDeleteDialog()
+                "Erase ALL JSON" -> showDeleteAllDialog()
                 "Connect SMB" -> openSmbConnectFlow()
+
+                // ✅ NUEVO
+                "Importar automáticamente" -> autoImportPreviewFromSmb()
+
                 else -> Toast.makeText(requireContext(), item, Toast.LENGTH_SHORT).show()
             }
         }
     }
 
-    // ✅ SMB: buscar SMBs + fallback manual
+    private fun showDeleteAllDialog() {
+        val count = jsonDataManager.getImportedJsons().size
+        if (count == 0) {
+            Toast.makeText(requireContext(), "No hay JSONs para borrar", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        AlertDialog.Builder(requireContext())
+            .setTitle("Eliminar TODOS los JSON")
+            .setMessage("Vas a eliminar $count JSON importados. ¿Seguro?")
+            .setPositiveButton("Eliminar todo") { _, _ ->
+                jsonDataManager.removeAll(requireContext())
+                refreshUI()
+                resetBackgroundToDefault()
+                Toast.makeText(requireContext(), "JSONs eliminados ✅", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+
+    // =========================
+    // ✅ SMB CONNECT FLOW
+    // =========================
     private fun openSmbConnectFlow() {
         Toast.makeText(requireContext(), "Buscando SMBs en la red...", Toast.LENGTH_SHORT).show()
 
@@ -200,20 +230,21 @@ class MainFragment : BrowseSupportFragment() {
             }
 
             val servers = found.values.toList()
-            val labels = servers.map { "${it.name}  (${it.host}:${it.port})" }.toTypedArray()
+            val labels = servers.map { "${it.name} (${it.host}:${it.port})" }.toTypedArray()
 
             AlertDialog.Builder(requireContext())
                 .setTitle("SMB encontrados")
-                .setItems(labels) { _, which -> showCredentialsDialog(servers[which]) }
+                .setItems(labels) { _, which ->
+                    showCredentialsDialog(servers[which])
+                }
                 .setNegativeButton("Cancelar", null)
                 .show()
         }, 2000)
     }
 
-    // ✅ SMB: manual
     private fun showManualSmbDialog() {
         val hostInput = EditText(requireContext()).apply {
-            hint = "IP o hostname (ej: 192.168.1.50)"
+            hint = "IP o hostname (ej: 192.168.1.33)"
         }
 
         AlertDialog.Builder(requireContext())
@@ -224,7 +255,7 @@ class MainFragment : BrowseSupportFragment() {
                 if (host.isBlank()) return@setPositiveButton
 
                 val server = SmbGateway.SmbServer(
-                    id = java.util.UUID.nameUUIDFromBytes("$host:445".toByteArray()).toString(),
+                    id = UUID.nameUUIDFromBytes("$host:445".toByteArray()).toString(),
                     name = host,
                     host = host,
                     port = 445
@@ -235,7 +266,6 @@ class MainFragment : BrowseSupportFragment() {
             .show()
     }
 
-    // ✅ SMB: credenciales + share + cache (EN BACKGROUND)
     private fun showCredentialsDialog(server: SmbGateway.SmbServer) {
         val layout = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
@@ -245,11 +275,11 @@ class MainFragment : BrowseSupportFragment() {
         val userInput = EditText(requireContext()).apply { hint = "Usuario" }
         val passInput = EditText(requireContext()).apply {
             hint = "Contraseña"
-            inputType =
-                android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                    android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
-        val domainInput = EditText(requireContext()).apply { hint = "Dominio (opcional, ej: WORKGROUP)" }
-        val shareInput = EditText(requireContext()).apply { hint = "Share (ej: pelis, Videos, Public)" }
+        val domainInput = EditText(requireContext()).apply { hint = "Dominio (opcional)" }
+        val shareInput = EditText(requireContext()).apply { hint = "Share (ej: pelis)" }
 
         layout.addView(userInput)
         layout.addView(passInput)
@@ -259,65 +289,53 @@ class MainFragment : BrowseSupportFragment() {
         val dialog = AlertDialog.Builder(requireContext())
             .setTitle("Login SMB: ${server.host}")
             .setView(layout)
+            .setPositiveButton("Conectar", null) // no autoclose
             .setNegativeButton("Cancelar", null)
-            .setPositiveButton("Conectar", null) // lo manejamos manual
             .create()
 
         dialog.setOnShowListener {
-            val btn = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-            btn.setOnClickListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val user = userInput.text.toString().trim()
                 val pass = passInput.text.toString()
                 val domain = domainInput.text.toString().trim().ifBlank { null }
-                val shareName = shareInput.text.toString().trim()
+                val share = shareInput.text.toString().trim()
 
-                // ✅ TU REQUERIMIENTO: si falta algo, igual cerramos el diálogo
                 if (user.isBlank()) {
-                    dialog.dismiss()
                     Toast.makeText(requireContext(), "Usuario requerido", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
-                if (shareName.isBlank()) {
-                    dialog.dismiss()
+                if (share.isBlank()) {
                     Toast.makeText(requireContext(), "Share requerido (ej: pelis)", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
 
-                btn.isEnabled = false
                 val creds = SmbGateway.SmbCreds(user, pass, domain)
 
                 Thread {
                     try {
-                        Log.e(TAG, "SMB CONNECT start host=${server.host}:${server.port} serverId=${server.id} share=$shareName")
-
                         smbGateway.testLogin(server.host, creds)
-                        smbGateway.testShareAccess(server.host, creds, shareName)
-                        smbGateway.saveCreds(server.id, server.host, creds)
+                        smbGateway.testShareAccess(server.host, creds, share)
 
-                        val idsAfter = smbGateway.listCachedServerIds()
-                        Log.e(TAG, "SMB CONNECT OK. cachedServerIds now = $idsAfter")
+                        smbGateway.saveCreds(server.id, server.host, creds)
+                        smbGateway.saveLastShare(server.id, share)
 
                         requireActivity().runOnUiThread {
-                            // ✅ cerrar el diálogo apenas conectó
+                            Toast.makeText(requireContext(), "SMB conectado ✅", Toast.LENGTH_LONG).show()
                             dialog.dismiss()
-
-                            Toast.makeText(requireContext(), "SMB conectado y cacheado ✅", Toast.LENGTH_LONG).show()
 
                             AlertDialog.Builder(requireContext())
                                 .setTitle("SMB conectado ✅")
                                 .setMessage(
-                                    "serverId:\n${server.id}\n\n" +
-                                            "Probá:\nhttp://127.0.0.1:8081/debug\n\n" +
-                                            "Formato videoSrc:\nhttp://127.0.0.1:8081/smb/<serverId>/<share>/<ruta>"
+                                    "Probá debug:\nhttp://127.0.0.1:8081/debug\n\n" +
+                                            "lastServerId=${smbGateway.getLastServerId()}\n" +
+                                            "lastShare=${smbGateway.getLastShare(server.id)}"
                                 )
                                 .setPositiveButton("OK", null)
                                 .show()
                         }
                     } catch (e: Exception) {
-                        Log.e(TAG, "SMB CONNECT FAILED", e)
+                        Log.e(TAG, "SMB connect FAILED", e)
                         requireActivity().runOnUiThread {
-                            // ✅ también cerramos el diálogo si falla (para que siempre se cierre)
-                            dialog.dismiss()
                             Toast.makeText(requireContext(), "Error SMB: ${e.message}", Toast.LENGTH_LONG).show()
                         }
                     }
@@ -328,8 +346,240 @@ class MainFragment : BrowseSupportFragment() {
         dialog.show()
     }
 
+    // =========================
+    // ✅ AUTO IMPORT (PREVIEW SMB)
+    // =========================
+
+    private data class ApiCover(
+        val type: String? = null,
+        val id: String? = null,
+        val dir: String? = null,
+        val season: Int? = null,
+        val episode: Int? = null,
+        val skipToSecond: Int? = null,
+        val file: String? = null,
+        val url: String? = null
+    )
+
+    private fun autoImportPreviewFromSmb() {
+        Toast.makeText(requireContext(), "Analizando SMB... (máx 10 videos)", Toast.LENGTH_LONG).show()
+
+        Thread {
+            try {
+                val serverId = smbGateway.getLastServerId()
+                if (serverId.isNullOrBlank()) {
+                    uiToast("No hay SMB guardado (lastServerId vacío). Conectá SMB primero.")
+                    return@Thread
+                }
+
+                val share = smbGateway.getLastShare(serverId)
+                if (share.isNullOrBlank()) {
+                    uiToast("No hay share guardado (lastShare vacío). Re-conectá SMB.")
+                    return@Thread
+                }
+
+                val cached = smbGateway.loadCreds(serverId)
+                if (cached == null) {
+                    uiToast("No hay credenciales cacheadas para serverId=$serverId")
+                    return@Thread
+                }
+
+                val host = cached.first
+                val creds = cached.second
+
+                val mp4s = smbListMp4(host, creds, share, max = 10)
+
+                val results = mutableListOf<String>()
+                for (p in mp4s) {
+                    val q = buildQueryForPath(p)
+                    val cover = fetchCoverFromApi(q)
+
+                    val title = cover?.id?.takeIf { it.isNotBlank() } ?: p.substringAfterLast("/").substringBeforeLast(".")
+                    val img = cover?.url.orEmpty()
+                    val skip = cover?.skipToSecond ?: 0
+
+                    val videoSrc = "http://127.0.0.1:8081/smb/$serverId/$share/${smbGateway.encodePath(p)}"
+
+                    val json = """
+[
+  {
+    "title": ${jsonQuote(title)},
+    "skipToSecond": $skip,
+    "imgBig": ${jsonQuote(img)},
+    "imgSml": ${jsonQuote(img)},
+    "videoSrc": ${jsonQuote(videoSrc)}
+  }
+]
+""".trim()
+
+                    results.add("q=$q\nmp4=$p\n\n$json")
+                }
+
+                requireActivity().runOnUiThread {
+                    if (results.isEmpty()) {
+                        AlertDialog.Builder(requireContext())
+                            .setTitle("Importar automáticamente")
+                            .setMessage("No encontré .mp4 en el share '$share'.")
+                            .setPositiveButton("OK", null)
+                            .show()
+                    } else {
+                        val labels = results.mapIndexed { idx, txt ->
+                            val first = txt.lineSequence().firstOrNull().orEmpty()
+                            "${idx + 1}) $first"
+                        }.toTypedArray()
+
+                        AlertDialog.Builder(requireContext())
+                            .setTitle("Preview JSONs (SMB) - ${results.size} items")
+                            .setItems(labels) { _, which ->
+                                AlertDialog.Builder(requireContext())
+                                    .setTitle("JSON a importar (preview)")
+                                    .setMessage(results[which])
+                                    .setPositiveButton("OK", null)
+                                    .show()
+                            }
+                            .setPositiveButton("Cerrar", null)
+                            .show()
+                    }
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "autoImportPreviewFromSmb failed", e)
+                uiToast("Error: ${e.message}")
+            }
+        }.start()
+    }
+
+    /** Heurística simple:
+     *  - si hay ".../<serie>/<temporada>/archivo.mp4" y temporada parece t1/s01/season1 -> q="serie temporada"
+     *  - si no -> q=filename sin extensión
+     */
+    private fun buildQueryForPath(path: String): String {
+        val clean = path.replace("\\", "/").trim('/')
+        val parts = clean.split("/").filter { it.isNotBlank() }
+
+        fun norm(s: String): String =
+            s.lowercase().replace(Regex("""\s+"""), " ").trim()
+
+        if (parts.size >= 3) {
+            val parent2 = norm(parts[parts.size - 3])
+            val parent1 = norm(parts[parts.size - 2])
+
+            val looksSeason =
+                parent1.matches(Regex("""(t|temp|season)\s*\d+""")) ||
+                        parent1.matches(Regex("""s\d{1,2}"""))
+
+            return if (looksSeason) {
+                "${parent2} ${parent1}".replace(" ", "+")
+            } else {
+                norm(parts.last().substringBeforeLast(".")).replace(" ", "+")
+            }
+        }
+
+        return norm(parts.last().substringBeforeLast(".")).replace(" ", "+")
+    }
+
+    private fun smbListMp4(
+        host: String,
+        creds: SmbGateway.SmbCreds,
+        shareName: String,
+        max: Int = 10
+    ): List<String> {
+        val out = mutableListOf<String>()
+
+        val client = com.hierynomus.smbj.SMBClient()
+        val conn = client.connect(host)
+        val auth = com.hierynomus.smbj.auth.AuthenticationContext(
+            creds.username,
+            creds.password.toCharArray(),
+            creds.domain
+        )
+        val sess = conn.authenticate(auth)
+        val share = sess.connectShare(shareName) as com.hierynomus.smbj.share.DiskShare
+
+        try {
+            fun isDir(attrs: Any?): Boolean {
+                val maskLong = com.hierynomus.msfscc.FileAttributes.FILE_ATTRIBUTE_DIRECTORY.value.toLong()
+                val maskInt = maskLong.toInt()
+
+                return when (attrs) {
+                    is Set<*> -> attrs.contains(com.hierynomus.msfscc.FileAttributes.FILE_ATTRIBUTE_DIRECTORY)
+                    is java.util.EnumSet<*> -> attrs.contains(com.hierynomus.msfscc.FileAttributes.FILE_ATTRIBUTE_DIRECTORY)
+                    is Long -> (attrs and maskLong) != 0L
+                    is Int -> (attrs and maskInt) != 0
+                    else -> false
+                }
+            }
 
 
+            fun walk(dir: String) {
+                if (out.size >= max) return
+
+                val listing = share.list(dir)
+                for (f in listing) {
+                    if (out.size >= max) return
+
+                    val name = f.fileName ?: continue
+                    if (name == "." || name == "..") continue
+
+                    val childPath = if (dir.isBlank()) name else "$dir/$name"
+                    val directory = isDir(f.fileAttributes)
+
+                    if (directory) {
+                        walk(childPath)
+                    } else {
+                        if (name.lowercase().endsWith(".mp4")) {
+                            out.add(childPath)
+                        }
+                    }
+                }
+            }
+
+            walk("")
+            return out
+        } finally {
+            try { share.close() } catch (_: Exception) {}
+            try { sess.close() } catch (_: Exception) {}
+            try { conn.close() } catch (_: Exception) {}
+        }
+    }
+
+    private fun fetchCoverFromApi(q: String): ApiCover? {
+        val base = "https://api-watchoffline.luzardo-thomas.workers.dev/cover?q="
+        val full = base + java.net.URLEncoder.encode(q.replace("+", " "), "UTF-8")
+
+        val conn = (URL(full).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 8000
+            readTimeout = 8000
+        }
+
+        return try {
+            val code = conn.responseCode
+            if (code != 200) return null
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            Gson().fromJson(body, ApiCover::class.java)
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun jsonQuote(s: String): String {
+        val escaped = s
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+        return "\"$escaped\""
+    }
+
+    private fun uiToast(msg: String) {
+        requireActivity().runOnUiThread {
+            Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // =========================
+    // JSON IMPORT
+    // =========================
     private fun openFilePicker() {
         Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
@@ -370,11 +620,29 @@ class MainFragment : BrowseSupportFragment() {
         }
     }
 
+    private fun resetBackgroundToDefault() {
+        mBackgroundTimer?.cancel()
+        mBackgroundTimer = null
+        mBackgroundUri = null
+
+        // ✅ fuerza tu imagen default real (evita el degradado de Leanback)
+        mBackgroundManager.drawable = mDefaultBackground
+    }
+
+
+
     private fun refreshUI() {
         jsonDataManager.loadData(requireContext())
         loadRows()
-        startBackgroundTimer()
+
+        val hasAnyMovie = jsonDataManager.getImportedJsons().any { it.videos.isNotEmpty() }
+        if (!hasAnyMovie) {
+            resetBackgroundToDefault()
+        } else {
+            startBackgroundTimer()
+        }
     }
+
 
     private inner class ItemViewSelectedListener : OnItemViewSelectedListener {
         override fun onItemSelected(
@@ -383,12 +651,19 @@ class MainFragment : BrowseSupportFragment() {
             rowViewHolder: RowPresenter.ViewHolder,
             row: Row
         ) {
-            (item as? Movie)?.let {
-                mBackgroundUri = it.backgroundImageUrl
-                startBackgroundTimer()
+            when (item) {
+                is Movie -> {
+                    mBackgroundUri = item.backgroundImageUrl
+                    startBackgroundTimer()
+                }
+                else -> {
+                    // ✅ cualquier cosa que NO sea Movie (ej: Preferences) vuelve al fondo default
+                    resetBackgroundToDefault()
+                }
             }
         }
     }
+
 
     private fun updateBackground(uri: String?) {
         Glide.with(requireActivity())
@@ -440,12 +715,13 @@ class MainFragment : BrowseSupportFragment() {
         private const val BACKGROUND_UPDATE_DELAY = 300
         private const val GRID_ITEM_WIDTH = 200
         private const val GRID_ITEM_HEIGHT = 200
-        private const val NUM_ROWS = 6
-        private const val NUM_COLS = 15
     }
 }
 
-// Clases externas
+// =========================
+// DATA CLASSES + MANAGER
+// (Si ya existen en otro archivo, NO los dupliques)
+// =========================
 data class VideoItem(
     val title: String,
     val skipToSecond: Int,
@@ -473,6 +749,12 @@ class JsonDataManager {
         importedJsons.removeAll { it.fileName == fileName }
         saveData(context)
     }
+
+    fun removeAll(context: Context) {
+        importedJsons.clear()
+        saveData(context)
+    }
+
 
     fun getImportedJsons(): List<ImportedJson> = importedJsons.toList()
 

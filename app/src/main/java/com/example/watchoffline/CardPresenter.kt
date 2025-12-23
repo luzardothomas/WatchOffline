@@ -6,6 +6,9 @@ import androidx.leanback.widget.Presenter
 import androidx.core.content.ContextCompat
 import android.util.Log
 import android.view.ViewGroup
+import android.widget.TextView
+import android.text.TextUtils
+import android.view.View
 
 import com.bumptech.glide.Glide
 import kotlin.properties.Delegates
@@ -18,6 +21,44 @@ class CardPresenter : Presenter() {
     private var mDefaultCardImage: Drawable? = null
     private var sSelectedBackgroundColor: Int by Delegates.notNull()
     private var sDefaultBackgroundColor: Int by Delegates.notNull()
+
+
+    private fun findTitleTextView(cardView: View): TextView? {
+        val ctx = cardView.context
+
+        // androidx
+        var id = ctx.resources.getIdentifier("title_text", "id", "androidx.leanback")
+        if (id != 0) return cardView.findViewById(id)
+
+        // support old
+        id = ctx.resources.getIdentifier("title_text", "id", "android.support.v17.leanback")
+        if (id != 0) return cardView.findViewById(id)
+
+        // fallback: recorrer hijos y agarrar el primer TextView que parezca ser el título
+        fun dfs(v: View): TextView? {
+            if (v is TextView) return v
+            if (v is ViewGroup) {
+                for (i in 0 until v.childCount) {
+                    val r = dfs(v.getChildAt(i))
+                    if (r != null) return r
+                }
+            }
+            return null
+        }
+        return dfs(cardView)
+    }
+
+    private fun forceNoEllipsize(titleTv: TextView?) {
+        titleTv ?: return
+        titleTv.apply {
+            isSingleLine = false
+            setHorizontallyScrolling(false)
+            maxLines = 5
+            ellipsize = null
+            // por si quedó algo pegado:
+            breakStrategy = android.text.Layout.BREAK_STRATEGY_SIMPLE
+        }
+    }
 
     override fun onCreateViewHolder(parent: ViewGroup): Presenter.ViewHolder {
         Log.d(TAG, "onCreateViewHolder")
@@ -37,6 +78,20 @@ class CardPresenter : Presenter() {
         cardView.isFocusable = true
         cardView.isFocusableInTouchMode = true
         updateCardBackgroundColor(cardView, false)
+
+        // ✅ Forzar título multilínea y sin "..."
+        val titleId = parent.context.resources.getIdentifier("title_text", "id", "androidx.leanback")
+        val titleTv = cardView.findViewById<TextView>(titleId)
+
+        titleTv?.apply {
+            isSingleLine = false
+            maxLines = 5                      // subilo a 3 si querés
+            ellipsize = null                  // <- esto saca el "..."
+            setHorizontallyScrolling(false)
+        }
+
+
+
         return Presenter.ViewHolder(cardView)
     }
 
@@ -48,6 +103,9 @@ class CardPresenter : Presenter() {
         if (movie.cardImageUrl != null) {
             cardView.titleText = movie.title
             cardView.contentText = movie.studio
+
+            forceNoEllipsize(findTitleTextView(cardView))
+
             cardView.setMainImageDimensions(CARD_WIDTH, CARD_HEIGHT)
             Glide.with(viewHolder.view.context)
                 .load(movie.cardImageUrl)
