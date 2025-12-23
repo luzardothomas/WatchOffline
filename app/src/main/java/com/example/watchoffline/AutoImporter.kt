@@ -2,9 +2,13 @@ package com.example.watchoffline
 
 import android.content.Context
 import android.util.Log
+import androidx.annotation.Keep
 import com.google.gson.Gson
-import java.net.URLEncoder
+import com.google.gson.annotations.SerializedName
 import com.hierynomus.msfscc.FileAttributes
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 
 class AutoImporter(
     private val context: Context,
@@ -17,7 +21,7 @@ class AutoImporter(
     private data class RawItem(
         val serverId: String,
         val share: String,
-        val smbPath: String,   // path dentro del share (ej "Movies/Matrix.mkv")
+        val smbPath: String,
         val title: String,
         val img: String,
         val skip: Int,
@@ -30,26 +34,27 @@ class AutoImporter(
         val debug: String
     )
 
+    @Keep
     private data class ApiCover(
-        val type: String? = null,
-        val id: String? = null,
-        val dir: String? = null,
-        val season: Int? = null,
-        val episode: Int? = null,
-        val skipToSecond: Int? = null,
-        val file: String? = null,
-        val url: String? = null
+        @SerializedName("type") val type: String? = null,
+        @SerializedName("id") val id: String? = null,
+        @SerializedName("dir") val dir: String? = null,
+        @SerializedName("season") val season: Int? = null,
+        @SerializedName("episode") val episode: Int? = null,
+
+        // ✅ la API manda "skipSeconds"
+        @SerializedName("skipSeconds") val skipToSecond: Int? = null,
+
+        @SerializedName("file") val file: String? = null,
+        @SerializedName("url") val url: String? = null
     )
 
     private val coverCache = mutableMapOf<String, ApiCover?>()
 
-    // ✅ fallback seguro para loaders (Glide / Coil / Picasso)
-    private fun defaultPosterUrl(): String =
-        "file:///android_res/drawable/movie.png"
-
+    // ✅ si no hay url, guardamos "" y la UI muestra el drawable
     private fun resolveCoverUrl(apiUrl: String?): String {
         val u = apiUrl?.trim()
-        return if (!u.isNullOrEmpty()) u else defaultPosterUrl()
+        return if (!u.isNullOrEmpty()) u else ""
     }
 
 
@@ -62,10 +67,8 @@ class AutoImporter(
             try {
                 toast("Importando desde SMB…")
 
-                // ✅ Proxy debe estar prendido
                 smbGateway.ensureProxyStarted(proxyPort)
 
-                // ✅ Multi SMB: agarramos TODOS los servers guardados
                 val serverIds = smbGateway.listCachedServerIds()
                 if (serverIds.isEmpty()) {
                     onError("No hay SMB guardados. Usá 'Conectarse al SMB' y guardá al menos uno.")
@@ -92,23 +95,27 @@ class AutoImporter(
                         val cover = fetchCoverFromApiCached(q)
 
                         val url = buildProxyUrl(serverId, share, smbPath)
-
-                        // ✅ ÚNICO FIX: si cover.url viene vacía -> usar drawable movie.png
                         val finalImg = resolveCoverUrl(cover?.url)
+                        val displayTitle = buildDisplayTitleForItem(smbPath, cover)
+
+                        // ✅ SKIP:
+                        // - Movies: siempre 0
+                        // - Series: usar lo que viene de la API (skipSeconds -> skipToSecond)
+                        val skipFinal = if (cover?.type?.lowercase() == "series") {
+                            cover.skipToSecond ?: 0
+                        } else 0
 
                         allRawItems.add(
                             RawItem(
                                 serverId = serverId,
                                 share = share,
                                 smbPath = smbPath,
-                                title = cover?.id
-                                    ?: smbPath.substringAfterLast("/").substringBeforeLast("."),
+                                title = displayTitle,
                                 img = finalImg,
-                                skip = cover?.skipToSecond ?: 0,
+                                skip = skipFinal,
                                 videoSrc = url
                             )
                         )
-
                     }
                 }
 
@@ -117,7 +124,6 @@ class AutoImporter(
                     return@Thread
                 }
 
-                // ================= SERIES vs MOVIES =================
                 val seriesMap = linkedMapOf<Pair<String, Int>, MutableList<RawItem>>()
                 val movies = mutableListOf<RawItem>()
 
@@ -126,7 +132,6 @@ class AutoImporter(
                         .split("/")
                         .filter { it.isNotBlank() }
 
-                    // Esperado: .../<serie>/<temporada>/<archivo>
                     if (parts.size >= 3) {
                         val series = parts[parts.size - 3]
                         val season = parseSeasonFromFolderOrName(parts[parts.size - 2])
@@ -148,11 +153,10 @@ class AutoImporter(
 
                     val videos = items.sortedWith(
                         compareBy<RawItem>(
-                            { parseSeasonEpisode(it.smbPath)?.second ?: Int.MAX_VALUE },
+                            { parseEpisodeForSort(it.smbPath) ?: Int.MAX_VALUE },
                             { it.smbPath.lowercase() }
                         )
                     ).map { r ->
-                        // r.img ya viene sanitizado con fallback
                         VideoItem(r.title, r.skip, r.img, r.img, r.videoSrc)
                     }
 
@@ -165,7 +169,7 @@ class AutoImporter(
                     )
                 }
 
-                // Movies → agrupar por saga (carpeta padre)
+                // Movies → agrupar por saga
                 val sagaMap = linkedMapOf<String, MutableList<RawItem>>()
                 for (m in movies) {
                     sagaMap.getOrPut(inferSagaNameFromPath(m.smbPath)) { mutableListOf() }.add(m)
@@ -181,7 +185,7 @@ class AutoImporter(
                             { it.smbPath.lowercase() }
                         )
                     ).map { r ->
-                        // r.img ya viene sanitizado con fallback
+                        // ✅ movies ya vienen con skip=0
                         VideoItem(r.title, r.skip, r.img, r.img, r.videoSrc)
                     }
 
@@ -223,15 +227,13 @@ class AutoImporter(
     }
 
     // =========================
-    // ✅ LISTAR VIDEOS SMB (recursivo)
+    // SMB listing
     // =========================
 
     private fun listSmbVideos(serverId: String, shareName: String): List<String> {
         val out = mutableListOf<String>()
 
-        val videoExt = setOf(
-            "mp4","mkv","avi","webm","mov","flv","mpg","mpeg","m4v","ts","3gp","wmv"
-        )
+        val videoExt = setOf("mp4","mkv","avi","webm","mov","flv","mpg","mpeg","m4v","ts","3gp","wmv")
 
         fun isVideo(name: String): Boolean {
             val ext = name.substringAfterLast(".", "").lowercase()
@@ -265,11 +267,7 @@ class AutoImporter(
                     val attrs = f.fileAttributes.toLong()
                     val isDir = (attrs and FileAttributes.FILE_ATTRIBUTE_DIRECTORY.value.toLong()) != 0L
 
-                    if (isDir) {
-                        walk(full)
-                    } else {
-                        if (isVideo(name)) out.add(full.replace("\\", "/"))
-                    }
+                    if (isDir) walk(full) else if (isVideo(name)) out.add(full.replace("\\", "/"))
                 }
             }
             walk("")
@@ -291,34 +289,55 @@ class AutoImporter(
     // =========================
 
     private fun fetchCoverFromApiCached(q: String): ApiCover? {
-        if (coverCache.containsKey(q)) return coverCache[q]
-        val cover = try { fetchCoverFromApi(q) } catch (_: Exception) { null }
+        coverCache[q]?.let { return it }
+
+        val cover = runCatching {
+            fetchCoverFromApi(q)
+        }.getOrNull()
+
         coverCache[q] = cover
         return cover
     }
 
+
     private fun fetchCoverFromApi(q: String): ApiCover? {
         val base = "https://api-watchoffline.luzardo-thomas.workers.dev/cover?q="
         val full = base + URLEncoder.encode(q.replace("+", " "), "UTF-8")
-        val conn = (java.net.URL(full).openConnection() as java.net.HttpURLConnection).apply {
+
+        val conn = (URL(full).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 8000
             readTimeout = 8000
+            setRequestProperty("Accept", "application/json")
         }
+
         return try {
-            if (conn.responseCode != 200) return null
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            val code = conn.responseCode
+            if (code !in 200..299) return null
+
+            val body = conn.inputStream
+                ?.bufferedReader()
+                ?.use { it.readText() }
+                .orEmpty()
+
+            if (body.isBlank()) return null
+
             Gson().fromJson(body, ApiCover::class.java)
+        } catch (_: Exception) {
+            null
         } finally {
             conn.disconnect()
         }
     }
 
+
+
     // =========================
-    // HELPERS
+    // Helpers (igual a lo que ya venías usando)
     // =========================
 
     private fun pad2(n: Int): String = n.toString().padStart(2, '0')
+    private fun pad3(n: Int): String = n.toString().padStart(3, '0')
 
     private fun normalizeName(s: String): String =
         s.trim().replace('_', ' ')
@@ -335,22 +354,37 @@ class AutoImporter(
         return null
     }
 
-    private fun parseSeasonEpisode(path: String): Pair<Int, Int>? {
+    private fun parseSeasonEpisodeFromFilename(path: String): Pair<Int, Int>? {
         val clean = path.replace("\\", "/")
         val file = clean.substringAfterLast("/")
-        val fileNoExt = file.substringBeforeLast(".", file)
+        val name = file.substringBeforeLast(".", file)
 
-        Regex("""(?i)s(\d{1,2})\s*e(\d{1,2})""").find(fileNoExt)?.let {
-            return it.groupValues[1].toInt() to it.groupValues[2].toInt()
-        }
-        Regex("""(?i)\b(\d{1,2})x(\d{1,3})\b""").find(fileNoExt)?.let {
-            return it.groupValues[1].toInt() to it.groupValues[2].toInt()
-        }
-        Regex("""(?i)s(\d{1,2})[^\d]{0,3}(\d{1,2})""").find(fileNoExt)?.let {
-            return it.groupValues[1].toInt() to it.groupValues[2].toInt()
-        }
+        Regex("""(?i)\bs(\d{1,2})\s*[._\- ]*\s*e(\d{1,3})\b""")
+            .find(name)?.let { return it.groupValues[1].toInt() to it.groupValues[2].toInt() }
+
+        Regex("""(?i)\b(\d{1,2})\s*x\s*(\d{1,3})\b""")
+            .find(name)?.let { return it.groupValues[1].toInt() to it.groupValues[2].toInt() }
+
         return null
     }
+
+    private fun parseEpisodeOnlyFromFilename(path: String): Int? {
+        val clean = path.replace("\\", "/")
+        val file = clean.substringAfterLast("/")
+        val name = file.substringBeforeLast(".", file)
+
+        Regex("""(?i)\b(?:ep|e|cap|c|episode)\s*0*(\d{1,3})\b""")
+            .findAll(name).toList().lastOrNull()
+            ?.let { return it.groupValues[1].toInt() }
+
+        Regex("""(?i)(?:[_\-\s])0*(\d{1,3})\s*$""")
+            .find(name)?.let { return it.groupValues[1].toInt() }
+
+        return null
+    }
+
+    private fun parseEpisodeForSort(path: String): Int? =
+        parseSeasonEpisodeFromFilename(path)?.second ?: parseEpisodeOnlyFromFilename(path)
 
     private fun inferSagaNameFromPath(path: String): String {
         val clean = path.replace("\\", "/").trim('/')
@@ -382,12 +416,24 @@ class AutoImporter(
         val parts = clean.split("/").filter { it.isNotBlank() }
         val fileNoExt = parts.last().substringBeforeLast(".")
 
-        val se = parseSeasonEpisode(path)
+        val se = parseSeasonEpisodeFromFilename(path)
         if (se != null && parts.size >= 3) {
             val seriesName = parts[parts.size - 3]
             val (season, ep) = se
             return "${normalizeName(seriesName)} s${pad2(season)} ${pad2(ep)}"
         }
+
+        if (parts.size >= 3) {
+            val seriesName = parts[parts.size - 3]
+            val seasonFolder = parts[parts.size - 2]
+            val season = parseSeasonFromFolderOrName(seasonFolder)
+            val epOnly = parseEpisodeOnlyFromFilename(path)
+            if (season != null && epOnly != null) {
+                val seriesKey = normalizeName(seriesName).replace(" ", "_")
+                return "${seriesKey}_${pad3(epOnly)}"
+            }
+        }
+
         return normalizeName(fileNoExt)
     }
 
@@ -408,5 +454,41 @@ class AutoImporter(
     private fun filterAlreadyImported(previews: List<PreviewJson>): List<PreviewJson> {
         val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toSet()
         return previews.filter { it.fileName !in existing }
+    }
+
+    private fun prettyCap(ep: Int?): String? =
+        if (ep == null || ep <= 0) null else "Cap ${ep.toString().padStart(2, '0')}"
+
+    private fun prettyTemp(season: Int?): String? =
+        if (season == null || season <= 0) null else "T${season.toString().padStart(2, '0')}"
+
+    private fun fileBaseName(path: String): String =
+        path.replace("\\", "/").substringAfterLast("/").substringBeforeLast(".")
+
+    private fun buildDisplayTitleForItem(smbPath: String, cover: ApiCover?): String {
+        val fallbackName = fileBaseName(smbPath)
+        val seriesName = cover?.id ?: fallbackName
+
+        val seFile = parseSeasonEpisodeFromFilename(smbPath)
+        val epFileOnly = parseEpisodeOnlyFromFilename(smbPath)
+
+        val seasonFromFile = seFile?.first
+        val epFromFile = seFile?.second ?: epFileOnly
+        val epFinal = epFromFile ?: cover?.episode
+
+        val isSeries = (cover?.type?.lowercase() == "series") ||
+                (seasonFromFile != null) || (epFromFile != null) ||
+                (cover?.season != null) || (cover?.episode != null)
+
+        if (!isSeries) return seriesName
+
+        val cap = prettyCap(epFinal)
+        val temp = prettyTemp(seasonFromFile)
+
+        return when {
+            temp != null && cap != null -> "$temp $cap - $seriesName"
+            cap != null -> "$cap - $seriesName"
+            else -> seriesName
+        }
     }
 }

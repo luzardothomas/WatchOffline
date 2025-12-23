@@ -19,3 +19,16 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Gson: no ofuscar/strippear modelos que se parsean por reflexión
+-keepattributes Signature
+-keepattributes *Annotation*
+
+# Mantener clases internas de importers (ApiCover) y sus fields
+-keep class com.example.watchoffline.AutoImporter$ApiCover { *; }
+-keep class com.example.watchoffline.LocalAutoImporter$ApiCover { *; }
+
+# Mantener modelos persistidos en JSON (SharedPreferences)
+-keep class com.example.watchoffline.VideoItem { *; }
+-keep class com.example.watchoffline.ImportedJson { *; }
+-keep class com.example.watchoffline.JsonDataManager { *; }

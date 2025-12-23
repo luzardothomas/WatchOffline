@@ -3,10 +3,26 @@ package com.example.watchoffline
 import android.content.Context
 import android.util.Log
 import com.google.gson.Gson
+import com.google.gson.annotations.SerializedName
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import androidx.annotation.Keep
+
+
+@Keep
+private data class ApiCover(
+    @SerializedName("type") val type: String? = null,
+    @SerializedName("id") val id: String? = null,
+    @SerializedName("dir") val dir: String? = null,
+    @SerializedName("season") val season: Int? = null,
+    @SerializedName("episode") val episode: Int? = null,
+    @SerializedName("skipSeconds") val skipToSecond: Int? = null,
+    @SerializedName("file") val file: String? = null,
+    @SerializedName("url") val url: String? = null
+)
+
 
 /**
  * Auto-import desde el contenido LOCAL del dispositivo,
@@ -42,17 +58,6 @@ class LocalAutoImporter(
         val fileName: String,
         val videos: List<VideoItem>,
         val debug: String
-    )
-
-    private data class ApiCover(
-        val type: String? = null,
-        val id: String? = null,
-        val dir: String? = null,
-        val season: Int? = null,
-        val episode: Int? = null,
-        val skipToSecond: Int? = null,
-        val file: String? = null,
-        val url: String? = null
     )
 
     // =========================
@@ -104,12 +109,21 @@ class LocalAutoImporter(
 
                     val imgUrl = cover?.url?.trim().orEmpty().ifBlank { placeholder }
 
+                    // ✅ TÍTULO: para series el capítulo lo manda el NOMBRE DEL ARCHIVO (API solo fallback)
+                    val displayTitle = buildDisplayTitleForItem(absPath, cover)
+
+                    // ✅ SKIP:
+                    // - Movies: siempre 0
+                    // - Series: usar lo que viene de la API (skipSeconds -> skipToSecond)
+                    val skipFinal =
+                        if (cover?.type?.lowercase() == "series") (cover.skipToSecond ?: 0) else 0
+
                     rawItems.add(
                         RawItem(
                             path = absPath,
-                            title = cover?.id ?: absPath.substringAfterLast("/").substringBeforeLast("."),
+                            title = displayTitle,
                             img = imgUrl,
-                            skip = cover?.skipToSecond ?: 0,
+                            skip = skipFinal,
                             // ✅ BackgroundServer actual decodifica session.uri y acepta paths absolutos
                             videoSrc = "http://127.0.0.1:$serverPort${encodePathForUrl(absPath)}"
                         )
@@ -147,7 +161,7 @@ class LocalAutoImporter(
 
                     val videos = items.sortedWith(
                         compareBy<RawItem>(
-                            { parseSeasonEpisode(it.path)?.second ?: Int.MAX_VALUE },
+                            { parseEpisodeForSort(it.path) ?: Int.MAX_VALUE },
                             { it.path.lowercase() }
                         )
                     ).map { r ->
@@ -354,10 +368,11 @@ class LocalAutoImporter(
     }
 
     // =========================
-    // HELPERS (igual que SMB)
+    // HELPERS
     // =========================
 
     private fun pad2(n: Int): String = n.toString().padStart(2, '0')
+    private fun pad3(n: Int): String = n.toString().padStart(3, '0')
 
     private fun normalizeName(s: String): String =
         s.trim().replace('_', ' ')
@@ -374,42 +389,53 @@ class LocalAutoImporter(
         return null
     }
 
-    private fun parseSeasonEpisode(path: String): Pair<Int, Int>? {
+    // ✅ SOLO formatos fuertes de temporada/capítulo desde el NOMBRE DEL ARCHIVO
+    private fun parseSeasonEpisodeFromFilename(path: String): Pair<Int, Int>? {
         val clean = path.replace("\\", "/")
         val file = clean.substringAfterLast("/")
-        val fileNoExt = file.substringBeforeLast(".", file)
+        val name = file.substringBeforeLast(".", file)
 
-        Regex("""(?i)s(\d{1,2})\s*e(\d{1,2})""").find(fileNoExt)?.let {
-            return it.groupValues[1].toInt() to it.groupValues[2].toInt()
-        }
-        Regex("""(?i)\b(\d{1,2})x(\d{1,3})\b""").find(fileNoExt)?.let {
-            return it.groupValues[1].toInt() to it.groupValues[2].toInt()
-        }
-        Regex("""(?i)s(\d{1,2})[^\d]{0,3}(\d{1,2})""").find(fileNoExt)?.let {
-            return it.groupValues[1].toInt() to it.groupValues[2].toInt()
-        }
-
-        val parts = clean.trim('/').split("/").filter { it.isNotBlank() }
-        if (parts.size >= 2) {
-            val seasonDir = normalizeName(parts[parts.size - 2])
-            val seasonNum =
-                Regex("""(?i)\b(t|temp|season)\s*(\d{1,2})\b""")
-                    .find(seasonDir)?.groupValues?.getOrNull(2)?.toIntOrNull()
-                    ?: Regex("""(?i)\bs(\d{1,2})\b""")
-                        .find(seasonDir)?.groupValues?.getOrNull(1)?.toIntOrNull()
-
-            if (seasonNum != null) {
-                val epNum =
-                    Regex("""(?i)\b(ep|e|cap|c)\s*(\d{1,3})\b""")
-                        .find(fileNoExt)?.groupValues?.getOrNull(2)?.toIntOrNull()
-                        ?: Regex("""(?i)\b(\d{1,3})\b""")
-                            .find(fileNoExt)?.groupValues?.getOrNull(1)?.toIntOrNull()
-
-                if (epNum != null) return seasonNum to epNum
+        // S01E02 / S01.E02 / S01-E02 / S01 E02
+        Regex("""(?i)\bs(\d{1,2})\s*[._\- ]*\s*e(\d{1,3})\b""")
+            .find(name)?.let {
+                return it.groupValues[1].toInt() to it.groupValues[2].toInt()
             }
-        }
+
+        // 1x02 / 01x02
+        Regex("""(?i)\b(\d{1,2})\s*x\s*(\d{1,3})\b""")
+            .find(name)?.let {
+                return it.groupValues[1].toInt() to it.groupValues[2].toInt()
+            }
 
         return null
+    }
+
+    // ✅ Episodio “solo número” (DBZ_100, Cap 100, E100, etc.) -> el archivo manda
+    private fun parseEpisodeOnlyFromFilename(path: String): Int? {
+        val clean = path.replace("\\", "/")
+        val file = clean.substringAfterLast("/")
+        val name = file.substringBeforeLast(".", file)
+
+        // ep/cap/e + numero (tomar el ÚLTIMO match)
+        Regex("""(?i)\b(?:ep|e|cap|c|episode)\s*0*(\d{1,3})\b""")
+            .findAll(name)
+            .toList()
+            .lastOrNull()
+            ?.let { return it.groupValues[1].toInt() }
+
+        // numero al final (DBZ_100, MALCOLM_02, etc.)
+        Regex("""(?i)(?:[_\-\s])0*(\d{1,3})\s*$""")
+            .find(name)
+            ?.let { return it.groupValues[1].toInt() }
+
+        return null
+    }
+
+    // ✅ Para ordenar episodios en series (archivo manda, API no)
+    private fun parseEpisodeForSort(path: String): Int? {
+        val se = parseSeasonEpisodeFromFilename(path)
+        if (se != null) return se.second
+        return parseEpisodeOnlyFromFilename(path)
     }
 
     private fun inferSagaNameFromPath(path: String): String {
@@ -442,13 +468,29 @@ class LocalAutoImporter(
         val parts = clean.split("/").filter { it.isNotBlank() }
         val fileNoExt = parts.last().substringBeforeLast(".")
 
-        val se = parseSeasonEpisode(path)
+        // 1) Si el archivo trae temporada+capítulo -> query por serie + Sxx + ep (Malcolm, etc.)
+        val se = parseSeasonEpisodeFromFilename(path)
         if (se != null && parts.size >= 3) {
             val seriesName = parts[parts.size - 3]
             val (season, ep) = se
             return "${normalizeName(seriesName)} s${pad2(season)} ${pad2(ep)}"
         }
 
+        // 2) Si estamos en estructura de serie (.../<serie>/<temporada>/<archivo>)
+        //    y el filename trae "solo episodio" (DBZ_002),
+        //    armamos query estilo "<serie>_<NNN>" para pegarle a tu API (dbz_002).
+        if (parts.size >= 3) {
+            val seriesName = parts[parts.size - 3]
+            val seasonFolder = parts[parts.size - 2]
+            val season = parseSeasonFromFolderOrName(seasonFolder)
+            val epOnly = parseEpisodeOnlyFromFilename(path)
+            if (season != null && epOnly != null) {
+                val seriesKey = normalizeName(seriesName).replace(" ", "_")
+                return "${seriesKey}_${pad3(epOnly)}"
+            }
+        }
+
+        // 3) Fallback genérico
         return normalizeName(fileNoExt)
     }
 
@@ -470,4 +512,57 @@ class LocalAutoImporter(
         val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toSet()
         return previews.filter { it.fileName !in existing }
     }
+
+    private fun prettyCap(ep: Int?): String? {
+        if (ep == null || ep <= 0) return null
+        return "Cap ${ep.toString().padStart(2, '0')}"
+    }
+
+    private fun prettyTemp(season: Int?): String? {
+        if (season == null || season <= 0) return null
+        return "T${season.toString().padStart(2, '0')}"
+    }
+
+    private fun fileBaseName(path: String): String =
+        path.replace("\\", "/").substringAfterLast("/").substringBeforeLast(".")
+
+    /**
+     * ✅ Reglas:
+     * - Si es movie -> cover.id o fallback filename
+     * - Si es serie:
+     *   - episodio SIEMPRE lo decide el ARCHIVO si se puede parsear
+     *   - API solo fallback si no se pudo parsear del archivo
+     *   - Si el archivo trae temporada (SxxEyy / xyy) => mostrar temporada + cap
+     *   - Si el archivo NO trae temporada (DBZ_100) => mostrar solo cap (aunque API tenga season)
+     */
+    private fun buildDisplayTitleForItem(absPath: String, cover: ApiCover?): String {
+        val fallbackName = fileBaseName(absPath)
+        val seriesName = cover?.id ?: fallbackName
+
+        val seFile = parseSeasonEpisodeFromFilename(absPath)
+        val epFileOnly = parseEpisodeOnlyFromFilename(absPath)
+
+        val seasonFromFile = seFile?.first
+
+        val epFromFile = seFile?.second ?: epFileOnly
+        val epFinal = epFromFile ?: cover?.episode
+
+        val isSeries = (cover?.type?.lowercase() == "series") ||
+                (seasonFromFile != null) ||
+                (epFromFile != null) ||
+                (cover?.season != null) ||
+                (cover?.episode != null)
+
+        if (!isSeries) return seriesName
+
+        val cap = prettyCap(epFinal)
+        val temp = prettyTemp(seasonFromFile)
+
+        return when {
+            temp != null && cap != null -> "$temp $cap - $seriesName"
+            cap != null -> "$cap - $seriesName"
+            else -> seriesName
+        }
+    }
 }
+

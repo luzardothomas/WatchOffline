@@ -1,14 +1,17 @@
 package com.example.watchoffline
 
 import android.app.AlertDialog
-import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.text.TextUtils
 import android.util.DisplayMetrics
 import android.util.Log
@@ -25,20 +28,17 @@ import androidx.leanback.app.BackgroundManager
 import androidx.leanback.app.BrowseSupportFragment
 import androidx.leanback.widget.*
 import com.bumptech.glide.Glide
+import com.bumptech.glide.load.DataSource
+import com.bumptech.glide.load.engine.GlideException
+import com.bumptech.glide.request.RequestListener
 import com.bumptech.glide.request.target.SimpleTarget
+import com.bumptech.glide.request.target.Target
 import com.bumptech.glide.request.transition.Transition
-import com.google.common.reflect.TypeToken
-import com.google.gson.Gson
 import java.util.LinkedHashMap
+import java.util.Locale
 import java.util.Timer
 import java.util.TimerTask
 import java.util.UUID
-import android.net.Uri
-import android.os.Build
-import android.os.Environment
-import android.provider.Settings
-import java.io.File
-
 
 class MainFragment : BrowseSupportFragment() {
 
@@ -60,15 +60,24 @@ class MainFragment : BrowseSupportFragment() {
 
         jsonDataManager.loadData(requireContext())
 
+        // ✅ DEBUG: qué hay realmente en storage (skip/img)
+        debugDumpFirstItem("after loadData()")
+
+        // ✅ DEBUG: prueba si TV puede hablar con la API (si falla, el importer también falla)
+        debugApiConnectivity()
+
         smbGateway = SmbGateway(requireContext())
         val ok = smbGateway.ensureProxyStarted(8081)
-        Log.e(TAG, "SMB proxy started? $ok port=${smbGateway.getProxyPort()}")
+        Log.i(TAG, "SMB proxy started? $ok port=${smbGateway.getProxyPort()}")
 
         prepareBackgroundManager()
         resetBackgroundToDefault()
         setupUIElements()
         loadRows()
         setupEventListeners()
+
+        // ✅ DEBUG: test Glide con el primer poster real
+        debugTestGlideLoadFirstPoster()
     }
 
     override fun onDestroy() {
@@ -83,6 +92,7 @@ class MainFragment : BrowseSupportFragment() {
         mBackgroundManager.attach(requireActivity().window)
         mDefaultBackground = ContextCompat.getDrawable(requireContext(), R.drawable.default_background)
         mMetrics = DisplayMetrics().apply {
+            @Suppress("DEPRECATION")
             requireActivity().windowManager.defaultDisplay.getMetrics(this)
         }
     }
@@ -99,7 +109,6 @@ class MainFragment : BrowseSupportFragment() {
         val rowsAdapter = ArrayObjectAdapter(ListRowPresenter())
         val cardPresenter = CardPresenter()
 
-        // ✅ 1) ACCIONES ARRIBA DE TODO
         val actionsAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
             add(getString(R.string.erase_json))
             add("Eliminar todos los JSON")
@@ -107,7 +116,6 @@ class MainFragment : BrowseSupportFragment() {
             add("Limpiar credenciales")
             add("Importar de SMB")
             add("Importar de DISPOSITIVO")
-
         }
 
         rowsAdapter.add(
@@ -117,8 +125,7 @@ class MainFragment : BrowseSupportFragment() {
             )
         )
 
-        // ✅ 2) CONTENIDO DEBAJO
-        jsonDataManager.getImportedJsons().forEach { imported: ImportedJson ->
+        jsonDataManager.getImportedJsons().forEach { imported ->
             val rowAdapter = ArrayObjectAdapter(cardPresenter).apply {
                 imported.videos.forEach { add(it.toMovie()) }
             }
@@ -150,7 +157,6 @@ class MainFragment : BrowseSupportFragment() {
         onItemViewClickedListener = ItemViewClickedListener()
         onItemViewSelectedListener = ItemViewSelectedListener()
     }
-
 
     private inner class ItemViewClickedListener : OnItemViewClickedListener {
         override fun onItemClicked(
@@ -189,6 +195,7 @@ class MainFragment : BrowseSupportFragment() {
             }
         }
     }
+
     private fun showClearSmbDialog() {
         AlertDialog.Builder(requireContext())
             .setTitle("Reset SMB")
@@ -226,7 +233,6 @@ class MainFragment : BrowseSupportFragment() {
             ).show()
         }
     }
-
 
     private fun runLocalAutoImport() {
         LocalAutoImporter(
@@ -279,7 +285,6 @@ class MainFragment : BrowseSupportFragment() {
         )
     }
 
-
     private fun showDeleteAllDialog() {
         val count = jsonDataManager.getImportedJsons().size
         if (count == 0) {
@@ -300,9 +305,6 @@ class MainFragment : BrowseSupportFragment() {
             .show()
     }
 
-    // =========================
-    // ✅ SMB CONNECT FLOW
-    // =========================
     private fun openSmbConnectFlow() {
         Toast.makeText(requireContext(), "Buscando SMBs en la red...", Toast.LENGTH_SHORT).show()
 
@@ -421,7 +423,6 @@ class MainFragment : BrowseSupportFragment() {
                         )
                         smbGateway.saveLastShare(server.id, share)
 
-
                         activity?.runOnUiThread {
                             Toast.makeText(requireContext(), "SMB conectado ✅", Toast.LENGTH_LONG).show()
                             dialog.dismiss()
@@ -440,26 +441,25 @@ class MainFragment : BrowseSupportFragment() {
     }
 
     private fun showDeleteDialog() {
-        val items = jsonDataManager.getImportedJsons().map { it.fileName }.toTypedArray()
-        if (items.isEmpty()) {
+        val imported = jsonDataManager.getImportedJsons()
+        if (imported.isEmpty()) {
             Toast.makeText(requireContext(), "No hay JSONs para borrar", Toast.LENGTH_SHORT).show()
             return
         }
 
+        val labels = imported.map { prettyTitle(it.fileName) }.toTypedArray()
+
         AlertDialog.Builder(requireContext()).apply {
             setTitle("Eliminar JSON")
-            setItems(items) { _, which ->
-                jsonDataManager.removeJson(requireContext(), items[which])
+            setItems(labels) { _, which ->
+                val realName = imported[which].fileName
+                jsonDataManager.removeJson(requireContext(), realName)
                 refreshUI()
             }
             setNegativeButton("Cancelar", null)
             show()
         }
     }
-
-    // =========================
-    // BACKGROUND / UI
-    // =========================
 
     private fun resetBackgroundToDefault() {
         mBackgroundTimer?.cancel()
@@ -470,6 +470,7 @@ class MainFragment : BrowseSupportFragment() {
 
     private fun refreshUI() {
         jsonDataManager.loadData(requireContext())
+        debugDumpFirstItem("after refreshUI() loadData()")
         loadRows()
 
         val hasAnyMovie = jsonDataManager.getImportedJsons().any { it.videos.isNotEmpty() }
@@ -498,6 +499,25 @@ class MainFragment : BrowseSupportFragment() {
             .load(uri)
             .centerCrop()
             .error(mDefaultBackground)
+            .listener(object : RequestListener<Drawable> {
+                override fun onLoadFailed(
+                    e: GlideException?,
+                    model: Any?,
+                    target: Target<Drawable>?,
+                    isFirstResource: Boolean
+                ): Boolean {
+                    Log.e(TAG, "BG Glide FAILED model=$model err=${e?.rootCauses?.firstOrNull()?.message}", e)
+                    return false
+                }
+
+                override fun onResourceReady(
+                    resource: Drawable?,
+                    model: Any?,
+                    target: Target<Drawable>?,
+                    dataSource: DataSource?,
+                    isFirstResource: Boolean
+                ): Boolean = false
+            })
             .into(object : SimpleTarget<Drawable>(mMetrics.widthPixels, mMetrics.heightPixels) {
                 override fun onResourceReady(resource: Drawable, transition: Transition<in Drawable>?) {
                     mBackgroundManager.drawable = resource
@@ -519,9 +539,7 @@ class MainFragment : BrowseSupportFragment() {
         }
     }
 
-    // ✅ acciones más grandes y legibles
     private inner class GridItemPresenter : Presenter() {
-
         private fun dp(v: Int): Int =
             TypedValue.applyDimension(
                 TypedValue.COMPLEX_UNIT_DIP,
@@ -534,8 +552,6 @@ class MainFragment : BrowseSupportFragment() {
                 layoutParams = ViewGroup.LayoutParams(dp(130), dp(100))
                 isFocusable = true
                 isFocusableInTouchMode = true
-
-                // tenés que crear este drawable (abajo te lo dejo)
                 setBackgroundResource(R.drawable.action_tile_bg)
 
                 setTextColor(Color.WHITE)
@@ -560,71 +576,80 @@ class MainFragment : BrowseSupportFragment() {
         }
 
         override fun onBindViewHolder(viewHolder: ViewHolder, item: Any) {
-            (viewHolder.view as TextView).text = item as String
+            (viewHolder.view as TextView).text = (item as String).uppercase(Locale.getDefault())
         }
 
         override fun onUnbindViewHolder(viewHolder: ViewHolder) = Unit
     }
 
+    // =========================
+    // ✅ DEBUG HELPERS
+    // =========================
+
+    private fun debugDumpFirstItem(where: String) {
+        val imported = jsonDataManager.getImportedJsons()
+        val first = imported.firstOrNull()?.videos?.firstOrNull()
+        Log.i(TAG, "DEBUG [$where] importedCount=${imported.size}")
+        if (first == null) {
+            Log.i(TAG, "DEBUG [$where] no videos")
+            return
+        }
+        Log.i(TAG, "DEBUG [$where] firstVideo title='${first.title}' skip=${first.skipToSecond}")
+        Log.i(TAG, "DEBUG [$where] firstVideo imgSml='${first.imgSml}' imgBig='${first.imgBig}'")
+    }
+
+    private fun debugApiConnectivity() {
+        Thread {
+            try {
+                val url = java.net.URL("https://api-watchoffline.luzardo-thomas.workers.dev/health")
+                val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 5000
+                    readTimeout = 5000
+                }
+                val code = conn.responseCode
+                val body = try { conn.inputStream.bufferedReader().use { it.readText() } } catch (_: Exception) { "" }
+                Log.i(TAG, "API TEST code=$code body=$body")
+                conn.disconnect()
+            } catch (e: Exception) {
+                Log.e(TAG, "API TEST FAILED: ${e.message}", e)
+            }
+        }.start()
+    }
+
+    private fun debugTestGlideLoadFirstPoster() {
+        val first = jsonDataManager.getImportedJsons().firstOrNull()?.videos?.firstOrNull() ?: return
+        val model = first.imgSml
+
+        Glide.with(requireActivity())
+            .load(model)
+            .listener(object : RequestListener<Drawable> {
+                override fun onLoadFailed(
+                    e: GlideException?,
+                    model: Any?,
+                    target: Target<Drawable>?,
+                    isFirstResource: Boolean
+                ): Boolean {
+                    Log.e(TAG, "POSTER Glide FAILED model=$model err=${e?.rootCauses?.firstOrNull()?.message}", e)
+                    return false
+                }
+
+                override fun onResourceReady(
+                    resource: Drawable?,
+                    model: Any?,
+                    target: Target<Drawable>?,
+                    dataSource: DataSource?,
+                    isFirstResource: Boolean
+                ): Boolean {
+                    Log.i(TAG, "POSTER Glide OK model=$model dataSource=$dataSource")
+                    return false
+                }
+            })
+            .preload()
+    }
+
     companion object {
         private const val TAG = "MainFragment"
         private const val BACKGROUND_UPDATE_DELAY = 300
-    }
-}
-
-// =========================
-// DATA CLASSES + MANAGER
-// =========================
-data class VideoItem(
-    val title: String,
-    val skipToSecond: Int,
-    val imgBig: String,
-    val imgSml: String,
-    val videoSrc: String
-)
-
-data class ImportedJson(
-    val fileName: String,
-    val videos: List<VideoItem>
-)
-
-class JsonDataManager {
-    private val importedJsons = mutableListOf<ImportedJson>()
-
-    fun addJson(context: Context, fileName: String, videos: List<VideoItem>) {
-        if (importedJsons.none { it.fileName == fileName }) {
-            importedJsons.add(ImportedJson(fileName, videos))
-            saveData(context)
-        }
-    }
-
-    fun removeJson(context: Context, fileName: String) {
-        importedJsons.removeAll { it.fileName == fileName }
-        saveData(context)
-    }
-
-    fun removeAll(context: Context) {
-        importedJsons.clear()
-        saveData(context)
-    }
-
-    fun getImportedJsons(): List<ImportedJson> = importedJsons.toList()
-
-    fun loadData(context: Context) {
-        val json = context
-            .getSharedPreferences("json_data", Context.MODE_PRIVATE)
-            .getString("imported", null) ?: return
-
-        val type = object : TypeToken<List<ImportedJson>>() {}.type
-        importedJsons.clear()
-        importedJsons.addAll(Gson().fromJson(json, type))
-    }
-
-    private fun saveData(context: Context) {
-        val json = Gson().toJson(importedJsons)
-        context.getSharedPreferences("json_data", Context.MODE_PRIVATE)
-            .edit()
-            .putString("imported", json)
-            .apply()
     }
 }
