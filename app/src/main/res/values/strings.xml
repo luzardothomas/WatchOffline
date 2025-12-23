@@ -2,8 +2,7 @@
     <string name="app_name">WatchOffline</string>
     <string name="browse_title">WatchOffline</string>
     <string name="related_movies">Related Videos</string>
-    <string name="import_json">Import JSON</string>
-    <string name="erase_json">Erase JSON</string>
+    <string name="erase_json">Borrar JSON</string>
     <string name="watch_trailer_1">Watch video</string>
     <string name="watch_trailer_2">Video</string>
     <string name="movie">Movie</string>

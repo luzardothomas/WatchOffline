@@ -25,8 +25,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     // ✅ SMB
     private lateinit var smbGateway: SmbGateway
 
-    private val REQUEST_CODE_IMPORT_JSON = 1001
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -58,13 +56,14 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             sections = sections,
             onMovieClick = { item ->
                 when (item.videoUrl) {
-                    "__action_import_json__" -> openFilePicker()
                     "__action_erase_json__" -> showDeleteDialog()
                     "__action_erase_all_json__" -> showDeleteAllDialog()
                     "__action_connect_smb__" -> openSmbConnectFlow()
 
                     // ✅ ahora usa helper compartido
                     "__action_auto_import__" -> runAutoImport()
+                    "__action_auto_import_local__" -> runLocalAutoImport()
+
 
                     else -> {
                         startActivity(
@@ -88,11 +87,11 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         val actionsSection = MobileSection(
             title = "ACCIONES",
             items = listOf(
-                actionCard("Importar JSON", "__action_import_json__"),
                 actionCard("Borrar JSON", "__action_erase_json__"),
-                actionCard("Borrar TODOS", "__action_erase_all_json__"),
-                actionCard("Conectar SMB", "__action_connect_smb__"),
-                actionCard("Importar automáticamente", "__action_auto_import__")
+                actionCard("Borrar todos los JSON", "__action_erase_all_json__"),
+                actionCard("Conectarse al SMB", "__action_connect_smb__"),
+                actionCard("Importar de SMB", "__action_auto_import__"),
+                actionCard("Importar de DISPOSITIVO","__action_auto_import_local__")
             )
         )
 
@@ -124,6 +123,19 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         description = "Imported from JSON"
     )
 
+    private fun runLocalAutoImport() {
+        LocalAutoImporter(
+            context = requireContext(),
+            jsonDataManager = jsonDataManager,
+            serverPort = 8080
+        ).run(
+            toast = { msg -> activity?.runOnUiThread { Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() } },
+            onDone = { count -> activity?.runOnUiThread { refreshUI(); Toast.makeText(requireContext(), "Importados $count JSON", Toast.LENGTH_LONG).show() } },
+            onError = { err -> activity?.runOnUiThread { Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() } }
+        )
+    }
+
+
     // =========================
     // ✅ AUTO IMPORT (Shared helper)
     // =========================
@@ -152,45 +164,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                 }
             }
         )
-    }
-
-    // =========================
-    // ✅ JSON IMPORT (MANUAL)
-    // =========================
-
-    private fun openFilePicker() {
-        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "application/json"
-        }
-
-        try {
-            startActivityForResult(
-                Intent.createChooser(intent, "Seleccionar JSON"),
-                REQUEST_CODE_IMPORT_JSON
-            )
-        } catch (e: Exception) {
-            Toast.makeText(requireContext(), "No se pudo abrir selector: ${e.message}", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-
-        if (requestCode == REQUEST_CODE_IMPORT_JSON && resultCode == Activity.RESULT_OK) {
-            data?.data?.let { uri ->
-                requireContext().contentResolver.openInputStream(uri)?.use { stream ->
-                    val jsonString = stream.bufferedReader().use { it.readText() }
-                    val videos = Gson().fromJson(jsonString, Array<VideoItem>::class.java).toList()
-
-                    val fileName = JsonUtils.getFileNameFromUri(requireContext(), uri)
-                        ?: "imported_${System.currentTimeMillis()}"
-
-                    jsonDataManager.addJson(requireContext(), fileName, videos)
-                    refreshUI()
-                }
-            }
-        }
     }
 
     private fun showDeleteDialog() {
