@@ -2,18 +2,25 @@ package com.example.watchoffline
 
 import android.app.AlertDialog
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.widget.EditText
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import java.io.File
 import java.util.LinkedHashMap
+import java.util.Locale
 import java.util.UUID
 
 class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
@@ -22,11 +29,14 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         private const val TAG = "MobileMainFragment"
     }
 
-
     private val jsonDataManager = JsonDataManager()
 
     // ✅ SMB
     private lateinit var smbGateway: SmbGateway
+
+    // ✅ Search (inline)
+    private var currentQuery: String = ""
+    private val handler = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -35,7 +45,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
         smbGateway = SmbGateway(requireContext())
         val ok = smbGateway.ensureProxyStarted(8081)
-        Log.d("MobileMainFragment", "SMB proxy started? $ok port=${smbGateway.getProxyPort()}")
+        Log.d(TAG, "SMB proxy started? $ok port=${smbGateway.getProxyPort()}")
     }
 
     override fun onDestroy() {
@@ -46,14 +56,63 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+
+        setupSearchUi(view)
         render(view)
     }
+
+    // =========================
+    // ✅ Search UI (inline, no SearchView)
+    // =========================
+
+    private fun setupSearchUi(root: View) {
+        val btn = root.findViewById<ImageButton>(R.id.btnToggleSearch)
+        val input = root.findViewById<EditText>(R.id.searchInput)
+
+        fun setSearchVisible(visible: Boolean) {
+            input.visibility = if (visible) View.VISIBLE else View.GONE
+            btn.setImageResource(
+                if (visible) android.R.drawable.ic_menu_close_clear_cancel
+                else android.R.drawable.ic_menu_search
+            )
+
+            if (!visible) {
+                input.setText("")
+                input.clearFocus()
+                currentQuery = ""
+                refreshUI()
+            } else {
+                input.requestFocus()
+            }
+        }
+
+        btn.setOnClickListener {
+            setSearchVisible(input.visibility != View.VISIBLE)
+        }
+
+        input.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                val q = s?.toString().orEmpty()
+                handler.removeCallbacksAndMessages(null)
+                handler.postDelayed({
+                    currentQuery = q
+                    view?.let { render(it) }
+                }, 120)
+            }
+        })
+    }
+
+    // =========================
+    // UI
+    // =========================
 
     private fun render(rootView: View) {
         val rv = rootView.findViewById<RecyclerView>(R.id.sectionsRecycler)
         rv.layoutManager = LinearLayoutManager(requireContext(), RecyclerView.VERTICAL, false)
 
-        val sections = buildSections()
+        val sections = buildSectionsFiltered(currentQuery)
 
         rv.adapter = MobileSectionsAdapter(
             sections = sections,
@@ -62,8 +121,9 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                     "__action_erase_json__" -> showDeleteDialog()
                     "__action_erase_all_json__" -> showDeleteAllDialog()
                     "__action_connect_smb__" -> openSmbConnectFlow()
+                    "__action_clear_smb__" -> showClearSmbDialog()
                     "__action_auto_import__" -> runAutoImport()
-                    "__action_auto_import_local__" -> runLocalAutoImport()
+                    "__action_auto_import_local_folder__" -> showLocalFolderImportDialog()
                     else -> {
                         startActivity(
                             Intent(requireContext(), DetailsActivity::class.java).apply {
@@ -81,29 +141,63 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         view?.let { render(it) }
     }
 
-    private fun buildSections(): List<MobileSection> {
-        // ✅ fila de acciones (TODOS los botones)
+    // =========================
+    // ✅ Sections + Filter
+    // =========================
+
+    private fun buildSectionsFiltered(queryRaw: String): List<MobileSection> {
+        // ✅ respeta el orden EXACTO que pusiste
         val actionsSection = MobileSection(
             title = "ACCIONES",
             items = listOf(
                 actionCard("Borrar JSON", "__action_erase_json__"),
                 actionCard("Borrar todos los JSON", "__action_erase_all_json__"),
-                actionCard("Conectarse al SMB", "__action_connect_smb__"),
+                actionCard("Credenciales SMB", "__action_connect_smb__"),
+                actionCard("Limpiar credenciales", "__action_clear_smb__"),
                 actionCard("Importar de SMB", "__action_auto_import__"),
-                actionCard("Importar de DISPOSITIVO", "__action_auto_import_local__")
+                actionCard("Importar de RUTA", "__action_auto_import_local_folder__"),
             )
         )
 
-        val contentSections = jsonDataManager.getImportedJsons().map { imported ->
-            MobileSection(
-                // ✅ título normalizado (sin .json y "_" -> " ")
-                title = prettyTitle(imported.fileName),
-                items = imported.videos.map { it.toMovie() }
-            )
+        val q = normalize(queryRaw)
+        val imported = jsonDataManager.getImportedJsons()
+
+        val contentSections = if (q.isBlank()) {
+            imported.map { one ->
+                MobileSection(
+                    title = prettyTitle(one.fileName),
+                    items = one.videos.map { it.toMovie() }
+                )
+            }
+        } else {
+            imported.mapNotNull { one ->
+                val jsonTitle = prettyTitle(one.fileName)
+                val jsonMatch = normalize(jsonTitle).contains(q)
+
+                val filtered = one.videos.filter { v ->
+                    jsonMatch || normalize(v.title).contains(q)
+                }
+
+                if (filtered.isEmpty()) null
+                else MobileSection(
+                    title = jsonTitle,
+                    items = filtered.map { it.toMovie() }
+                )
+            }
         }
 
         return listOf(actionsSection) + contentSections
     }
+
+    private fun normalize(s: String): String =
+        s.trim()
+            .lowercase(Locale.getDefault())
+            .replace('_', ' ')
+            .replace(Regex("\\s+"), " ")
+
+    // =========================
+    // Cards
+    // =========================
 
     private fun actionCard(title: String, actionId: String) = Movie(
         title = title,
@@ -120,19 +214,116 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         cardImageUrl = imgSml,
         backgroundImageUrl = imgBig,
         skipToSecond = skipToSecond,
-        description = "Imported from JSON"
+        description = "Importado desde un JSON"
     )
 
-    private fun runLocalAutoImport() {
+    // =========================
+    // SMB / Local actions
+    // =========================
+
+    private fun showClearSmbDialog() {
+        AlertDialog.Builder(requireContext())
+            .setTitle("Reset SMB")
+            .setMessage("Esto borra credenciales y shares guardados. Vas a tener que reconectar el SMB. ¿Continuar?")
+            .setPositiveButton("Borrar") { _, _ ->
+                smbGateway.clearAllSmbData()
+                Toast.makeText(requireContext(), "SMB reseteado ✅", Toast.LENGTH_LONG).show()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun showLocalFolderImportDialog() {
+        val options = arrayOf(
+            "Downloads",
+            "Movies",
+            "DCIM (Cámara)",
+            "Elegir ruta manual…"
+        )
+
+        AlertDialog.Builder(requireContext())
+            .setTitle("Importar desde carpeta")
+            .setItems(options) { _, which ->
+                val base = listOf(
+                    File("/storage/self/primary"),
+                    File("/storage/emulated/0"),
+                    File("/sdcard")
+                ).firstOrNull { it.exists() && it.isDirectory } ?: File("/storage/emulated/0")
+
+                val target = when (which) {
+                    0 -> File(base, "Download")
+                    1 -> File(base, "Movies")
+                    2 -> File(base, "DCIM")
+                    else -> null
+                }
+
+                if (which == 3) {
+                    val input = EditText(requireContext()).apply {
+                        hint = "/storage/emulated/0/Download"
+                        setText("/storage/emulated/0/Download")
+                    }
+                    AlertDialog.Builder(requireContext())
+                        .setTitle("Ruta a importar")
+                        .setView(input)
+                        .setPositiveButton("Importar") { _, _ ->
+                            val path = input.text.toString().trim()
+                            if (path.isBlank()) return@setPositiveButton
+                            runLocalAutoImportForDirs(listOf(File(path)))
+                        }
+                        .setNegativeButton("Cancelar", null)
+                        .show()
+                    return@setItems
+                }
+
+                runLocalAutoImportForDirs(listOf(target!!))
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun runLocalAutoImportForDirs(dirs: List<File>) {
+        if (!ensureAllFilesAccessTv()) {
+            Toast.makeText(requireContext(), "Habilitá 'Acceso a todos los archivos' y reintentá", Toast.LENGTH_LONG).show()
+            return
+        }
+
         LocalAutoImporter(
             context = requireContext(),
             jsonDataManager = jsonDataManager,
-            serverPort = 8080
+            serverPort = 8080,
+            rootDirs = dirs
         ).run(
-            toast = { msg -> activity?.runOnUiThread { Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() } },
-            onDone = { count -> activity?.runOnUiThread { refreshUI(); Toast.makeText(requireContext(), "Importados $count JSON", Toast.LENGTH_LONG).show() } },
-            onError = { err -> activity?.runOnUiThread { Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() } }
+            toast = { msg ->
+                activity?.runOnUiThread {
+                    Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show()
+                }
+            },
+            onDone = { count ->
+                activity?.runOnUiThread {
+                    refreshUI()
+                    Toast.makeText(requireContext(), "Importados $count JSON", Toast.LENGTH_LONG).show()
+                }
+            },
+            onError = { err ->
+                activity?.runOnUiThread {
+                    Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show()
+                }
+            }
         )
+    }
+
+    private fun ensureAllFilesAccessTv(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:${requireContext().packageName}")
+                )
+                startActivity(intent)
+                return false
+            }
+        }
+        return true
     }
 
     private fun runAutoImport() {
@@ -161,6 +352,10 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         )
     }
 
+    // =========================
+    // Delete dialogs
+    // =========================
+
     private fun showDeleteDialog() {
         val imported = jsonDataManager.getImportedJsons()
         if (imported.isEmpty()) {
@@ -168,7 +363,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             return
         }
 
-        // ✅ mostramos nombres lindos, pero borramos por fileName real
         val labels = imported.map { prettyTitle(it.fileName) }.toTypedArray()
 
         AlertDialog.Builder(requireContext()).apply {
@@ -203,7 +397,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     }
 
     // =========================
-    // ✅ SMB CONNECT FLOW (igual a TV)
+    // SMB Connect flow
     // =========================
 
     private fun openSmbConnectFlow() {
@@ -219,7 +413,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                 showManualSmbDialog()
             }
         )
-
 
         Handler(Looper.getMainLooper()).postDelayed({
             smbGateway.stopDiscovery()
@@ -330,7 +523,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                             dialog.dismiss()
                         }
                     } catch (e: Exception) {
-                        Log.e("MobileMainFragment", "SMB connect FAILED", e)
+                        Log.e(TAG, "SMB connect FAILED", e)
                         activity?.runOnUiThread {
                             Toast.makeText(requireContext(), "Error SMB: ${e.message}", Toast.LENGTH_LONG).show()
                         }
@@ -348,16 +541,5 @@ data class MobileSection(
     val items: List<Movie>
 )
 
-// ✅ misma normalización que TV
-private fun prettyTitle(raw: String): String {
-    var s = raw.trim()
 
-    if (s.lowercase().endsWith(".json")) {
-        s = s.dropLast(5)
-    }
 
-    s = s.replace("_", " ")
-    s = s.replace(Regex("\\s+"), " ").trim()
-
-    return s.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
-}

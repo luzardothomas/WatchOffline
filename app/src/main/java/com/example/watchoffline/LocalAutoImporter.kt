@@ -9,7 +9,7 @@ import java.net.URL
 import java.net.URLEncoder
 
 /**
- * Auto-import desde el contenido LOCAL del dispositivo (/storage),
+ * Auto-import desde el contenido LOCAL del dispositivo,
  * usando el BackgroundServer (http://127.0.0.1:<serverPort>) para reproducir.
  *
  * Reutiliza la misma lógica "series vs movies" + cover API.
@@ -18,11 +18,13 @@ class LocalAutoImporter(
     private val context: Context,
     private val jsonDataManager: JsonDataManager,
     private val serverPort: Int = 8080,
-    private val rootDirs: List<File> = listOf(
-        File("/storage/emulated/0"),
-        File("/sdcard")
-    )
+    rootDirs: List<File>? = null
 ) {
+
+    private val tag = "LocalAutoImporter"
+
+    // ✅ Roots reales, dinámicos (celular + TV box)
+    private val rootDirs: List<File> = (rootDirs ?: pickReadableRoots()).distinctBy { it.path }
 
     // =========================
     // MODELOS INTERNOS
@@ -66,29 +68,49 @@ class LocalAutoImporter(
             try {
                 toast("Importando desde DISPOSITIVO…")
 
-                val files = mutableListOf<String>()
-                rootDirs.forEach { dir ->
-                    files += listLocalVideos(dir)
+                // ✅ diagnóstico: roots usados
+                val rootsMsg = rootDirs.joinToString { r ->
+                    "${r.path}(read=${r.canRead()})"
+                }
+                Log.d(tag, "Roots: $rootsMsg")
+                toast("Roots: " + rootDirs.joinToString { it.path })
+
+                // 1) Buscar videos (dedupe por path)
+                val filesSet = linkedSetOf<String>()
+                val perRootCounts = mutableListOf<String>()
+
+                for (dir in rootDirs) {
+                    val found = listLocalVideos(dir)
+                    perRootCounts.add("${dir.path}: ${found.size}")
+                    found.forEach { filesSet.add(it) }
                 }
 
-                if (files.isEmpty()) {
-                    onError("No se encontraron videos en /storage")
+                Log.d(tag, "Scan counts: ${perRootCounts.joinToString(" | ")}")
+                toast("Encontrados: ${filesSet.size} videos")
+
+                if (filesSet.isEmpty()) {
+                    onError("No se encontraron videos en el dispositivo (roots: ${rootDirs.joinToString { it.path }})")
                     return@Thread
                 }
 
-                // items crudos
+                // ✅ placeholder local SIEMPRE (evita cards/Details bugueados si cover.url viene vacío)
+                val placeholder = fallbackImageUri()
+
+                // 2) Items crudos
                 val rawItems = mutableListOf<RawItem>()
-                for (absPath in files) {
+                for (absPath in filesSet) {
                     val q = buildQueryForPathSmart(absPath)
                     val cover = fetchCoverFromApiCached(q)
+
+                    val imgUrl = cover?.url?.trim().orEmpty().ifBlank { placeholder }
 
                     rawItems.add(
                         RawItem(
                             path = absPath,
                             title = cover?.id ?: absPath.substringAfterLast("/").substringBeforeLast("."),
-                            img = cover?.url.orEmpty(),
+                            img = imgUrl,
                             skip = cover?.skipToSecond ?: 0,
-                            // BackgroundServer sirve archivos por path absoluto (tu server parsea session.uri)
+                            // ✅ BackgroundServer actual decodifica session.uri y acepta paths absolutos
                             videoSrc = "http://127.0.0.1:$serverPort${encodePathForUrl(absPath)}"
                         )
                     )
@@ -129,6 +151,7 @@ class LocalAutoImporter(
                             { it.path.lowercase() }
                         )
                     ).map { r ->
+                        // ✅ imgBig/imgSml NO vacíos (siempre placeholder si falta)
                         VideoItem(r.title, r.skip, r.img, r.img, r.videoSrc)
                     }
 
@@ -193,10 +216,50 @@ class LocalAutoImporter(
                 onDone(toImport.size)
 
             } catch (e: Exception) {
-                Log.e("LocalAutoImporter", "FAILED", e)
+                Log.e(tag, "FAILED", e)
                 onError("Error: ${e.message}")
             }
         }.start()
+    }
+
+    // =========================
+    // PLACEHOLDER local
+    // =========================
+    private fun fallbackImageUri(): String {
+        // ⚠️ Cambiá R.drawable.movie si tu recurso se llama distinto
+        return "android.resource://${context.packageName}/${R.drawable.movie}"
+    }
+
+    // =========================
+    // ROOTS (dinámico)
+    // =========================
+
+    private fun pickReadableRoots(): List<File> {
+        val baseCandidates = listOf(
+            File("/storage/self/primary"),
+            File("/storage/emulated/0"),
+            File("/sdcard")
+        )
+
+        val extra = mutableListOf<File>()
+
+        // Intentar descubrir montajes USB/SD
+        try {
+            File("/storage").listFiles()?.forEach { f ->
+                if (f.isDirectory) extra.add(f)
+            }
+        } catch (_: Exception) { /* ignore */ }
+
+        try {
+            File("/mnt/media_rw").listFiles()?.forEach { f ->
+                if (f.isDirectory) extra.add(f)
+            }
+        } catch (_: Exception) { /* ignore */ }
+
+        val all = (baseCandidates + extra).distinctBy { it.path }
+        val good = all.filter { it.exists() && it.isDirectory && it.canRead() }
+
+        return if (good.isNotEmpty()) good else listOf(File("/storage"))
     }
 
     // =========================
@@ -205,27 +268,24 @@ class LocalAutoImporter(
 
     private fun listLocalVideos(root: File): List<String> {
         val out = mutableListOf<String>()
-        if (!root.exists() || !root.isDirectory) return out
+        if (!root.exists() || !root.isDirectory || !root.canRead()) {
+            Log.w(tag, "ROOT SKIP: ${root.path} exists=${root.exists()} dir=${root.isDirectory} canRead=${root.canRead()}")
+            return out
+        }
 
-        val videoExt = setOf("mp4","mkv","avi","webm","mov","flv","mpg","mpeg","m4v","ts","3gp","wmv")
+        val videoExt = setOf("mp4", "mkv", "avi", "webm", "mov", "flv", "mpg", "mpeg", "m4v", "ts", "3gp", "wmv")
 
         fun shouldSkipDir(dir: File): Boolean {
             val p = dir.absolutePath.replace("\\", "/")
-            // Evitar basura pesada
             return p.contains("/Android/data/") || p.contains("/Android/obb/")
         }
 
         fun walk(dir: File) {
-            Log.d("SCAN", "ENTER DIR: ${dir.absolutePath}")
+            if (shouldSkipDir(dir)) return
 
-            if (shouldSkipDir(dir)) {
-                Log.d("SCAN", "SKIP DIR: ${dir.absolutePath}")
-                return
-            }
-
-            val children = dir.listFiles()
+            val children = try { dir.listFiles() } catch (_: Exception) { null }
             if (children == null) {
-                Log.w("SCAN", "CANNOT LIST: ${dir.absolutePath}")
+                Log.w(tag, "CANNOT LIST: ${dir.absolutePath}")
                 return
             }
 
@@ -233,18 +293,17 @@ class LocalAutoImporter(
                 if (f.isDirectory) {
                     walk(f)
                 } else {
-                    Log.d("SCAN", "FILE: ${f.name}")
                     val ext = f.name.substringAfterLast(".", "").lowercase()
                     if (ext in videoExt) {
-                        Log.d("SCAN", "VIDEO FOUND: ${f.absolutePath}")
                         out.add(f.absolutePath.replace("\\", "/"))
                     }
                 }
             }
         }
 
-
+        Log.d(tag, "SCAN ROOT: ${root.absolutePath}")
         walk(root)
+        Log.d(tag, "FOUND IN ROOT ${root.path}: ${out.size}")
         return out
     }
 
@@ -254,7 +313,6 @@ class LocalAutoImporter(
      */
     private fun encodePathForUrl(absPath: String): String {
         val clean = absPath.replace("\\", "/")
-        // encode por segmentos para no romper "/"
         val parts = clean.split("/").map { seg ->
             if (seg.isBlank()) "" else URLEncoder.encode(seg, "UTF-8").replace("+", "%20")
         }
@@ -270,7 +328,7 @@ class LocalAutoImporter(
 
     private fun fetchCoverFromApiCached(q: String): ApiCover? {
         if (coverCache.containsKey(q)) return coverCache[q]
-        val cover = fetchCoverFromApi(q)
+        val cover = try { fetchCoverFromApi(q) } catch (_: Exception) { null }
         coverCache[q] = cover
         return cover
     }

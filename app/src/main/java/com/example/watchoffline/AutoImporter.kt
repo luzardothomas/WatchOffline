@@ -6,7 +6,6 @@ import com.google.gson.Gson
 import java.net.URLEncoder
 import com.hierynomus.msfscc.FileAttributes
 
-
 class AutoImporter(
     private val context: Context,
     private val smbGateway: SmbGateway,
@@ -43,6 +42,16 @@ class AutoImporter(
     )
 
     private val coverCache = mutableMapOf<String, ApiCover?>()
+
+    // ✅ fallback seguro para loaders (Glide / Coil / Picasso)
+    private fun defaultPosterUrl(): String =
+        "file:///android_res/drawable/movie.png"
+
+    private fun resolveCoverUrl(apiUrl: String?): String {
+        val u = apiUrl?.trim()
+        return if (!u.isNullOrEmpty()) u else defaultPosterUrl()
+    }
+
 
     fun run(
         toast: (String) -> Unit,
@@ -84,17 +93,22 @@ class AutoImporter(
 
                         val url = buildProxyUrl(serverId, share, smbPath)
 
+                        // ✅ ÚNICO FIX: si cover.url viene vacía -> usar drawable movie.png
+                        val finalImg = resolveCoverUrl(cover?.url)
+
                         allRawItems.add(
                             RawItem(
                                 serverId = serverId,
                                 share = share,
                                 smbPath = smbPath,
-                                title = cover?.id ?: smbPath.substringAfterLast("/").substringBeforeLast("."),
-                                img = cover?.url.orEmpty(),
+                                title = cover?.id
+                                    ?: smbPath.substringAfterLast("/").substringBeforeLast("."),
+                                img = finalImg,
                                 skip = cover?.skipToSecond ?: 0,
                                 videoSrc = url
                             )
                         )
+
                     }
                 }
 
@@ -103,7 +117,7 @@ class AutoImporter(
                     return@Thread
                 }
 
-                // ================= SERIES vs MOVIES (misma lógica que venías usando) =================
+                // ================= SERIES vs MOVIES =================
                 val seriesMap = linkedMapOf<Pair<String, Int>, MutableList<RawItem>>()
                 val movies = mutableListOf<RawItem>()
 
@@ -138,6 +152,7 @@ class AutoImporter(
                             { it.smbPath.lowercase() }
                         )
                     ).map { r ->
+                        // r.img ya viene sanitizado con fallback
                         VideoItem(r.title, r.skip, r.img, r.img, r.videoSrc)
                     }
 
@@ -166,6 +181,7 @@ class AutoImporter(
                             { it.smbPath.lowercase() }
                         )
                     ).map { r ->
+                        // r.img ya viene sanitizado con fallback
                         VideoItem(r.title, r.skip, r.img, r.img, r.videoSrc)
                     }
 
@@ -224,10 +240,9 @@ class AutoImporter(
 
         fun shouldSkipFolder(path: String): Boolean {
             val p = path.lowercase()
-            // Windows también puede tener cosas pesadas, pero evitamos basura típica
             return p.contains("system volume information") ||
                     p.contains("\$recycle.bin") ||
-                    p.contains("windows") && p.contains("installer")
+                    (p.contains("windows") && p.contains("installer"))
         }
 
         smbGateway.withDiskShare(serverId, shareName) { share ->
@@ -256,10 +271,7 @@ class AutoImporter(
                         if (isVideo(name)) out.add(full.replace("\\", "/"))
                     }
                 }
-
-
             }
-
             walk("")
         }
 
@@ -303,7 +315,7 @@ class AutoImporter(
     }
 
     // =========================
-    // HELPERS (igual que LocalAutoImporter)
+    // HELPERS
     // =========================
 
     private fun pad2(n: Int): String = n.toString().padStart(2, '0')

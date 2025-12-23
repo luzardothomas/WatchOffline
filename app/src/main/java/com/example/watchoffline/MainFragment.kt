@@ -33,6 +33,12 @@ import java.util.LinkedHashMap
 import java.util.Timer
 import java.util.TimerTask
 import java.util.UUID
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.Settings
+import java.io.File
+
 
 class MainFragment : BrowseSupportFragment() {
 
@@ -97,9 +103,11 @@ class MainFragment : BrowseSupportFragment() {
         val actionsAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
             add(getString(R.string.erase_json))
             add("Eliminar todos los JSON")
-            add("Conectarse al SMB")
+            add("Credenciales SMB")
+            add("Limpiar credenciales")
             add("Importar de SMB")
             add("Importar de DISPOSITIVO")
+
         }
 
         rowsAdapter.add(
@@ -132,16 +140,17 @@ class MainFragment : BrowseSupportFragment() {
         cardImageUrl = imgSml,
         backgroundImageUrl = imgBig,
         skipToSecond = skipToSecond,
-        description = "Imported from JSON"
+        description = "Importado desde un JSON"
     )
 
     private fun setupEventListeners() {
         setOnSearchClickedListener {
-            Toast.makeText(requireContext(), "Implement your own in-app search", Toast.LENGTH_LONG).show()
+            startActivity(Intent(requireContext(), SearchActivity::class.java))
         }
         onItemViewClickedListener = ItemViewClickedListener()
         onItemViewSelectedListener = ItemViewSelectedListener()
     }
+
 
     private inner class ItemViewClickedListener : OnItemViewClickedListener {
         override fun onItemClicked(
@@ -172,13 +181,52 @@ class MainFragment : BrowseSupportFragment() {
             when (item) {
                 getString(R.string.erase_json) -> showDeleteDialog()
                 "Eliminar todos los JSON" -> showDeleteAllDialog()
-                "Conectarse al SMB" -> openSmbConnectFlow()
+                "Credenciales SMB" -> openSmbConnectFlow()
+                "Limpiar credenciales" -> showClearSmbDialog()
                 "Importar de SMB" -> runAutoImport()
-                "Importar de DISPOSITIVO" -> runLocalAutoImport()
+                "Importar de DISPOSITIVO" -> requestLocalImportWithPermission()
                 else -> Toast.makeText(requireContext(), item, Toast.LENGTH_SHORT).show()
             }
         }
     }
+    private fun showClearSmbDialog() {
+        AlertDialog.Builder(requireContext())
+            .setTitle("Reset SMB")
+            .setMessage("Esto borra credenciales y shares guardados. Vas a tener que reconectar el SMB. ¿Continuar?")
+            .setPositiveButton("Borrar") { _, _ ->
+                smbGateway.clearAllSmbData()
+                Toast.makeText(requireContext(), "SMB reseteado ✅", Toast.LENGTH_LONG).show()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun ensureAllFilesAccessTv(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:${requireContext().packageName}")
+                )
+                startActivity(intent)
+                return false
+            }
+        }
+        return true
+    }
+
+    private fun requestLocalImportWithPermission() {
+        if (ensureAllFilesAccessTv()) {
+            runLocalAutoImport()
+        } else {
+            Toast.makeText(
+                requireContext(),
+                "Habilitá 'Acceso a todos los archivos' y volvé a intentar",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
 
     private fun runLocalAutoImport() {
         LocalAutoImporter(
@@ -212,14 +260,25 @@ class MainFragment : BrowseSupportFragment() {
             jsonDataManager = jsonDataManager,
             proxyPort = 8081
         ).run(
-            toast = { msg -> Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() },
-            onDone = { count ->
-                refreshUI()
-                Toast.makeText(requireContext(), "Importados $count JSON", Toast.LENGTH_LONG).show()
+            toast = { msg ->
+                activity?.runOnUiThread {
+                    Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show()
+                }
             },
-            onError = { err -> Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() }
+            onDone = { count ->
+                activity?.runOnUiThread {
+                    refreshUI()
+                    Toast.makeText(requireContext(), "Importados $count JSON", Toast.LENGTH_LONG).show()
+                }
+            },
+            onError = { err ->
+                activity?.runOnUiThread {
+                    Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show()
+                }
+            }
         )
     }
+
 
     private fun showDeleteAllDialog() {
         val count = jsonDataManager.getImportedJsons().size
@@ -511,20 +570,6 @@ class MainFragment : BrowseSupportFragment() {
         private const val TAG = "MainFragment"
         private const val BACKGROUND_UPDATE_DELAY = 300
     }
-}
-
-// ✅ Título lindo para headers
-private fun prettyTitle(raw: String): String {
-    var s = raw.trim()
-
-    if (s.lowercase().endsWith(".json")) {
-        s = s.dropLast(5)
-    }
-
-    s = s.replace("_", " ")
-    s = s.replace(Regex("\\s+"), " ").trim()
-
-    return s.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
 }
 
 // =========================

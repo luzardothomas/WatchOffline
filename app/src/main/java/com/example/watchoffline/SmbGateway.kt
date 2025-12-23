@@ -19,17 +19,17 @@ import com.hierynomus.smbj.share.File
 import fi.iki.elonen.NanoHTTPD
 import java.io.InputStream
 import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetSocketAddress
 import java.net.NetworkInterface
+import java.net.Socket
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.UUID
-import kotlin.math.min
-import java.net.InetSocketAddress
-import java.net.Socket
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
-
+import kotlin.math.min
 
 class SmbGateway(private val context: Context) {
 
@@ -37,6 +37,63 @@ class SmbGateway(private val context: Context) {
     data class SmbCreds(val username: String, val password: String, val domain: String? = null)
 
     private val tag = "SmbGateway"
+
+    // =========================
+// ✅ LIMPIEZA DE CREDENCIALES SMB
+// =========================
+
+    /** Borra un serverId específico (creds + metadata + share) */
+    fun clearServer(serverId: String) {
+        val ids = (prefs.getStringSet(KEY_SERVER_IDS, emptySet()) ?: emptySet()).toMutableSet()
+        ids.remove(serverId)
+
+        prefs.edit()
+            .remove("creds_$serverId")
+            .remove(keyNameFor(serverId))
+            .remove(keyPortFor(serverId))
+            .remove(keyShareFor(serverId))
+            .putStringSet(KEY_SERVER_IDS, ids)
+            .apply()
+
+        // si era el último usado, borrarlo
+        val last = getLastServerId()
+        if (last == serverId) {
+            prefs.edit().remove(KEY_LAST_SERVER_ID).apply()
+        }
+
+        Log.i(tag, "Cleared SMB server: $serverId")
+    }
+
+    /** Borra absolutamente todo lo relacionado a SMB (recomendado para “reset”) */
+    fun clearAllSmbData() {
+        val ids = prefs.getStringSet(KEY_SERVER_IDS, emptySet()) ?: emptySet()
+
+        val editor = prefs.edit()
+        ids.forEach { id ->
+            editor.remove("creds_$id")
+            editor.remove(keyNameFor(id))
+            editor.remove(keyPortFor(id))
+            editor.remove(keyShareFor(id))
+        }
+
+        editor.remove(KEY_SERVER_IDS)
+        editor.remove(KEY_LAST_SERVER_ID)
+        editor.remove(KEY_LAST_SHARE)
+        editor.apply()
+
+        Log.i(tag, "Cleared ALL SMB data")
+    }
+
+    /** Helper: detecta si un host es IPv6 (tiene ':') */
+    fun isIpv6Host(host: String): Boolean = host.contains(":")
+
+    /** Helper: devuelve servidores guardados pero priorizando IPv4 */
+    fun listCachedServersPreferIpv4(): List<SmbServer> {
+        val all = listCachedServers()
+        val (ipv4, ipv6) = all.partition { !isIpv6Host(it.host) }
+        return ipv4 + ipv6
+    }
+
 
     // --- cache cifrada ---
     private val prefs by lazy {
@@ -59,13 +116,33 @@ class SmbGateway(private val context: Context) {
     private val KEY_LAST_SHARE = "last_share"
     private fun keyShareFor(serverId: String) = "share_$serverId"
 
-    // ✅ NUEVO: datos por serverId para UI multi-SMB
+    // ✅ datos por serverId para UI multi-SMB
     private fun keyNameFor(serverId: String) = "name_$serverId"
     private fun keyPortFor(serverId: String) = "port_$serverId"
 
-    /** ✅ serverId determinístico a partir de host:port (ej "192.168.1.33:445") */
+    // =========================================================
+    // ✅ NORMALIZACIÓN DE HOST (arregla "/ip" y "name/ip")
+    // =========================================================
+    private fun normalizeHost(raw: String?): String {
+        if (raw.isNullOrBlank()) return ""
+        val s = raw.trim()
+
+        // Si viene como "hostname/1.2.3.4" o "/1.2.3.4" -> tomar lo último
+        val last = s.substringAfterLast("/").trim()
+
+        // Si viene con brackets "[2001:...]" sacarlos (SMBJ no los quiere)
+        val unbracket = last.removePrefix("[").removeSuffix("]")
+
+        // Quitar zone id IPv6 tipo "%wlan0"
+        val noZone = unbracket.substringBefore("%")
+
+        return noZone.trim()
+    }
+
+    /** ✅ serverId determinístico a partir de host:port */
     fun makeServerId(host: String, port: Int = 445): String {
-        return UUID.nameUUIDFromBytes("$host:$port".toByteArray()).toString()
+        val h = normalizeHost(host)
+        return UUID.nameUUIDFromBytes("$h:$port".toByteArray()).toString()
     }
 
     fun listCachedServerIds(): List<String> {
@@ -73,7 +150,7 @@ class SmbGateway(private val context: Context) {
         return set.toList().sorted()
     }
 
-    /** ✅ Nuevo: lista completa de SMB guardados (id, name, host, port) */
+    /** ✅ Lista completa de SMB guardados (id, name, host, port) */
     fun listCachedServers(): List<SmbServer> {
         val ids = listCachedServerIds()
         val out = mutableListOf<SmbServer>()
@@ -112,7 +189,7 @@ class SmbGateway(private val context: Context) {
 
     /**
      * ✅ Guarda creds por serverId y actualiza índice.
-     * ✅ NUEVO: también guarda name + port por serverId (para multi-SMB en UI).
+     * ✅ NORMALIZA host antes de guardar.
      */
     fun saveCreds(
         serverId: String,
@@ -121,31 +198,31 @@ class SmbGateway(private val context: Context) {
         port: Int = 445,
         serverName: String? = null
     ) {
-        val blob = "${creds.username}\u0000${creds.password}\u0000${creds.domain.orEmpty()}\u0000$host"
+        val cleanHost = normalizeHost(host)
+        val cleanId = makeServerId(cleanHost, port)
+
+        val blob = "${creds.username}\u0000${creds.password}\u0000${creds.domain.orEmpty()}\u0000$cleanHost"
         val enc = Base64.encodeToString(blob.toByteArray(StandardCharsets.UTF_8), Base64.NO_WRAP)
 
-        // ✅ 1) guardar credencial + metadata
         prefs.edit()
-            .putString("creds_$serverId", enc)
-            .putString(keyNameFor(serverId), (serverName ?: host))
-            .putInt(keyPortFor(serverId), port)
+            .putString("creds_$cleanId", enc)
+            .putString(keyNameFor(cleanId), (serverName ?: cleanHost))
+            .putInt(keyPortFor(cleanId), port)
             .commit()
 
-        // ✅ 2) actualizar índice de serverIds
         val current = prefs.getStringSet(KEY_SERVER_IDS, emptySet())?.toMutableSet() ?: mutableSetOf()
-        current.add(serverId)
+        current.add(cleanId)
         prefs.edit()
             .putStringSet(KEY_SERVER_IDS, current)
             .commit()
 
-        // ✅ 3) recordar último serverId
-        saveLastServerId(serverId)
+        saveLastServerId(cleanId)
 
-        Log.e(tag, "Saved SMB creds: serverId=$serverId host=$host port=$port name=${serverName ?: host} user=${creds.username}")
+        Log.i(tag, "Saved SMB creds: serverId=$cleanId host=$cleanHost port=$port name=${serverName ?: cleanHost} user=${creds.username}")
     }
 
     /**
-     * Retorna host + creds. (Retrocompatible con lo ya guardado)
+     * Retorna host + creds.
      * blob = user \0 pass \0 domain \0 host
      */
     fun loadCreds(serverId: String): Pair<String /*host*/, SmbCreds>? {
@@ -153,10 +230,12 @@ class SmbGateway(private val context: Context) {
         val blob = String(Base64.decode(enc, Base64.NO_WRAP), StandardCharsets.UTF_8)
         val parts = blob.split('\u0000')
         if (parts.size < 4) return null
+
         val user = parts[0]
         val pass = parts[1]
         val domain = parts[2].ifBlank { null }
-        val host = parts[3]
+        val host = normalizeHost(parts[3])
+
         return host to SmbCreds(user, pass, domain)
     }
 
@@ -185,13 +264,24 @@ class SmbGateway(private val context: Context) {
                     }
 
                     override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
-                        val host = serviceInfo.host?.hostAddress ?: return
+                        val addr = serviceInfo.host ?: return
                         val port = if (serviceInfo.port > 0) serviceInfo.port else 445
-                        val id = makeServerId(host, port)
-                        val name = serviceInfo.serviceName ?: host
 
-                        Log.e(tag, "SMB found: name=$name host=$host port=$port serverId=$id")
-                        onFound(SmbServer(id, name, host, port))
+                        // ✅ preferir IPv4 si es posible
+                        val host = when (addr) {
+                            is Inet4Address -> addr.hostAddress
+                            is Inet6Address -> addr.hostAddress // queda como "2001:..."
+                            else -> addr.hostAddress
+                        }
+
+                        val cleanHost = normalizeHost(host)
+                        if (cleanHost.isBlank()) return
+
+                        val id = makeServerId(cleanHost, port)
+                        val name = serviceInfo.serviceName ?: cleanHost
+
+                        Log.i(tag, "SMB found (NSD): name=$name host=$cleanHost port=$port serverId=$id")
+                        onFound(SmbServer(id, name, cleanHost, port))
                     }
                 })
             }
@@ -222,7 +312,11 @@ class SmbGateway(private val context: Context) {
     private val smbClient = SMBClient()
 
     fun connectSession(host: String, creds: SmbCreds): Pair<Connection, Session> {
-        val conn = smbClient.connect(host)
+        val cleanHost = normalizeHost(host)
+        if (cleanHost.isBlank()) throw IllegalArgumentException("Host vacío/ inválido")
+
+        Log.d(tag, "connectSession host=$cleanHost user=${creds.username} domain=${creds.domain ?: ""}")
+        val conn = smbClient.connect(cleanHost)
         val auth = AuthenticationContext(creds.username, creds.password.toCharArray(), creds.domain)
         val sess = conn.authenticate(auth)
         return conn to sess
@@ -234,10 +328,10 @@ class SmbGateway(private val context: Context) {
         scanTimeoutMs: Int = 180,
         maxThreads: Int = 40
     ) {
-        // 1) NSD (lo que ya tenés)
+        // 1) NSD
         discover(onFound, onError)
 
-        // 2) Fallback: scan LAN por 445 (Windows suele aparecer acá)
+        // 2) Fallback: scan LAN por 445
         Thread {
             try {
                 val prefix = getLanPrefixOrNull()
@@ -246,7 +340,7 @@ class SmbGateway(private val context: Context) {
                     return@Thread
                 }
 
-                Log.e(tag, "SMB scan starting on $prefix.0/24 ...")
+                Log.i(tag, "SMB scan starting on $prefix.0/24 ...")
 
                 val executor = Executors.newFixedThreadPool(max(4, maxThreads))
                 val foundSet = mutableSetOf<String>()
@@ -258,7 +352,7 @@ class SmbGateway(private val context: Context) {
                             val id = makeServerId(ip, 445)
                             synchronized(foundSet) {
                                 if (foundSet.add(id)) {
-                                    Log.e(tag, "SMB found by scan: $ip:445 id=$id")
+                                    Log.i(tag, "SMB found by scan: $ip:445 id=$id")
                                     onFound(SmbServer(id = id, name = ip, host = ip, port = 445))
                                 }
                             }
@@ -269,7 +363,7 @@ class SmbGateway(private val context: Context) {
                 executor.shutdown()
                 executor.awaitTermination(12, TimeUnit.SECONDS)
 
-                Log.e(tag, "SMB scan finished")
+                Log.i(tag, "SMB scan finished")
             } catch (e: Exception) {
                 Log.e(tag, "SMB scan error", e)
                 onError("Scan error: ${e.message}")
@@ -296,9 +390,9 @@ class SmbGateway(private val context: Context) {
         return parts.take(3).joinToString(".")
     }
 
-
     fun testLogin(host: String, creds: SmbCreds) {
-        val (conn, sess) = connectSession(host, creds)
+        val cleanHost = normalizeHost(host)
+        val (conn, sess) = connectSession(cleanHost, creds)
         try {
             // si authenticate() pasó, login OK
         } finally {
@@ -308,7 +402,8 @@ class SmbGateway(private val context: Context) {
     }
 
     fun testShareAccess(host: String, creds: SmbCreds, shareName: String) {
-        val (conn, sess) = connectSession(host, creds)
+        val cleanHost = normalizeHost(host)
+        val (conn, sess) = connectSession(cleanHost, creds)
         try {
             val sh = sess.connectShare(shareName)
             try { sh.close() } catch (_: Exception) {}
@@ -341,12 +436,8 @@ class SmbGateway(private val context: Context) {
     private var proxy: HttpProxyServer? = null
     private var proxyPort: Int = 8081
 
-    // =========================
-// ✅ HELPERS PÚBLICOS PARA MULTI-SMB (Windows-friendly)
-// =========================
-
     /**
-     * Devuelve todos los serverIds guardados (cache). Útil para importar varios SMB.
+     * Devuelve todos los serverIds guardados (cache).
      */
     fun listSavedServers(): List<SmbServer> {
         val ids = listCachedServerIds()
@@ -354,15 +445,15 @@ class SmbGateway(private val context: Context) {
         for (id in ids) {
             val loaded = loadCreds(id) ?: continue
             val host = loaded.first
-            // name lo dejamos igual al host (en Windows muchas veces no hay "serviceName")
-            out.add(SmbServer(id = id, name = host, host = host, port = 445))
+            val port = prefs.getInt(keyPortFor(id), 445)
+            val name = prefs.getString(keyNameFor(id), host) ?: host
+            out.add(SmbServer(id = id, name = name, host = host, port = port))
         }
         return out
     }
 
     /**
-     * Abre un DiskShare para un serverId guardado, ejecuta `block`, y cierra TODO correctamente.
-     * Esto evita depender de discovery y funciona con Windows 11 sin problemas.
+     * Abre un DiskShare para un serverId guardado, ejecuta `block`, y cierra TODO.
      */
     fun <T> withDiskShare(
         serverId: String,
@@ -388,7 +479,6 @@ class SmbGateway(private val context: Context) {
         }
     }
 
-
     fun ensureProxyStarted(port: Int = 8081): Boolean {
         proxyPort = port
         if (proxy != null) return true
@@ -396,7 +486,7 @@ class SmbGateway(private val context: Context) {
             proxy = HttpProxyServer(proxyPort).apply {
                 start(60_000, false)
             }
-            Log.e(tag, "SMB proxy STARTED on 0.0.0.0:$proxyPort")
+            Log.i(tag, "SMB proxy STARTED on 0.0.0.0:$proxyPort")
             true
         } catch (e: Exception) {
             Log.e(tag, "SMB proxy FAILED to start on port=$proxyPort", e)
@@ -408,7 +498,7 @@ class SmbGateway(private val context: Context) {
     fun stopProxy() {
         try { proxy?.stop() } catch (_: Exception) {}
         proxy = null
-        Log.e(tag, "SMB proxy STOPPED")
+        Log.i(tag, "SMB proxy STOPPED")
     }
 
     fun getProxyPort(): Int = proxyPort
@@ -420,12 +510,12 @@ class SmbGateway(private val context: Context) {
             return try {
                 val uri = session.uri ?: return badRequest("No URI")
                 val range = session.headers["range"]
-                Log.e(tag, "HTTP ${session.method} $uri range=$range")
+                Log.d(tag, "HTTP ${session.method} $uri range=$range")
 
-                // ✅ endpoints de diagnóstico
                 if (uri == "/ping") {
                     return newFixedLengthResponse(Response.Status.OK, "text/plain", "ok")
                 }
+
                 if (uri == "/debug") {
                     val ids = listCachedServerIds()
                     val lastId = getLastServerId().orEmpty()
@@ -461,6 +551,7 @@ class SmbGateway(private val context: Context) {
                 val serverId = parts[1]
                 val shareName = parts[2]
                 val encodedPath = parts.drop(3).joinToString("/")
+
                 val smbPath = URLDecoder.decode(encodedPath, "UTF-8")
                     .replace("\\", "/")
                     .trimStart('/')
@@ -484,6 +575,7 @@ class SmbGateway(private val context: Context) {
             req: IHTTPSession
         ): Response {
             val rangeHeader = req.headers["range"]
+
             val (conn, sess) = connectSession(host, creds)
 
             var share: DiskShare? = null
@@ -492,7 +584,6 @@ class SmbGateway(private val context: Context) {
             return try {
                 share = sess.connectShare(shareName) as DiskShare
 
-                // ✅ IMPORTANTE: no pasar sets vacíos que rompen en algunas versiones
                 file = share.openFile(
                     smbPath,
                     setOf(AccessMask.GENERIC_READ),
@@ -640,5 +731,3 @@ class SmbGateway(private val context: Context) {
         }
     }
 }
-
-
