@@ -32,3 +32,13 @@
 -keep class com.example.watchoffline.VideoItem { *; }
 -keep class com.example.watchoffline.ImportedJson { *; }
 -keep class com.example.watchoffline.JsonDataManager { *; }
+
+# Desactivar LOGS
+
+-assumenosideeffects class android.util.Log {
+    public static int d(...);
+    public static int v(...);
+    public static int i(...);
+    public static int w(...);
+}
+
