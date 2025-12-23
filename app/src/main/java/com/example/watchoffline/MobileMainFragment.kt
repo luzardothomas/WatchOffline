@@ -18,6 +18,11 @@ import java.util.UUID
 
 class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
+    companion object {
+        private const val TAG = "MobileMainFragment"
+    }
+
+
     private val jsonDataManager = JsonDataManager()
 
     // ✅ SMB
@@ -206,14 +211,15 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
         val found = LinkedHashMap<String, SmbGateway.SmbServer>()
 
-        smbGateway.discover(
+        smbGateway.discoverAll(
             onFound = { server -> found[server.id] = server },
             onError = { err ->
-                Log.e("MobileMainFragment", err)
+                Log.e(TAG, err)
                 Toast.makeText(requireContext(), "No se pudo escanear SMB: $err", Toast.LENGTH_LONG).show()
                 showManualSmbDialog()
             }
         )
+
 
         Handler(Looper.getMainLooper()).postDelayed({
             smbGateway.stopDiscovery()
@@ -310,7 +316,13 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                         smbGateway.testLogin(server.host, creds)
                         smbGateway.testShareAccess(server.host, creds, share)
 
-                        smbGateway.saveCreds(server.id, server.host, creds)
+                        smbGateway.saveCreds(
+                            serverId = server.id,
+                            host = server.host,
+                            creds = creds,
+                            port = server.port,
+                            serverName = server.name
+                        )
                         smbGateway.saveLastShare(server.id, share)
 
                         activity?.runOnUiThread {

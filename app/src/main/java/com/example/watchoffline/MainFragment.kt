@@ -249,7 +249,7 @@ class MainFragment : BrowseSupportFragment() {
 
         val found = LinkedHashMap<String, SmbGateway.SmbServer>()
 
-        smbGateway.discover(
+        smbGateway.discoverAll(
             onFound = { server -> found[server.id] = server },
             onError = { err ->
                 Log.e(TAG, err)
@@ -353,8 +353,15 @@ class MainFragment : BrowseSupportFragment() {
                         smbGateway.testLogin(server.host, creds)
                         smbGateway.testShareAccess(server.host, creds, share)
 
-                        smbGateway.saveCreds(server.id, server.host, creds)
+                        smbGateway.saveCreds(
+                            serverId = server.id,
+                            host = server.host,
+                            creds = creds,
+                            port = server.port,
+                            serverName = server.name
+                        )
                         smbGateway.saveLastShare(server.id, share)
+
 
                         activity?.runOnUiThread {
                             Toast.makeText(requireContext(), "SMB conectado ✅", Toast.LENGTH_LONG).show()

@@ -1,25 +1,37 @@
 package com.example.watchoffline
 
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import com.google.gson.Gson
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.LinkedHashMap
+import java.net.URLEncoder
+import com.hierynomus.msfscc.FileAttributes
+
 
 class AutoImporter(
     private val context: Context,
     private val smbGateway: SmbGateway,
     private val jsonDataManager: JsonDataManager,
-    private val proxyPort: Int = 8081, // tu proxy SMB local
+    private val proxyPort: Int = 8081
 ) {
+    private val tag = "AutoImporter"
 
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val coverCache = mutableMapOf<String, ApiCover?>()
+    private data class RawItem(
+        val serverId: String,
+        val share: String,
+        val smbPath: String,   // path dentro del share (ej "Movies/Matrix.mkv")
+        val title: String,
+        val img: String,
+        val skip: Int,
+        val videoSrc: String
+    )
 
-    data class ApiCover(
+    private data class PreviewJson(
+        val fileName: String,
+        val videos: List<VideoItem>,
+        val debug: String
+    )
+
+    private data class ApiCover(
         val type: String? = null,
         val id: String? = null,
         val dir: String? = null,
@@ -30,80 +42,86 @@ class AutoImporter(
         val url: String? = null
     )
 
-    data class PreviewJson(
-        val fileName: String,
-        val videos: List<VideoItem>,
-        val debug: String
-    )
+    private val coverCache = mutableMapOf<String, ApiCover?>()
 
-    data class RawItem(
-        val path: String,
-        val title: String,
-        val img: String,
-        val skip: Int,
-        val videoSrc: String
-    )
-
-    /**
-     * Ejecuta el auto import en un thread.
-     */
     fun run(
         toast: (String) -> Unit,
-        onDone: (importedCount: Int) -> Unit,
-        onError: (String) -> Unit = {}
+        onDone: (Int) -> Unit,
+        onError: (String) -> Unit
     ) {
-        toast("Importando desde SMB…")
-
         Thread {
             try {
-                val serverId = smbGateway.getLastServerId()
-                    ?: return@Thread postError("No hay SMB configurado", onError)
+                toast("Importando desde SMB…")
 
-                val share = smbGateway.getLastShare(serverId)
-                    ?: return@Thread postError("No hay share configurado", onError)
+                // ✅ Proxy debe estar prendido
+                smbGateway.ensureProxyStarted(proxyPort)
 
-                val cached = smbGateway.loadCreds(serverId)
-                    ?: return@Thread postError("No hay credenciales", onError)
-
-                val host = cached.first
-                val creds = cached.second
-
-                // 🔥 SIN LÍMITE
-                val files = smbListVideos(host, creds, share, max = Int.MAX_VALUE)
-                if (files.isEmpty()) return@Thread postError("No se encontraron videos", onError)
-
-                val rawItems = mutableListOf<RawItem>()
-
-                files.forEach { path ->
-                    val q = buildQueryForPathSmart(path)
-                    val cover = fetchCoverFromApiCached(q)
-
-                    rawItems.add(
-                        RawItem(
-                            path = path,
-                            title = cover?.id ?: path.substringAfterLast("/").substringBeforeLast("."),
-                            img = cover?.url.orEmpty(),
-                            skip = cover?.skipToSecond ?: 0,
-                            videoSrc = "http://127.0.0.1:$proxyPort/smb/$serverId/$share/${smbGateway.encodePath(path)}"
-                        )
-                    )
+                // ✅ Multi SMB: agarramos TODOS los servers guardados
+                val serverIds = smbGateway.listCachedServerIds()
+                if (serverIds.isEmpty()) {
+                    onError("No hay SMB guardados. Usá 'Conectarse al SMB' y guardá al menos uno.")
+                    return@Thread
                 }
 
-                // ================= SERIES =================
+                val allRawItems = mutableListOf<RawItem>()
+                var scannedServers = 0
+
+                for (serverId in serverIds) {
+                    val share = smbGateway.getLastShare(serverId)
+                    if (share.isNullOrBlank()) {
+                        Log.w(tag, "No share saved for serverId=$serverId (skip)")
+                        continue
+                    }
+
+                    scannedServers++
+                    toast("Escaneando SMB ($scannedServers/${serverIds.size})… $share")
+
+                    val smbFiles = listSmbVideos(serverId, share)
+
+                    for (smbPath in smbFiles) {
+                        val q = buildQueryForPathSmart(smbPath)
+                        val cover = fetchCoverFromApiCached(q)
+
+                        val url = buildProxyUrl(serverId, share, smbPath)
+
+                        allRawItems.add(
+                            RawItem(
+                                serverId = serverId,
+                                share = share,
+                                smbPath = smbPath,
+                                title = cover?.id ?: smbPath.substringAfterLast("/").substringBeforeLast("."),
+                                img = cover?.url.orEmpty(),
+                                skip = cover?.skipToSecond ?: 0,
+                                videoSrc = url
+                            )
+                        )
+                    }
+                }
+
+                if (allRawItems.isEmpty()) {
+                    onError("No se encontraron videos en los SMB guardados.")
+                    return@Thread
+                }
+
+                // ================= SERIES vs MOVIES (misma lógica que venías usando) =================
                 val seriesMap = linkedMapOf<Pair<String, Int>, MutableList<RawItem>>()
                 val movies = mutableListOf<RawItem>()
 
-                for (it in rawItems) {
-                    val parts = it.path.replace("\\", "/").split("/")
+                for (ri in allRawItems) {
+                    val parts = ri.smbPath.replace("\\", "/")
+                        .split("/")
+                        .filter { it.isNotBlank() }
+
+                    // Esperado: .../<serie>/<temporada>/<archivo>
                     if (parts.size >= 3) {
                         val series = parts[parts.size - 3]
                         val season = parseSeasonFromFolderOrName(parts[parts.size - 2])
                         if (season != null) {
-                            seriesMap.getOrPut(series to season) { mutableListOf() }.add(it)
+                            seriesMap.getOrPut(series to season) { mutableListOf() }.add(ri)
                             continue
                         }
                     }
-                    movies.add(it)
+                    movies.add(ri)
                 }
 
                 val previews = mutableListOf<PreviewJson>()
@@ -113,26 +131,29 @@ class AutoImporter(
                     .sortedWith(compareBy({ normalizeName(it.first.first) }, { it.first.second }))) {
 
                     val (series, season) = key
+
+                    val videos = items.sortedWith(
+                        compareBy<RawItem>(
+                            { parseSeasonEpisode(it.smbPath)?.second ?: Int.MAX_VALUE },
+                            { it.smbPath.lowercase() }
+                        )
+                    ).map { r ->
+                        VideoItem(r.title, r.skip, r.img, r.img, r.videoSrc)
+                    }
+
                     previews.add(
                         PreviewJson(
                             fileName = "${normalizeName(series)}_s${pad2(season)}.json",
-                            videos = items.sortedWith(
-                                compareBy<RawItem>(
-                                    { parseSeasonEpisode(it.path)?.second ?: Int.MAX_VALUE },
-                                    { it.path.lowercase() }
-                                )
-                            ).map {
-                                VideoItem(it.title, it.skip, it.img, it.img, it.videoSrc)
-                            },
-                            debug = "SERIES $series S$season"
+                            videos = videos,
+                            debug = "SMB SERIES $series S$season"
                         )
                     )
                 }
 
-                // ================= MOVIES =================
+                // Movies → agrupar por saga (carpeta padre)
                 val sagaMap = linkedMapOf<String, MutableList<RawItem>>()
                 for (m in movies) {
-                    sagaMap.getOrPut(inferSagaNameFromPath(m.path)) { mutableListOf() }.add(m)
+                    sagaMap.getOrPut(inferSagaNameFromPath(m.smbPath)) { mutableListOf() }.add(m)
                 }
 
                 for ((saga, items) in sagaMap.toList()
@@ -140,69 +161,155 @@ class AutoImporter(
 
                     val videosSorted = items.sortedWith(
                         compareBy<RawItem>(
-                            { extractMovieSortKey(it.path, it.title) },
+                            { extractMovieSortKey(it.smbPath, it.title) },
                             { normalizeName(it.title) },
-                            { it.path.lowercase() }
+                            { it.smbPath.lowercase() }
                         )
-                    ).map {
-                        VideoItem(it.title, it.skip, it.img, it.img, it.videoSrc)
+                    ).map { r ->
+                        VideoItem(r.title, r.skip, r.img, r.img, r.videoSrc)
                     }
+
+                    val fileName =
+                        if (items.size > 1) {
+                            "saga_${normalizeName(saga).replace(" ", "_")}.json"
+                        } else {
+                            "${normalizeName(items.first().title).replace(" ", "_")}.json"
+                        }
 
                     previews.add(
                         PreviewJson(
-                            fileName = if (items.size > 1)
-                                "saga_${normalizeName(saga).replace(" ", "_")}.json"
-                            else
-                                "${normalizeName(items.first().title).replace(" ", "_")}.json",
+                            fileName = fileName,
                             videos = videosSorted,
-                            debug = "AUTO IMPORT"
+                            debug = "SMB MOVIES"
                         )
                     )
                 }
 
-                // 🚫 Evitar duplicados
                 val toImport = filterAlreadyImported(previews)
-
                 if (toImport.isEmpty()) {
-                    postToast("Todo ya estaba importado", toast)
-                    return@Thread postDone(0, onDone)
+                    toast("Todo ya estaba importado")
+                    onDone(0)
+                    return@Thread
                 }
 
-                importAllPreviews(toImport)
+                for (p in toImport) {
+                    val safeName = uniqueJsonName(p.fileName)
+                    jsonDataManager.addJson(context, safeName, p.videos)
+                }
 
-                postDone(toImport.size, onDone)
+                onDone(toImport.size)
 
             } catch (e: Exception) {
-                Log.e("AutoImporter", "Auto import failed", e)
-                postError("Error: ${e.message}", onError)
+                Log.e(tag, "FAILED", e)
+                onError("Error: ${e.message}")
             }
         }.start()
     }
 
-    // -------------------------
-    // UI helpers
-    // -------------------------
-    private fun postToast(msg: String, toast: (String) -> Unit) {
-        mainHandler.post { toast(msg) }
+    // =========================
+    // ✅ LISTAR VIDEOS SMB (recursivo)
+    // =========================
+
+    private fun listSmbVideos(serverId: String, shareName: String): List<String> {
+        val out = mutableListOf<String>()
+
+        val videoExt = setOf(
+            "mp4","mkv","avi","webm","mov","flv","mpg","mpeg","m4v","ts","3gp","wmv"
+        )
+
+        fun isVideo(name: String): Boolean {
+            val ext = name.substringAfterLast(".", "").lowercase()
+            return ext in videoExt
+        }
+
+        fun shouldSkipFolder(path: String): Boolean {
+            val p = path.lowercase()
+            // Windows también puede tener cosas pesadas, pero evitamos basura típica
+            return p.contains("system volume information") ||
+                    p.contains("\$recycle.bin") ||
+                    p.contains("windows") && p.contains("installer")
+        }
+
+        smbGateway.withDiskShare(serverId, shareName) { share ->
+            fun walk(dir: String) {
+                val cleanDir = dir.trim('\\', '/')
+                if (cleanDir.isNotEmpty() && shouldSkipFolder(cleanDir)) return
+
+                val list = try {
+                    if (cleanDir.isBlank()) share.list("") else share.list(cleanDir)
+                } catch (_: Exception) {
+                    return
+                }
+
+                for (f in list) {
+                    val name = f.fileName ?: continue
+                    if (name == "." || name == "..") continue
+
+                    val full = if (cleanDir.isBlank()) name else "$cleanDir/$name"
+
+                    val attrs = f.fileAttributes.toLong()
+                    val isDir = (attrs and FileAttributes.FILE_ATTRIBUTE_DIRECTORY.value.toLong()) != 0L
+
+                    if (isDir) {
+                        walk(full)
+                    } else {
+                        if (isVideo(name)) out.add(full.replace("\\", "/"))
+                    }
+                }
+
+
+            }
+
+            walk("")
+        }
+
+        return out
     }
 
-    private fun postDone(count: Int, onDone: (Int) -> Unit) {
-        mainHandler.post { onDone(count) }
+    private fun buildProxyUrl(serverId: String, share: String, smbPath: String): String {
+        val encodedPath = smbPath.split("/").joinToString("/") { seg ->
+            URLEncoder.encode(seg, "UTF-8").replace("+", "%20")
+        }
+        val shareEnc = URLEncoder.encode(share, "UTF-8").replace("+", "%20")
+        return "http://127.0.0.1:$proxyPort/smb/$serverId/$shareEnc/$encodedPath"
     }
 
-    private fun postError(msg: String, onError: (String) -> Unit) {
-        mainHandler.post { onError(msg) }
+    // =========================
+    // Cover API + cache
+    // =========================
+
+    private fun fetchCoverFromApiCached(q: String): ApiCover? {
+        if (coverCache.containsKey(q)) return coverCache[q]
+        val cover = try { fetchCoverFromApi(q) } catch (_: Exception) { null }
+        coverCache[q] = cover
+        return cover
     }
 
-    // -------------------------
-    // Helpers (idénticos a los tuyos)
-    // -------------------------
+    private fun fetchCoverFromApi(q: String): ApiCover? {
+        val base = "https://api-watchoffline.luzardo-thomas.workers.dev/cover?q="
+        val full = base + URLEncoder.encode(q.replace("+", " "), "UTF-8")
+        val conn = (java.net.URL(full).openConnection() as java.net.HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 8000
+            readTimeout = 8000
+        }
+        return try {
+            if (conn.responseCode != 200) return null
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            Gson().fromJson(body, ApiCover::class.java)
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    // =========================
+    // HELPERS (igual que LocalAutoImporter)
+    // =========================
 
     private fun pad2(n: Int): String = n.toString().padStart(2, '0')
 
     private fun normalizeName(s: String): String =
-        s.trim()
-            .replace('_', ' ')
+        s.trim().replace('_', ' ')
             .replace(Regex("""\s+"""), " ")
             .lowercase()
 
@@ -229,26 +336,6 @@ class AutoImporter(
         }
         Regex("""(?i)s(\d{1,2})[^\d]{0,3}(\d{1,2})""").find(fileNoExt)?.let {
             return it.groupValues[1].toInt() to it.groupValues[2].toInt()
-        }
-
-        val parts = clean.trim('/').split("/").filter { it.isNotBlank() }
-        if (parts.size >= 2) {
-            val seasonDir = normalizeName(parts[parts.size - 2])
-            val seasonNum =
-                Regex("""(?i)\b(t|temp|season)\s*(\d{1,2})\b""")
-                    .find(seasonDir)?.groupValues?.getOrNull(2)?.toIntOrNull()
-                    ?: Regex("""(?i)\bs(\d{1,2})\b""")
-                        .find(seasonDir)?.groupValues?.getOrNull(1)?.toIntOrNull()
-
-            if (seasonNum != null) {
-                val epNum =
-                    Regex("""(?i)\b(ep|e|cap|c)\s*(\d{1,3})\b""")
-                        .find(fileNoExt)?.groupValues?.getOrNull(2)?.toIntOrNull()
-                        ?: Regex("""(?i)\b(\d{1,3})\b""")
-                            .find(fileNoExt)?.groupValues?.getOrNull(1)?.toIntOrNull()
-
-                if (epNum != null) return seasonNum to epNum
-            }
         }
         return null
     }
@@ -292,38 +379,6 @@ class AutoImporter(
         return normalizeName(fileNoExt)
     }
 
-    private fun fetchCoverFromApiCached(q: String): ApiCover? {
-        if (coverCache.containsKey(q)) return coverCache[q]
-        val cover = fetchCoverFromApi(q)
-        coverCache[q] = cover
-        return cover
-    }
-
-    private fun fetchCoverFromApi(q: String): ApiCover? {
-        val base = "https://api-watchoffline.luzardo-thomas.workers.dev/cover?q="
-        val full = base + java.net.URLEncoder.encode(q.replace("+", " "), "UTF-8")
-
-        val conn = (URL(full).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 8000
-            readTimeout = 8000
-        }
-
-        return try {
-            val code = conn.responseCode
-            if (code != 200) return null
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
-            Gson().fromJson(body, ApiCover::class.java)
-        } finally {
-            conn.disconnect()
-        }
-    }
-
-    private fun filterAlreadyImported(previews: List<PreviewJson>): List<PreviewJson> {
-        val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toSet()
-        return previews.filter { it.fileName !in existing }
-    }
-
     private fun uniqueJsonName(base: String): String {
         val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toSet()
         if (!existing.contains(base)) return base
@@ -338,91 +393,8 @@ class AutoImporter(
         }
     }
 
-    private fun importPreview(preview: PreviewJson) {
-        val safeName = uniqueJsonName(preview.fileName)
-        jsonDataManager.addJson(context, safeName, preview.videos)
-    }
-
-    private fun importAllPreviews(previews: List<PreviewJson>) {
-        previews.forEach { importPreview(it) }
-    }
-
-    // -------------------------
-    // SMB list (igual a tu MainFragment)
-    // -------------------------
-    private fun smbListVideos(
-        host: String,
-        creds: SmbGateway.SmbCreds,
-        shareName: String,
-        max: Int = 100
-    ): List<String> {
-        val out = mutableListOf<String>()
-
-        val client = com.hierynomus.smbj.SMBClient()
-        val conn = client.connect(host)
-        val auth = com.hierynomus.smbj.auth.AuthenticationContext(
-            creds.username,
-            creds.password.toCharArray(),
-            creds.domain
-        )
-        val sess = conn.authenticate(auth)
-        val share = sess.connectShare(shareName) as com.hierynomus.smbj.share.DiskShare
-
-        try {
-            fun isDir(attrs: Any?): Boolean {
-                val maskLong = com.hierynomus.msfscc.FileAttributes.FILE_ATTRIBUTE_DIRECTORY.value.toLong()
-                val maskInt = maskLong.toInt()
-
-                return when (attrs) {
-                    is Set<*> -> attrs.contains(com.hierynomus.msfscc.FileAttributes.FILE_ATTRIBUTE_DIRECTORY)
-                    is java.util.EnumSet<*> -> attrs.contains(com.hierynomus.msfscc.FileAttributes.FILE_ATTRIBUTE_DIRECTORY)
-                    is Long -> (attrs and maskLong) != 0L
-                    is Int -> (attrs and maskInt) != 0
-                    else -> false
-                }
-            }
-
-            fun walk(dir: String) {
-                if (out.size >= max) return
-                val listing = share.list(dir)
-
-                for (f in listing) {
-                    if (out.size >= max) return
-
-                    val name = f.fileName ?: continue
-                    if (name == "." || name == "..") continue
-
-                    val childPath = if (dir.isBlank()) name else "$dir/$name"
-                    val directory = isDir(f.fileAttributes)
-
-                    if (directory) {
-                        walk(childPath)
-                    } else {
-                        val lower = name.lowercase()
-                        val isVideo = lower.endsWith(".mp4")
-                                || lower.endsWith(".mkv")
-                                || lower.endsWith(".avi")
-                                || lower.endsWith(".webm")
-                                || lower.endsWith(".mov")
-                                || lower.endsWith(".flv")
-                                || lower.endsWith(".mpg")
-                                || lower.endsWith(".mpeg")
-                                || lower.endsWith(".m4v")
-                                || lower.endsWith(".ts")
-                                || lower.endsWith(".3gp")
-                                || lower.endsWith(".wmv")
-
-                        if (isVideo) out.add(childPath)
-                    }
-                }
-            }
-
-            walk("")
-            return out
-        } finally {
-            try { share.close() } catch (_: Exception) {}
-            try { sess.close() } catch (_: Exception) {}
-            try { conn.close() } catch (_: Exception) {}
-        }
+    private fun filterAlreadyImported(previews: List<PreviewJson>): List<PreviewJson> {
+        val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toSet()
+        return previews.filter { it.fileName !in existing }
     }
 }
