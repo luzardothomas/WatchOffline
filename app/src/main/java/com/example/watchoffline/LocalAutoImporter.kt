@@ -17,8 +17,11 @@ import java.net.URLEncoder
 class LocalAutoImporter(
     private val context: Context,
     private val jsonDataManager: JsonDataManager,
-    private val serverPort: Int = 8080,          // BackgroundServer default
-    private val rootDir: File = File("/storage") // incluye emulated + USBs montados
+    private val serverPort: Int = 8080,
+    private val rootDirs: List<File> = listOf(
+        File("/storage/emulated/0"),
+        File("/sdcard")
+    )
 ) {
 
     // =========================
@@ -63,7 +66,11 @@ class LocalAutoImporter(
             try {
                 toast("Importando desde DISPOSITIVO…")
 
-                val files = listLocalVideos(rootDir)
+                val files = mutableListOf<String>()
+                rootDirs.forEach { dir ->
+                    files += listLocalVideos(dir)
+                }
+
                 if (files.isEmpty()) {
                     onError("No se encontraron videos en /storage")
                     return@Thread
@@ -209,16 +216,33 @@ class LocalAutoImporter(
         }
 
         fun walk(dir: File) {
-            if (shouldSkipDir(dir)) return
-            val children = dir.listFiles() ?: return
+            Log.d("SCAN", "ENTER DIR: ${dir.absolutePath}")
+
+            if (shouldSkipDir(dir)) {
+                Log.d("SCAN", "SKIP DIR: ${dir.absolutePath}")
+                return
+            }
+
+            val children = dir.listFiles()
+            if (children == null) {
+                Log.w("SCAN", "CANNOT LIST: ${dir.absolutePath}")
+                return
+            }
+
             for (f in children) {
-                if (f.isDirectory) walk(f)
-                else {
+                if (f.isDirectory) {
+                    walk(f)
+                } else {
+                    Log.d("SCAN", "FILE: ${f.name}")
                     val ext = f.name.substringAfterLast(".", "").lowercase()
-                    if (ext in videoExt) out.add(f.absolutePath.replace("\\", "/"))
+                    if (ext in videoExt) {
+                        Log.d("SCAN", "VIDEO FOUND: ${f.absolutePath}")
+                        out.add(f.absolutePath.replace("\\", "/"))
+                    }
                 }
             }
         }
+
 
         walk(root)
         return out

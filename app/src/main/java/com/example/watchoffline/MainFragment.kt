@@ -1,16 +1,18 @@
 package com.example.watchoffline
 
-import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.TextUtils
 import android.util.DisplayMetrics
 import android.util.Log
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.EditText
@@ -25,8 +27,8 @@ import androidx.leanback.widget.*
 import com.bumptech.glide.Glide
 import com.bumptech.glide.request.target.SimpleTarget
 import com.bumptech.glide.request.transition.Transition
+import com.google.common.reflect.TypeToken
 import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
 import java.util.LinkedHashMap
 import java.util.Timer
 import java.util.TimerTask
@@ -91,29 +93,35 @@ class MainFragment : BrowseSupportFragment() {
         val rowsAdapter = ArrayObjectAdapter(ListRowPresenter())
         val cardPresenter = CardPresenter()
 
-        // JSON Importados
-        jsonDataManager.getImportedJsons().forEach { json ->
-            val rowAdapter = ArrayObjectAdapter(cardPresenter).apply {
-                json.videos.forEach { add(it.toMovie()) }
-            }
-            rowsAdapter.add(
-                ListRow(
-                    HeaderItem(json.fileName.hashCode().toLong(), json.fileName),
-                    rowAdapter
-                )
-            )
-        }
-
-        // Preferencias
-        val prefAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
+        // ✅ 1) ACCIONES ARRIBA DE TODO
+        val actionsAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
             add(getString(R.string.erase_json))
             add("Eliminar todos los JSON")
             add("Conectarse al SMB")
             add("Importar de SMB")
             add("Importar de DISPOSITIVO")
-
         }
-        rowsAdapter.add(ListRow(HeaderItem(-1, "PREFERENCES"), prefAdapter))
+
+        rowsAdapter.add(
+            ListRow(
+                HeaderItem(0L, "ACCIONES"),
+                actionsAdapter
+            )
+        )
+
+        // ✅ 2) CONTENIDO DEBAJO
+        jsonDataManager.getImportedJsons().forEach { imported: ImportedJson ->
+            val rowAdapter = ArrayObjectAdapter(cardPresenter).apply {
+                imported.videos.forEach { add(it.toMovie()) }
+            }
+
+            rowsAdapter.add(
+                ListRow(
+                    HeaderItem(imported.fileName.hashCode().toLong(), prettyTitle(imported.fileName)),
+                    rowAdapter
+                )
+            )
+        }
 
         adapter = rowsAdapter
     }
@@ -163,14 +171,10 @@ class MainFragment : BrowseSupportFragment() {
         private fun handleStringAction(item: String) {
             when (item) {
                 getString(R.string.erase_json) -> showDeleteDialog()
-                "Erase ALL JSON" -> showDeleteAllDialog()
-                "Connect SMB" -> openSmbConnectFlow()
-
-                // ✅ ahora usa helper compartido
+                "Eliminar todos los JSON" -> showDeleteAllDialog()
+                "Conectarse al SMB" -> openSmbConnectFlow()
                 "Importar de SMB" -> runAutoImport()
                 "Importar de DISPOSITIVO" -> runLocalAutoImport()
-
-
                 else -> Toast.makeText(requireContext(), item, Toast.LENGTH_SHORT).show()
             }
         }
@@ -190,11 +194,7 @@ class MainFragment : BrowseSupportFragment() {
             onDone = { count ->
                 activity?.runOnUiThread {
                     refreshUI()
-                    Toast.makeText(
-                        requireContext(),
-                        "Importados $count JSON",
-                        Toast.LENGTH_LONG
-                    ).show()
+                    Toast.makeText(requireContext(), "Importados $count JSON", Toast.LENGTH_LONG).show()
                 }
             },
             onError = { err ->
@@ -205,8 +205,6 @@ class MainFragment : BrowseSupportFragment() {
         )
     }
 
-
-
     private fun runAutoImport() {
         AutoImporter(
             context = requireContext(),
@@ -214,16 +212,12 @@ class MainFragment : BrowseSupportFragment() {
             jsonDataManager = jsonDataManager,
             proxyPort = 8081
         ).run(
-            toast = { msg ->
-                Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show()
-            },
+            toast = { msg -> Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() },
             onDone = { count ->
                 refreshUI()
                 Toast.makeText(requireContext(), "Importados $count JSON", Toast.LENGTH_LONG).show()
             },
-            onError = { err ->
-                Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show()
-            }
+            onError = { err -> Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() }
         )
     }
 
@@ -332,7 +326,7 @@ class MainFragment : BrowseSupportFragment() {
         val dialog = AlertDialog.Builder(requireContext())
             .setTitle("Login SMB: ${server.host}")
             .setView(layout)
-            .setPositiveButton("Conectar", null) // no autoclose
+            .setPositiveButton("Conectar", null)
             .setNegativeButton("Cancelar", null)
             .create()
 
@@ -381,6 +375,11 @@ class MainFragment : BrowseSupportFragment() {
 
     private fun showDeleteDialog() {
         val items = jsonDataManager.getImportedJsons().map { it.fileName }.toTypedArray()
+        if (items.isEmpty()) {
+            Toast.makeText(requireContext(), "No hay JSONs para borrar", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         AlertDialog.Builder(requireContext()).apply {
             setTitle("Eliminar JSON")
             setItems(items) { _, which ->
@@ -454,36 +453,75 @@ class MainFragment : BrowseSupportFragment() {
         }
     }
 
+    // ✅ acciones más grandes y legibles
     private inner class GridItemPresenter : Presenter() {
+
+        private fun dp(v: Int): Int =
+            TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_DIP,
+                v.toFloat(),
+                requireContext().resources.displayMetrics
+            ).toInt()
+
         override fun onCreateViewHolder(parent: ViewGroup): ViewHolder {
-            return TextView(parent.context).apply {
-                layoutParams = ViewGroup.LayoutParams(GRID_ITEM_WIDTH, GRID_ITEM_HEIGHT)
+            val tv = TextView(parent.context).apply {
+                layoutParams = ViewGroup.LayoutParams(dp(130), dp(100))
                 isFocusable = true
                 isFocusableInTouchMode = true
-                setBackgroundColor(ContextCompat.getColor(context, R.color.default_background))
+
+                // tenés que crear este drawable (abajo te lo dejo)
+                setBackgroundResource(R.drawable.action_tile_bg)
+
                 setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                typeface = Typeface.DEFAULT_BOLD
                 gravity = Gravity.CENTER
-            }.let { ViewHolder(it) }
+
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+            }
+
+            tv.setOnFocusChangeListener { v, hasFocus ->
+                v.animate()
+                    .scaleX(if (hasFocus) 1.08f else 1f)
+                    .scaleY(if (hasFocus) 1.08f else 1f)
+                    .setDuration(120)
+                    .start()
+                v.alpha = if (hasFocus) 1f else 0.92f
+            }
+
+            return ViewHolder(tv)
         }
 
         override fun onBindViewHolder(viewHolder: ViewHolder, item: Any) {
             (viewHolder.view as TextView).text = item as String
         }
 
-        override fun onUnbindViewHolder(viewHolder: ViewHolder) {}
+        override fun onUnbindViewHolder(viewHolder: ViewHolder) = Unit
     }
 
     companion object {
         private const val TAG = "MainFragment"
         private const val BACKGROUND_UPDATE_DELAY = 300
-        private const val GRID_ITEM_WIDTH = 200
-        private const val GRID_ITEM_HEIGHT = 200
     }
+}
+
+// ✅ Título lindo para headers
+private fun prettyTitle(raw: String): String {
+    var s = raw.trim()
+
+    if (s.lowercase().endsWith(".json")) {
+        s = s.dropLast(5)
+    }
+
+    s = s.replace("_", " ")
+    s = s.replace(Regex("\\s+"), " ").trim()
+
+    return s.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
 }
 
 // =========================
 // DATA CLASSES + MANAGER
-// (Si ya existen en otro archivo, NO los dupliques)
 // =========================
 data class VideoItem(
     val title: String,
@@ -521,28 +559,20 @@ class JsonDataManager {
     fun getImportedJsons(): List<ImportedJson> = importedJsons.toList()
 
     fun loadData(context: Context) {
-        try {
-            val json = context.getSharedPreferences("json_data", Context.MODE_PRIVATE)
-                .getString("imported", null) ?: return
+        val json = context
+            .getSharedPreferences("json_data", Context.MODE_PRIVATE)
+            .getString("imported", null) ?: return
 
-            val type = object : TypeToken<List<ImportedJson>>() {}.type
-            importedJsons.clear()
-            importedJsons.addAll(Gson().fromJson(json, type))
-        } catch (e: Exception) {
-            Log.e("JsonDataManager", "Error loading JSON data", e)
-        }
+        val type = object : TypeToken<List<ImportedJson>>() {}.type
+        importedJsons.clear()
+        importedJsons.addAll(Gson().fromJson(json, type))
     }
 
-    fun saveData(context: Context) {
-        try {
-            val json = Gson().toJson(importedJsons)
-            context.getSharedPreferences("json_data", Context.MODE_PRIVATE).edit()
-                .putString("imported", json)
-                .apply()
-        } catch (e: Exception) {
-            Log.e("JsonDataManager", "Error saving JSON data", e)
-        }
+    private fun saveData(context: Context) {
+        val json = Gson().toJson(importedJsons)
+        context.getSharedPreferences("json_data", Context.MODE_PRIVATE)
+            .edit()
+            .putString("imported", json)
+            .apply()
     }
 }
-
-

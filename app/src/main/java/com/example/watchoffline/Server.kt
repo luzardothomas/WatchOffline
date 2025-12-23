@@ -1,8 +1,10 @@
 package com.example.watchoffline
 
+import android.util.Log
 import fi.iki.elonen.NanoHTTPD
 import java.io.File
 import java.io.FileInputStream
+import java.net.URLDecoder
 
 class BackgroundServer(
     port: Int = 8080
@@ -18,12 +20,21 @@ class BackgroundServer(
 
     override fun serve(session: IHTTPSession): Response {
         return try {
-            val uri = session.uri ?: "/"
-            val relativePath = uri.removePrefix("/")
+            // ✅ 1) decodificar URL (/..../Neon%20Genesis.. -> Neon Genesis..)
+            val decodedPath = URLDecoder.decode(session.uri, "UTF-8")
 
-            val requestedFile =
-                if (relativePath.isBlank()) rootDir
-                else File(rootDir, relativePath)
+            // ✅ 2) normalizar y proteger
+            val requestedFile = File(decodedPath).canonicalFile
+            val root = rootDir.canonicalFile  // rootDir = File("/storage")
+
+            // 🔒 seguridad: solo permitir archivos dentro de /storage
+            if (!requestedFile.path.startsWith(root.path)) {
+                return newFixedLengthResponse(
+                    Response.Status.FORBIDDEN,
+                    "text/plain",
+                    "Forbidden"
+                )
+            }
 
             when {
                 !requestedFile.exists() -> notFound()
@@ -31,7 +42,12 @@ class BackgroundServer(
                 else -> serveFile(requestedFile)
             }
         } catch (e: Exception) {
-            errorResponse(e)
+            Log.e("BackgroundServer", "serve() error", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "text/plain",
+                "Server error: ${e.message}"
+            )
         }
     }
 

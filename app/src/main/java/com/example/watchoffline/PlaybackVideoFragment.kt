@@ -22,6 +22,7 @@ import org.videolan.libvlc.Media
 import org.videolan.libvlc.util.VLCVideoLayout
 import org.videolan.libvlc.MediaPlayer as VlcMediaPlayer
 
+
 class PlaybackVideoFragment : Fragment() {
 
     private lateinit var root: View
@@ -60,6 +61,27 @@ class PlaybackVideoFragment : Fragment() {
         isUserSeeking = false
         previewSeekMs = null
     }
+
+    private fun enterImmersiveMode() {
+        requireActivity().window.decorView.systemUiVisibility =
+            (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_FULLSCREEN)
+    }
+
+    override fun onStart() {
+        super.onStart()
+
+        // 🔒 Reforzar modo inmersivo cuando VLC toma el foco
+        view?.setOnSystemUiVisibilityChangeListener {
+            enterImmersiveMode()
+        }
+    }
+
+
 
 
 
@@ -139,6 +161,7 @@ class PlaybackVideoFragment : Fragment() {
         super.onResume()
         // ✅ Si el overlay está oculto, que el root tenga foco para capturar DPAD
         if (!controlsVisible) root.requestFocus()
+        enterImmersiveMode()
     }
 
     private fun setupControls() {
