@@ -1,3 +1,4 @@
+// MainFragment.kt
 package com.example.watchoffline
 
 import android.app.Activity
@@ -13,6 +14,8 @@ import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
+import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.ActivityOptionsCompat
@@ -39,22 +42,37 @@ class MainFragment : BrowseSupportFragment() {
     private val REQUEST_CODE_IMPORT_JSON = 1001
     private val jsonDataManager = JsonDataManager()
 
+    // ✅ SMB
+    private lateinit var smbGateway: SmbGateway
+
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         super.onActivityCreated(savedInstanceState)
         Log.i(TAG, "onCreate")
 
-        jsonDataManager.loadData(requireContext()) // Los datos persisten aquí
+        jsonDataManager.loadData(requireContext())
+
+        // ✅ usar applicationContext para prefs/crypto + evitar leaks
+        smbGateway = SmbGateway(requireContext().applicationContext)
+
+        // ✅ arranca proxy SMB en 8081 (no choca con tu server 8080)
+        val ok = smbGateway.ensureProxyStarted(8081)
+        Log.e(TAG, "SMB proxy started? $ok (port=${smbGateway.getProxyPort()})")
 
         prepareBackgroundManager()
         setupUIElements()
         loadRows()
         setupEventListeners()
-
     }
 
     override fun onDestroy() {
         super.onDestroy()
         mBackgroundTimer?.cancel()
+
+        // ✅ SMB
+        try { smbGateway.stopDiscovery() } catch (_: Exception) {}
+        // no hace falta frenar el proxy acá si querés que quede vivo mientras la app está abierta,
+        // pero si querés cortarlo:
+        // try { smbGateway.stopProxy() } catch (_: Exception) {}
     }
 
     private fun prepareBackgroundManager() {
@@ -82,10 +100,12 @@ class MainFragment : BrowseSupportFragment() {
         jsonDataManager.getImportedJsons().forEach { json ->
             ArrayObjectAdapter(cardPresenter).apply {
                 json.videos.forEach { add(it.toMovie()) }
-                rowsAdapter.add(ListRow(
-                    HeaderItem(json.fileName.hashCode().toLong(), json.fileName), // <- Nombre aquí
-                    this
-                ))
+                rowsAdapter.add(
+                    ListRow(
+                        HeaderItem(json.fileName.hashCode().toLong(), json.fileName),
+                        this
+                    )
+                )
             }
         }
 
@@ -93,6 +113,10 @@ class MainFragment : BrowseSupportFragment() {
         ArrayObjectAdapter(GridItemPresenter()).apply {
             add(getString(R.string.import_json))
             add(getString(R.string.erase_json))
+
+            // ✅ SMB
+            add("Connect SMB")
+
             rowsAdapter.add(ListRow(HeaderItem(-1, "PREFERENCES"), this))
         }
 
@@ -146,10 +170,165 @@ class MainFragment : BrowseSupportFragment() {
             when (item) {
                 getString(R.string.import_json) -> openFilePicker()
                 getString(R.string.erase_json) -> showDeleteDialog()
+                "Connect SMB" -> openSmbConnectFlow()
                 else -> Toast.makeText(requireContext(), item, Toast.LENGTH_SHORT).show()
             }
         }
     }
+
+    // ✅ SMB: buscar SMBs + fallback manual
+    private fun openSmbConnectFlow() {
+        Toast.makeText(requireContext(), "Buscando SMBs en la red...", Toast.LENGTH_SHORT).show()
+
+        val found = LinkedHashMap<String, SmbGateway.SmbServer>()
+
+        smbGateway.discover(
+            onFound = { server -> found[server.id] = server },
+            onError = { err ->
+                Log.e(TAG, err)
+                Toast.makeText(requireContext(), "No se pudo escanear SMB: $err", Toast.LENGTH_LONG).show()
+                showManualSmbDialog()
+            }
+        )
+
+        Handler(Looper.getMainLooper()).postDelayed({
+            smbGateway.stopDiscovery()
+
+            if (found.isEmpty()) {
+                showManualSmbDialog()
+                return@postDelayed
+            }
+
+            val servers = found.values.toList()
+            val labels = servers.map { "${it.name}  (${it.host}:${it.port})" }.toTypedArray()
+
+            AlertDialog.Builder(requireContext())
+                .setTitle("SMB encontrados")
+                .setItems(labels) { _, which -> showCredentialsDialog(servers[which]) }
+                .setNegativeButton("Cancelar", null)
+                .show()
+        }, 2000)
+    }
+
+    // ✅ SMB: manual
+    private fun showManualSmbDialog() {
+        val hostInput = EditText(requireContext()).apply {
+            hint = "IP o hostname (ej: 192.168.1.50)"
+        }
+
+        AlertDialog.Builder(requireContext())
+            .setTitle("Agregar SMB manual")
+            .setView(hostInput)
+            .setPositiveButton("Continuar") { _, _ ->
+                val host = hostInput.text.toString().trim()
+                if (host.isBlank()) return@setPositiveButton
+
+                val server = SmbGateway.SmbServer(
+                    id = java.util.UUID.nameUUIDFromBytes("$host:445".toByteArray()).toString(),
+                    name = host,
+                    host = host,
+                    port = 445
+                )
+                showCredentialsDialog(server)
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    // ✅ SMB: credenciales + share + cache (EN BACKGROUND)
+    private fun showCredentialsDialog(server: SmbGateway.SmbServer) {
+        val layout = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(50, 20, 50, 0)
+        }
+
+        val userInput = EditText(requireContext()).apply { hint = "Usuario" }
+        val passInput = EditText(requireContext()).apply {
+            hint = "Contraseña"
+            inputType =
+                android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val domainInput = EditText(requireContext()).apply { hint = "Dominio (opcional, ej: WORKGROUP)" }
+        val shareInput = EditText(requireContext()).apply { hint = "Share (ej: pelis, Videos, Public)" }
+
+        layout.addView(userInput)
+        layout.addView(passInput)
+        layout.addView(domainInput)
+        layout.addView(shareInput)
+
+        val dialog = AlertDialog.Builder(requireContext())
+            .setTitle("Login SMB: ${server.host}")
+            .setView(layout)
+            .setNegativeButton("Cancelar", null)
+            .setPositiveButton("Conectar", null) // lo manejamos manual
+            .create()
+
+        dialog.setOnShowListener {
+            val btn = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            btn.setOnClickListener {
+                val user = userInput.text.toString().trim()
+                val pass = passInput.text.toString()
+                val domain = domainInput.text.toString().trim().ifBlank { null }
+                val shareName = shareInput.text.toString().trim()
+
+                // ✅ TU REQUERIMIENTO: si falta algo, igual cerramos el diálogo
+                if (user.isBlank()) {
+                    dialog.dismiss()
+                    Toast.makeText(requireContext(), "Usuario requerido", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                if (shareName.isBlank()) {
+                    dialog.dismiss()
+                    Toast.makeText(requireContext(), "Share requerido (ej: pelis)", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+
+                btn.isEnabled = false
+                val creds = SmbGateway.SmbCreds(user, pass, domain)
+
+                Thread {
+                    try {
+                        Log.e(TAG, "SMB CONNECT start host=${server.host}:${server.port} serverId=${server.id} share=$shareName")
+
+                        smbGateway.testLogin(server.host, creds)
+                        smbGateway.testShareAccess(server.host, creds, shareName)
+                        smbGateway.saveCreds(server.id, server.host, creds)
+
+                        val idsAfter = smbGateway.listCachedServerIds()
+                        Log.e(TAG, "SMB CONNECT OK. cachedServerIds now = $idsAfter")
+
+                        requireActivity().runOnUiThread {
+                            // ✅ cerrar el diálogo apenas conectó
+                            dialog.dismiss()
+
+                            Toast.makeText(requireContext(), "SMB conectado y cacheado ✅", Toast.LENGTH_LONG).show()
+
+                            AlertDialog.Builder(requireContext())
+                                .setTitle("SMB conectado ✅")
+                                .setMessage(
+                                    "serverId:\n${server.id}\n\n" +
+                                            "Probá:\nhttp://127.0.0.1:8081/debug\n\n" +
+                                            "Formato videoSrc:\nhttp://127.0.0.1:8081/smb/<serverId>/<share>/<ruta>"
+                                )
+                                .setPositiveButton("OK", null)
+                                .show()
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "SMB CONNECT FAILED", e)
+                        requireActivity().runOnUiThread {
+                            // ✅ también cerramos el diálogo si falla (para que siempre se cierre)
+                            dialog.dismiss()
+                            Toast.makeText(requireContext(), "Error SMB: ${e.message}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }.start()
+            }
+        }
+
+        dialog.show()
+    }
+
+
 
     private fun openFilePicker() {
         Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -168,7 +347,6 @@ class MainFragment : BrowseSupportFragment() {
                     val jsonString = stream.bufferedReader().use { it.readText() }
                     val videos = Gson().fromJson(jsonString, Array<VideoItem>::class.java).toList()
 
-                    // Obtener nombre real del archivo
                     val fileName = JsonUtils.getFileNameFromUri(requireContext(), uri)
                         ?: "imported_${System.currentTimeMillis()}"
 
@@ -193,7 +371,7 @@ class MainFragment : BrowseSupportFragment() {
     }
 
     private fun refreshUI() {
-        jsonDataManager.loadData(requireContext()) // Recargar datos
+        jsonDataManager.loadData(requireContext())
         loadRows()
         startBackgroundTimer()
     }
@@ -284,7 +462,6 @@ data class ImportedJson(
 class JsonDataManager {
     private val importedJsons = mutableListOf<ImportedJson>()
 
-    // Añade un JSON usando el nombre real del archivo
     fun addJson(context: Context, fileName: String, videos: List<VideoItem>) {
         if (importedJsons.none { it.fileName == fileName }) {
             importedJsons.add(ImportedJson(fileName, videos))
@@ -298,7 +475,6 @@ class JsonDataManager {
     }
 
     fun getImportedJsons(): List<ImportedJson> = importedJsons.toList()
-
 
     fun loadData(context: Context) {
         try {

@@ -58,4 +58,8 @@ dependencies {
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    // SMB client
+    implementation("com.hierynomus:smbj:0.11.5")
 }
