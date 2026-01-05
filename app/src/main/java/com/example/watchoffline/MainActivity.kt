@@ -3,25 +3,19 @@ package com.example.watchoffline
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.*
-import android.net.wifi.WifiManager
-import android.os.*
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
 import android.provider.Settings
-import android.util.Log
 import android.widget.Toast
-import androidx.core.app.ActivityCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.net.Inet4Address
-import java.net.NetworkInterface
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
-
 
 class MainActivity : FragmentActivity() {
 
@@ -35,16 +29,15 @@ class MainActivity : FragmentActivity() {
 
         if (savedInstanceState == null) {
             val fragment = if (isTvDevice()) {
-                MainFragment()          // TV (Leanback)
+                MainFragment()          // TV / TV Box
             } else {
-                MobileMainFragment()    // Celular (touch)
+                MobileMainFragment()    // Mobile (touch)
             }
 
             supportFragmentManager.beginTransaction()
                 .replace(R.id.main_browse_fragment, fragment)
                 .commitNow()
         }
-
 
         if (!isTvDevice()) {
             enterImmersiveMode()
@@ -58,14 +51,33 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    /**
+     * Detección robusta de TV:
+     * - Google TV / Android TV
+     * - TV Boxes no Google (DPAD + sin touch)
+     */
     private fun isTvDevice(): Boolean {
-        val uiMode = resources.configuration.uiMode
-        val isTelevision =
-            (uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK) ==
-                    android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+        val cfg = resources.configuration
+        val pm = packageManager
 
-        val hasLeanback = packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
-        return isTelevision || hasLeanback
+        val uiModeType =
+            cfg.uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK
+        val isTelevision =
+            uiModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+
+        val hasLeanback =
+            pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK) ||
+                    pm.hasSystemFeature("android.software.leanback")
+
+        val hasTelevisionFeature =
+            pm.hasSystemFeature(PackageManager.FEATURE_TELEVISION)
+
+        val noTouch =
+            cfg.touchscreen == android.content.res.Configuration.TOUCHSCREEN_NOTOUCH
+        val dpad =
+            cfg.navigation == android.content.res.Configuration.NAVIGATION_DPAD
+
+        return isTelevision || hasLeanback || hasTelevisionFeature || (noTouch && dpad)
     }
 
     private fun enterImmersiveMode() {
@@ -81,12 +93,7 @@ class MainActivity : FragmentActivity() {
             try {
                 server = BackgroundServer()
                 server.start()
-
-                val url = getBestServerUrl(server.listeningPort)
-                Log.d("Server", "Servidor iniciado en $url")
-
             } catch (e: Exception) {
-                Log.e("Server", "Error al iniciar servidor: ${e.message}")
                 runOnUiThread {
                     Toast.makeText(
                         this@MainActivity,
@@ -100,10 +107,8 @@ class MainActivity : FragmentActivity() {
         checkPermissions()
     }
 
-    // 🔑 LOGICA CORRECTA DE INFORME
     private fun getBestServerUrl(port: Int): String {
         return "http://localhost:$port"
-
     }
 
     private fun checkPermissions() {
@@ -127,7 +132,6 @@ class MainActivity : FragmentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        server.stop()
-        Log.d("Server", "Servidor detenido")
+        try { server.stop() } catch (_: Exception) {}
     }
 }

@@ -24,7 +24,6 @@ import java.util.Locale
 import java.util.UUID
 import android.content.Context
 
-
 class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
     private lateinit var btnToggleSearchRef: ImageButton
@@ -118,7 +117,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
         val target = findLastPlayedTarget(sections, key) ?: return
 
-        // sacar foco de search si estaba
+        // ✅ si estaba en search, limpiamos focus visual del input (no pedimos focus a nada)
         try {
             btnToggleSearchRef.clearFocus()
             searchInputRef.clearFocus()
@@ -127,56 +126,27 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         rv.post {
             rv.scrollToPosition(target.sectionIndex)
 
+            // ✅ marca visualmente (tu adapter ya lo soporta)
             (rv.adapter as? MobileSectionsAdapter)?.setSelectedVideoUrl(key)
 
-            var tries = 0
-            fun tryFocus() {
-                tries++
+            // ✅ opcional: también scrollear dentro de la fila horizontal, pero sin focus
+            rv.postDelayed({
                 val vh = rv.findViewHolderForAdapterPosition(target.sectionIndex)
                 val rowRv = vh?.itemView?.findViewById<RecyclerView>(R.id.sectionRowRecycler)
-
-                if (rowRv == null) {
-                    if (tries < 25) rv.postDelayed({ tryFocus() }, 16)
-                    return
-                }
-
-                rowRv.scrollToPosition(target.itemIndex)
-
-                rowRv.postDelayed({
-                    val itemVH = rowRv.findViewHolderForAdapterPosition(target.itemIndex)
-                    val itemView = itemVH?.itemView
-
-                    if (itemView != null) {
-                        itemView.isFocusable = true
-                        itemView.isFocusableInTouchMode = true
-                        itemView.requestFocus()
-                    } else {
-                        if (tries < 25) {
-                            rv.postDelayed({ tryFocus() }, 16)
-                        }
-                    }
-                }, 60)
-
-            }
-
-            rv.postDelayed({ tryFocus() }, 120)
+                rowRv?.scrollToPosition(target.itemIndex)
+            }, 120)
         }
     }
-
-
 
     override fun onResume() {
         super.onResume()
 
-        // ✅ al volver del player, intentá apuntar al último reproducido
+        // ✅ Mobile: solo scroll/mark, sin requestFocus
         view?.post {
-            // si por layout el foco cae arriba, lo corregimos
-            if (this::sectionsRecyclerRef.isInitialized) {
-                sectionsRecyclerRef.requestFocus()
-            }
             focusLastPlayedIfAnyMobile()
         }
     }
+
 
 
 

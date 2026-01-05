@@ -61,14 +61,15 @@
                 android:paddingStart="12dp" />
         </LinearLayout>
 
-        <!-- BOTONES PRINCIPALES -->
+        <!-- BOTONES PRINCIPALES (centrados como bloque) -->
         <LinearLayout
             android:id="@+id/controls_row"
-            android:layout_width="match_parent"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="14dp"
             android:orientation="horizontal"
-            android:gravity="center_vertical|center">
+            android:layout_gravity="center_horizontal"
+            android:gravity="center_vertical">
 
             <!-- PREV VIDEO -->
             <ImageButton
@@ -135,6 +136,21 @@
                 android:focusable="true"
                 android:focusableInTouchMode="true" />
 
+            <!-- SUBTITLES (DESPUÉS de Siguiente) -->
+            <ImageButton
+                android:id="@+id/btn_subtitles"
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:layout_marginStart="10dp"
+                android:background="@android:drawable/btn_default"
+                android:src="@drawable/ic_subtitles"
+                android:tint="@android:color/white"
+                android:contentDescription="Subtítulos"
+                android:scaleType="centerInside"
+                android:padding="10dp"
+                android:focusable="true"
+                android:focusableInTouchMode="true" />
+
         </LinearLayout>
     </LinearLayout>
 
@@ -166,8 +182,7 @@
         android:textColor="@android:color/white"
         android:visibility="gone"
         android:alpha="0"
-        android:focusable="true"
-        android:focusableInTouchMode="true" />
+        android:focusable="false"
+        android:focusableInTouchMode="false" />
 
 </FrameLayout>
-

@@ -1,5 +1,6 @@
 package com.example.watchoffline.vid
 
+import android.app.AlertDialog
 import android.content.Context
 import android.net.Uri
 import android.os.Bundle
@@ -21,14 +22,13 @@ import com.example.watchoffline.Movie
 import com.example.watchoffline.R
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
+import org.videolan.libvlc.MediaPlayer.TrackDescription
 import org.videolan.libvlc.util.VLCVideoLayout
 import org.videolan.libvlc.MediaPlayer as VlcMediaPlayer
 
 class PlaybackVideoFragment : Fragment() {
 
     companion object {
-        // Para que la Home pueda enfocar el último reproducido (opcional)
-        const val EXTRA_LAST_PLAYED_VIDEO_URL = "LAST_PLAYED_VIDEO_URL"
 
         // SharedPreferences
         private const val PREFS_NAME = "watchoffline_prefs"
@@ -45,6 +45,7 @@ class PlaybackVideoFragment : Fragment() {
     private lateinit var btnSeekBack: ImageButton
     private lateinit var btnPlayPause: ImageButton
     private lateinit var btnSeekFwd: ImageButton
+    private lateinit var btnSubtitles: ImageButton
     private lateinit var skipIntroButton: Button
 
     private var lastSkipVisible = false
@@ -58,7 +59,6 @@ class PlaybackVideoFragment : Fragment() {
     private lateinit var btnPrevVideo: ImageButton
     private lateinit var btnNextVideo: ImageButton
 
-
     // ✅ Playlist REAL (solo desde arguments)
     private var playlist: List<Movie> = emptyList()
     private var currentIndex: Int = 0
@@ -68,10 +68,8 @@ class PlaybackVideoFragment : Fragment() {
     private var loopPlaylist: Boolean = false
     private var disableLastPlayed: Boolean = false
 
-
     // ✅ MOBILE ONLY: botón salir arriba-izquierda
     private var btnExitMobile: View? = null
-
     private var mobileExitEnabled = false
 
     private val ui = Handler(Looper.getMainLooper())
@@ -85,9 +83,9 @@ class PlaybackVideoFragment : Fragment() {
 
     private val SEEK_STEP_MS = 10_000L
     private val SEEK_STEP_BAR = 25
-    private val AUTO_HIDE_MS = 5000L
+    private val AUTO_HIDE_MS = 10000L
 
-    private val SKIP_WINDOW_MS = 5_000L
+    private val SKIP_WINDOW_MS = 15_000L
 
     private var previewSeekMs: Long? = null
     private val CLEAR_PREVIEW_DELAY = 650L
@@ -100,6 +98,30 @@ class PlaybackVideoFragment : Fragment() {
         previewSeekMs = null
     }
 
+    // ===== Subtitles (SPU) =====
+    private var spuTracks: Array<TrackDescription> = emptyArray()
+    private var currentSpuTrackId: Int = -1 // VLC Disable = -1
+    private var spuRefreshTries = 0
+    private val MAX_SPU_REFRESH_TRIES = 8
+
+    private val spuRefreshRunnable = object : Runnable {
+        override fun run() {
+            refreshSpuTracks()
+            if (spuTracks.isNotEmpty()) return
+
+            spuRefreshTries++
+            if (spuRefreshTries >= MAX_SPU_REFRESH_TRIES) return
+
+            ui.postDelayed(this, 600L) // ~4.8s total
+        }
+    }
+
+    private fun scheduleSpuRefreshLoop() {
+        ui.removeCallbacks(spuRefreshRunnable)
+        spuRefreshTries = 0
+        ui.post(spuRefreshRunnable)
+    }
+
     // ===== Mobile exit: show/hide por alpha =====
     private val hideExitRunnable = Runnable {
         btnExitMobile?.animate()
@@ -107,7 +129,6 @@ class PlaybackVideoFragment : Fragment() {
             ?.setDuration(150)
             ?.start()
     }
-
 
     private fun showExitTemporarily(timeoutMs: Long = AUTO_HIDE_MS) {
         if (!mobileExitEnabled) return
@@ -120,7 +141,6 @@ class PlaybackVideoFragment : Fragment() {
 
         ui.postDelayed(hideExitRunnable, timeoutMs)
     }
-
 
     private fun enterImmersiveMode() {
         requireActivity().window.decorView.systemUiVisibility =
@@ -139,15 +159,17 @@ class PlaybackVideoFragment : Fragment() {
 
     private val hideControlsRunnable = Runnable {
         controlsVisible = false
+        controlsOverlay.alpha = 0f
         controlsOverlay.visibility = View.GONE
 
-        // ✅ Regla: si controles ocultos y Skip visible => foco en Skip (solo TV)
         if (isTvDevice() && skipIntroButton.visibility == View.VISIBLE) {
             skipIntroButton.requestFocus()
         } else {
             root.requestFocus()
         }
     }
+
+
 
 
     // =========================
@@ -171,7 +193,6 @@ class PlaybackVideoFragment : Fragment() {
         Log.e(TAG, "PERSIST lastUrl=$url reason=$reason idx=$currentIndex size=${playlist.size}")
     }
 
-
     // =========================
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -184,6 +205,7 @@ class PlaybackVideoFragment : Fragment() {
         btnSeekBack = root.findViewById(R.id.btn_seek_back)
         btnPlayPause = root.findViewById(R.id.btn_play_pause)
         btnSeekFwd = root.findViewById(R.id.btn_seek_fwd)
+        btnSubtitles = root.findViewById(R.id.btn_subtitles)
         skipIntroButton = root.findViewById(R.id.skip_intro_button)
         txtPos = root.findViewById(R.id.txt_pos)
         txtDur = root.findViewById(R.id.txt_dur)
@@ -205,22 +227,38 @@ class PlaybackVideoFragment : Fragment() {
         btnSeekBack.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         btnPlayPause.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         btnSeekFwd.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+        btnSubtitles.setBackgroundColor(android.graphics.Color.TRANSPARENT)
 
         setupControls()
         setupPrevNextHandlers()
         setupRemoteHandlers()
+        setupSubtitles()
 
-        addTvFocusScale(btnPrevVideo)
-        addTvFocusScale(btnSeekBack)
-        addTvFocusScale(btnPlayPause, 1.18f)
-        addTvFocusScale(btnSeekFwd)
-        addTvFocusScale(btnNextVideo)
-        addTvFocusScale(seekBar, 1.06f)
-        addTvFocusScale(skipIntroButton, 1.10f)
+        if (isTvDevice()) {
+            addTvFocusScale(btnPrevVideo)
+            addTvFocusScale(btnSeekBack)
+            addTvFocusScale(btnPlayPause, 1.18f)
+            addTvFocusScale(btnSeekFwd)
+            addTvFocusScale(btnSubtitles)
+            addTvFocusScale(btnNextVideo)
+            addTvFocusScale(seekBar, 1.06f)
+            addTvFocusScale(skipIntroButton, 1.10f)
+        }
 
         videoLayout.setOnClickListener {
             toggleControls()
+
+            // ✅ Mobile: solo mostrar exit por touch, sin “hover”
             showExitTemporarily()
+
+            // ✅ TV: si querés mantener prioridad de foco
+            if (isTvDevice() && controlsVisible) {
+                if (skipIntroButton.visibility == View.VISIBLE) {
+                    skipIntroButton.requestFocus()
+                } else {
+                    btnPlayPause.requestFocus()
+                }
+            }
         }
 
         controlsOverlay.bringToFront()
@@ -272,7 +310,6 @@ class PlaybackVideoFragment : Fragment() {
 
         Log.e(TAG, "FLAGS loopPlaylist=$loopPlaylist disableLastPlayed=$disableLastPlayed")
 
-
         persistLastPlayed("enter")
         endHandled = false
         updatePrevNextState()
@@ -283,8 +320,6 @@ class PlaybackVideoFragment : Fragment() {
         // Mantener pantalla encendida
         view.keepScreenOn = true
     }
-
-
 
     /**
      * ✅ ÚNICA FUENTE DE VERDAD: arguments
@@ -321,7 +356,6 @@ class PlaybackVideoFragment : Fragment() {
         }
     }
 
-
     private fun updatePrevNextState() {
         val hasPrev = hasPrev()
         val hasNext = hasNext()
@@ -338,7 +372,6 @@ class PlaybackVideoFragment : Fragment() {
             btnNextVideo.isFocusableInTouchMode = hasNext
         }
     }
-
 
     private fun nextIndex(): Int? {
         if (playlist.size <= 1) return null
@@ -357,7 +390,6 @@ class PlaybackVideoFragment : Fragment() {
     private fun hasNext(): Boolean = nextIndex() != null
     private fun hasPrev(): Boolean = prevIndex() != null
 
-
     private fun handleVideoEnded() {
         if (endHandled) return
         endHandled = true
@@ -372,12 +404,10 @@ class PlaybackVideoFragment : Fragment() {
         }
     }
 
-
     private fun playIndex(newIndex: Int) {
         if (playlist.size <= 1) return
 
         val idx = if (loopPlaylist) {
-            // wrap circular seguro
             val size = playlist.size
             ((newIndex % size) + size) % size
         } else {
@@ -410,7 +440,12 @@ class PlaybackVideoFragment : Fragment() {
         lastSkipVisible = false
         updatePrevNextState()
 
-        // ✅ En RANDOM no guarda lastPlayed (persistLastPlayed lo corta por flag)
+        // Subs: por defecto desactivados
+        currentSpuTrackId = -1
+        spuTracks = emptyArray()
+        btnSubtitles.isEnabled = false
+        btnSubtitles.alpha = 0.35f
+
         persistLastPlayed("playIndex")
 
         endHandled = false
@@ -419,7 +454,6 @@ class PlaybackVideoFragment : Fragment() {
 
         if (isTvDevice()) btnPlayPause.requestFocus()
     }
-
 
     override fun onResume() {
         super.onResume()
@@ -477,16 +511,102 @@ class PlaybackVideoFragment : Fragment() {
         }
     }
 
+    private fun setupSubtitles() {
+        btnSubtitles.isEnabled = false
+        btnSubtitles.alpha = 0.35f
+
+        btnSubtitles.setOnClickListener {
+            bumpControlsTimeout()
+            showExitTemporarily()
+            openSubtitlesDialog()
+        }
+    }
+
+    private fun refreshSpuTracks() {
+        val p = vlcPlayer ?: run {
+            spuTracks = emptyArray()
+            btnSubtitles.isEnabled = false
+            btnSubtitles.alpha = 0.35f
+            return
+        }
+
+        val tracks = try { p.spuTracks } catch (_: Exception) { emptyArray() }
+        spuTracks = tracks ?: emptyArray()
+
+        val has = spuTracks.isNotEmpty()
+        btnSubtitles.isEnabled = has
+        btnSubtitles.alpha = if (has) 1f else 0.35f
+
+        if (isTvDevice()) {
+            btnSubtitles.isFocusable = has
+            btnSubtitles.isFocusableInTouchMode = has
+        }
+    }
+
+    private fun setSubtitleTrack(trackId: Int) {
+        val p = vlcPlayer ?: return
+        currentSpuTrackId = trackId
+        try { p.spuTrack = trackId } catch (_: Exception) {}
+    }
+
+    private fun openSubtitlesDialog() {
+        refreshSpuTracks()
+
+        if (spuTracks.isEmpty()) {
+            Toast.makeText(requireContext(), "Este video no trae subtítulos.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // ✅ No agregamos "OFF" manual: VLC ya trae "Disable" como track (normalmente id = -1)
+        val names = spuTracks.map { t ->
+            val n = (t.name ?: "").trim()
+            if (n.isNotEmpty()) n else "Subtítulo ${t.id}"
+        }.toTypedArray()
+
+        val ids = spuTracks.map { it.id }.toIntArray()
+
+        val checked = ids.indexOf(currentSpuTrackId).let { if (it >= 0) it else 0 }
+
+        AlertDialog.Builder(requireContext())
+            .setTitle("Subtítulos")
+            .setSingleChoiceItems(names, checked) { dialog, which ->
+                setSubtitleTrack(ids[which])
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
     private fun isTvDevice(): Boolean {
-        val uiMode = requireContext().resources.configuration.uiMode
+        val ctx = requireContext()
+
+        // 1) UI mode (lo "correcto")
+        val uiMode = ctx.resources.configuration.uiMode
         val isTelevision =
             (uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK) ==
                     android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
 
-        val pm = requireContext().packageManager
-        val hasLeanback = pm.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
-        return isTelevision || hasLeanback
+        // 2) Features (lo "correcto" para Android TV / Leanback)
+        val pm = ctx.packageManager
+        val hasLeanback =
+            pm.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK) ||
+                    pm.hasSystemFeature("android.software.leanback")
+
+        // 3) Feature TV (algunos devices sí lo reportan aunque no leanback)
+        val hasTelevisionFeature =
+            pm.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TELEVISION)
+
+        // 4) Heurística para TV boxes que reportan mal:
+        //    sin touch + navegación por DPAD ⇒ tratalo como TV
+        val cfg = ctx.resources.configuration
+        val noTouch = cfg.touchscreen == android.content.res.Configuration.TOUCHSCREEN_NOTOUCH
+        val dpad = cfg.navigation == android.content.res.Configuration.NAVIGATION_DPAD
+
+        return isTelevision || hasLeanback || hasTelevisionFeature || (noTouch && dpad)
     }
+
+
+
 
     private fun setupMobileExitButton() {
         val btn = btnExitMobile ?: return
@@ -506,6 +626,10 @@ class PlaybackVideoFragment : Fragment() {
         btn.visibility = View.VISIBLE
         btn.alpha = 0f
 
+        // ✅ CLAVE: Exit nunca debe robar foco (ni en mobile/no-TV)
+        btn.isFocusable = false
+        btn.isFocusableInTouchMode = false
+
         btn.setOnClickListener {
             persistLastPlayed()
             requireActivity().onBackPressedDispatcher.onBackPressed()
@@ -520,28 +644,46 @@ class PlaybackVideoFragment : Fragment() {
             false
         }
     }
-
     private fun setupRemoteHandlers() {
+        // ✅ MOBILE: anular por completo “modo control remoto”
         if (!isTvDevice()) {
             root.setOnKeyListener(null)
             videoLayout.setOnKeyListener(null)
             skipIntroButton.setOnKeyListener(null)
             seekBar.setOnKeyListener(null)
 
+            // Mobile táctil: no queremos foco/hover ni navegación DPAD
             root.isFocusable = false
             root.isFocusableInTouchMode = false
 
             videoLayout.isFocusable = false
             videoLayout.isFocusableInTouchMode = false
 
+            seekBar.isFocusable = false
+            seekBar.isFocusableInTouchMode = false
+
             skipIntroButton.isFocusable = false
             skipIntroButton.isFocusableInTouchMode = false
 
-            seekBar.isFocusable = false
-            seekBar.isFocusableInTouchMode = false
+            btnPrevVideo.isFocusable = false
+            btnPrevVideo.isFocusableInTouchMode = false
+            btnSeekBack.isFocusable = false
+            btnSeekBack.isFocusableInTouchMode = false
+            btnPlayPause.isFocusable = false
+            btnPlayPause.isFocusableInTouchMode = false
+            btnSeekFwd.isFocusable = false
+            btnSeekFwd.isFocusableInTouchMode = false
+            btnNextVideo.isFocusable = false
+            btnNextVideo.isFocusableInTouchMode = false
+            btnSubtitles.isFocusable = false
+            btnSubtitles.isFocusableInTouchMode = false
+
             return
         }
 
+        // =========================
+        // ✅ TV: queda igual que lo tenías
+        // =========================
         root.isFocusable = true
         root.isFocusableInTouchMode = true
         root.requestFocus()
@@ -550,7 +692,6 @@ class PlaybackVideoFragment : Fragment() {
             if (event.action != KeyEvent.ACTION_DOWN) return@OnKeyListener false
             if (controlsVisible) bumpControlsTimeout()
 
-            // ✅ Capturar TODOS los típicos del control
             when (keyCode) {
                 KeyEvent.KEYCODE_MEDIA_NEXT,
                 KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
@@ -573,7 +714,6 @@ class PlaybackVideoFragment : Fragment() {
                     }
                     return@OnKeyListener true
                 }
-
             }
 
             val focused = root.findFocus()
@@ -677,6 +817,7 @@ class PlaybackVideoFragment : Fragment() {
         scheduleAutoHide()
     }
 
+
     private fun hideOverlayOnly() {
         ui.removeCallbacks(hideControlsRunnable)
         hideControlsRunnable.run()
@@ -684,10 +825,19 @@ class PlaybackVideoFragment : Fragment() {
 
     private fun scheduleAutoHide() {
         ui.removeCallbacks(hideControlsRunnable)
+
         val focusIsSeek = (root.findFocus() === seekBar)
-        if (focusIsSeek) return
+
+        // ✅ SOLO en TV real dejamos que el seekbar bloquee el autohide
+        // En Mobile (aunque reciba ENTER/DPAD) queremos que se oculte para no “grisear” el video.
+        if (isTvDevice() && focusIsSeek) return
+
+        // (opcional) si el usuario está arrastrando el seekbar, no ocultar
+        if (isUserSeeking) return
+
         ui.postDelayed(hideControlsRunnable, AUTO_HIDE_MS)
     }
+
 
     private fun bumpControlsTimeout() {
         if (controlsVisible) scheduleAutoHide()
@@ -792,6 +942,19 @@ class PlaybackVideoFragment : Fragment() {
                 when (ev.type) {
                     VlcMediaPlayer.Event.Playing -> ui.post {
                         btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
+
+                        // ✅ Subs OFF por defecto (VLC Disable = -1) + buscar tracks (pueden tardar)
+                        setSubtitleTrack(-1)
+                        scheduleSpuRefreshLoop()
+
+                        scheduleAutoHide()
+                    }
+
+                    // ✅ Cuando VLC detecta/actualiza streams, suelen aparecer subs
+                    VlcMediaPlayer.Event.ESAdded,
+                    VlcMediaPlayer.Event.ESSelected,
+                    VlcMediaPlayer.Event.ESDeleted -> ui.post {
+                        refreshSpuTracks()
                     }
 
                     VlcMediaPlayer.Event.Paused -> ui.post {
@@ -881,8 +1044,6 @@ class PlaybackVideoFragment : Fragment() {
                             }
                         }
                     }
-
-
                 }
 
                 ui.postDelayed(this, 300)
@@ -892,7 +1053,6 @@ class PlaybackVideoFragment : Fragment() {
         ticker = r
         ui.post(r)
     }
-
 
     private fun stopTicker() {
         ticker?.let { ui.removeCallbacks(it) }
@@ -918,6 +1078,7 @@ class PlaybackVideoFragment : Fragment() {
         stopTicker()
         ui.removeCallbacks(hideControlsRunnable)
         ui.removeCallbacks(clearPreviewRunnable)
+        ui.removeCallbacks(spuRefreshRunnable)
 
         try { vlcPlayer?.stop() } catch (_: Exception) {}
         try { vlcPlayer?.detachViews() } catch (_: Exception) {}
