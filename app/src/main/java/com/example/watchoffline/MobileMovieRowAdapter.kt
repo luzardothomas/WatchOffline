@@ -1,13 +1,17 @@
 package com.example.watchoffline
 
 import android.graphics.Color
+import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import com.bumptech.glide.Glide
+
 
 class MobileMovieRowAdapter(
     private val movies: List<Movie>,
@@ -27,33 +31,54 @@ class MobileMovieRowAdapter(
 
     override fun onBindViewHolder(holder: VH, position: Int) {
         val item = movies[position]
-
         val isAction = item.videoUrl?.startsWith("__action_") == true
 
         holder.title.text = item.title
 
         if (isAction) {
-            // ✅ ACCIÓN: caja sólida, sin imagen
-            holder.cover.setImageDrawable(null)
-            holder.cover.setBackgroundColor(
-                holder.itemView.context.getColor(R.color.fastlane_background)
-            )
+            // ✅ ACCIÓN: caja tipo botón (solo texto)
+            holder.cover.visibility = View.GONE
 
-            holder.title.setTextColor(Color.WHITE)
-            holder.title.textAlignment = View.TEXT_ALIGNMENT_CENTER
+            holder.title.apply {
+                text = item.title
+                setTextColor(Color.WHITE)
+                textAlignment = View.TEXT_ALIGNMENT_CENTER
+                gravity = Gravity.CENTER
+                maxLines = 3
+            }
+
+            // centrar vertical + horizontal el contenido
+            (holder.itemView as LinearLayout).gravity = Gravity.CENTER
 
         } else {
             // ✅ CONTENIDO NORMAL
-            holder.cover.setBackgroundColor(Color.TRANSPARENT)
-            holder.title.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
+            holder.cover.visibility = View.VISIBLE
+
+            // ✅ NO uses setBackgroundColor(TRANSPARENT) porque rompe el outline redondeado
+            holder.cover.setBackgroundResource(R.drawable.bg_action_card)
+
+            // recorte + borde redondeado usando el BACKGROUND (shape con corners)
+            holder.cover.scaleType = ImageView.ScaleType.CENTER_CROP
+            holder.cover.clipToOutline = true
+            holder.cover.outlineProvider = ViewOutlineProvider.BACKGROUND
+            holder.cover.invalidateOutline()
+
+            // alinear título
+            holder.title.apply {
+                textAlignment = View.TEXT_ALIGNMENT_CENTER
+                gravity = Gravity.CENTER_HORIZONTAL
+            }
 
             Glide.with(holder.itemView)
                 .load(item.cardImageUrl)
+                .centerCrop()
+                .dontAnimate()
                 .into(holder.cover)
         }
 
         holder.itemView.setOnClickListener { onClick(item) }
     }
+
 
     override fun getItemCount(): Int = movies.size
 }

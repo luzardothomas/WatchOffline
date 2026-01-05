@@ -1,28 +1,32 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="160dp"
-    android:layout_height="100dp"
+    android:layout_width="200dp"
+    android:layout_height="150dp"
     android:orientation="vertical"
     android:background="@drawable/bg_action_card"
-    android:padding="8dp"
     android:layout_marginEnd="12dp">
 
+    <!-- IMAGEN: ocupa TODO el espacio disponible -->
     <ImageView
         android:id="@+id/cardCover"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
+        android:layout_height="110dp"
         android:scaleType="centerCrop"
-        android:background="@android:color/transparent" />
+        android:background="@drawable/bg_action_card" />
 
+
+
+    <!-- TEXTO: abajo, altura automática -->
     <TextView
         android:id="@+id/cardTitle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:padding="6dp"
         android:textSize="14sp"
         android:textColor="@android:color/white"
         android:gravity="center"
         android:maxLines="2"
-        android:ellipsize="end"
-        android:paddingTop="6dp" />
+        android:ellipsize="end" />
 </LinearLayout>
+
+

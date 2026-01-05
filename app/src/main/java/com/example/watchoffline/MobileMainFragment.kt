@@ -365,7 +365,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         val labels = imported.map { prettyTitle(it.fileName) }.toTypedArray()
 
         AlertDialog.Builder(requireContext()).apply {
-            setTitle("Eliminar JSON")
+            setTitle("Borrar JSON")
             setItems(labels) { _, which ->
                 val realName = imported[which].fileName
                 jsonDataManager.removeJson(requireContext(), realName)
@@ -384,12 +384,12 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         }
 
         AlertDialog.Builder(requireContext())
-            .setTitle("Eliminar TODOS los JSON")
-            .setMessage("Vas a eliminar $count JSON importados. ¿Seguro?")
-            .setPositiveButton("Eliminar todo") { _, _ ->
+            .setTitle("Borrar TODOS los JSON")
+            .setMessage("Vas a borrar $count JSON importados. ¿Seguro?")
+            .setPositiveButton("Borrar todo") { _, _ ->
                 jsonDataManager.removeAll(requireContext())
                 refreshUI()
-                Toast.makeText(requireContext(), "JSONs eliminados", Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), "JSONs borrados", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Cancelar", null)
             .show()

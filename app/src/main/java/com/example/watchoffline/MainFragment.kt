@@ -2,7 +2,6 @@ package com.example.watchoffline
 
 import android.app.AlertDialog
 import android.content.Intent
-import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.net.Uri
@@ -17,8 +16,10 @@ import android.util.DisplayMetrics
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -53,20 +54,24 @@ class MainFragment : BrowseSupportFragment() {
     // ✅ SMB
     private lateinit var smbGateway: SmbGateway
 
-    // ✅ Preload cache (para no golpear URLs al navegar)
+    // ✅ Preload cache
     private val preloadedPosterUrls = HashSet<String>()
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+
+        hideHeadersDockCompletely(view)
+        disableSearchOrbFocus(view)
+    }
 
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         super.onActivityCreated(savedInstanceState)
-        Log.i(TAG, "onCreate")
 
         jsonDataManager.loadData(requireContext())
 
         smbGateway = SmbGateway(requireContext())
-        val ok = smbGateway.ensureProxyStarted(8081)
-        Log.i(TAG, "SMB proxy started? $ok port=${smbGateway.getProxyPort()}")
+        smbGateway.ensureProxyStarted(8081)
 
-        // ✅ Preload inicial (una vez)
         preloadPostersForImportedJsons()
 
         prepareBackgroundManager()
@@ -74,6 +79,8 @@ class MainFragment : BrowseSupportFragment() {
         setupUIElements()
         loadRows()
         setupEventListeners()
+
+        focusFirstItemReal()
     }
 
     override fun onDestroy() {
@@ -81,6 +88,18 @@ class MainFragment : BrowseSupportFragment() {
         mBackgroundTimer?.cancel()
         try { smbGateway.stopDiscovery() } catch (_: Exception) {}
         try { smbGateway.stopProxy() } catch (_: Exception) {}
+    }
+
+    private fun setupUIElements() {
+        title = getString(R.string.browse_title)
+
+        // ✅ la clave (tu fix)
+        headersState = HEADERS_HIDDEN
+        isHeadersTransitionOnBackEnabled = false
+
+        val bg = ContextCompat.getColor(requireContext(), R.color.default_background)
+        brandColor = bg
+        searchAffordanceColor = ContextCompat.getColor(requireContext(), R.color.search_opaque)
     }
 
     private fun prepareBackgroundManager() {
@@ -93,26 +112,77 @@ class MainFragment : BrowseSupportFragment() {
         }
     }
 
-    private fun setupUIElements() {
-        title = getString(R.string.browse_title)
-        headersState = HEADERS_ENABLED
-        isHeadersTransitionOnBackEnabled = true
-        brandColor = ContextCompat.getColor(requireContext(), R.color.fastlane_background)
-        searchAffordanceColor = ContextCompat.getColor(requireContext(), R.color.search_opaque)
+    private fun resetBackgroundToDefault() {
+        mBackgroundTimer?.cancel()
+        mBackgroundTimer = null
+        mBackgroundUri = null
+        mBackgroundManager.drawable = mDefaultBackground
     }
 
-    /**
-     * ✅ Preload posters (imgSml) para que al navegar no esté pegándole a la red.
-     * - Se ejecuta 1 sola vez por URL (HashSet)
-     * - Cachea al tamaño real que usa CardPresenter (180dp)
-     */
+    // ✅ elimina columna fantasma de headers sin romper Leanback
+    private fun hideHeadersDockCompletely(root: View) {
+        root.post {
+            val bg = ContextCompat.getColor(requireContext(), R.color.default_background)
+
+            root.findViewById<ViewGroup>(androidx.leanback.R.id.browse_headers_dock)?.apply {
+                setBackgroundColor(bg)
+                layoutParams = layoutParams.apply { width = 1 }
+                alpha = 0f
+                isFocusable = false
+                isFocusableInTouchMode = false
+                descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            }
+
+            root.findViewById<ViewGroup>(androidx.leanback.R.id.browse_headers)?.apply {
+                alpha = 0f
+                isFocusable = false
+                isFocusableInTouchMode = false
+                descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            }
+
+            root.findViewById<View>(androidx.leanback.R.id.browse_frame)?.apply {
+                setPadding(0, paddingTop, paddingRight, paddingBottom)
+            }
+        }
+    }
+
+    // ✅ evita que el Search Orb se quede con el foco inicial
+    private fun disableSearchOrbFocus(root: View) {
+        root.post {
+            root.findViewById<View>(androidx.leanback.R.id.search_orb)?.apply {
+                isFocusable = false
+                isFocusableInTouchMode = false
+                clearFocus()
+            }
+        }
+    }
+
+    // ✅ foco inicial al primer item real (simple)
+    private fun focusFirstItemReal() {
+        val root = view ?: return
+        root.post {
+            setSelectedPosition(0, false)
+
+            val vgrid = root.findViewById<VerticalGridView>(androidx.leanback.R.id.browse_grid)
+                ?: return@post
+
+            vgrid.post {
+                val firstRowView = vgrid.getChildAt(0) ?: return@post
+                val rowContent = firstRowView.findViewById<HorizontalGridView>(androidx.leanback.R.id.row_content)
+                    ?: return@post
+
+                rowContent.post {
+                    rowContent.getChildAt(0)?.requestFocus() ?: rowContent.requestFocus()
+                }
+            }
+        }
+    }
+
     private fun preloadPostersForImportedJsons() {
         val ctx = requireContext()
         val sizePx = (POSTER_PRELOAD_SIZE_DP * ctx.resources.displayMetrics.density).toInt()
 
-        // IMPORTANTE: aplanamos todos los videos de todos los JSON importados
         val all = jsonDataManager.getImportedJsons().flatMap { it.videos }
-
         for (v in all) {
             val url = v.imgSml?.trim().orEmpty()
             if (url.isNotEmpty() && preloadedPosterUrls.add(url)) {
@@ -127,7 +197,6 @@ class MainFragment : BrowseSupportFragment() {
         if (DEBUG_LOGS) {
             Log.i(TAG, "preload posters: added=${preloadedPosterUrls.size}")
         }
-
     }
 
     private fun loadRows() {
@@ -136,25 +205,19 @@ class MainFragment : BrowseSupportFragment() {
 
         val actionsAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
             add(getString(R.string.erase_json))
-            add("Eliminar todos los JSON")
+            add("Borrar todos los JSON")
             add("Credenciales SMB")
             add("Limpiar credenciales")
             add("Importar de SMB")
             add("Importar de DISPOSITIVO")
         }
 
-        rowsAdapter.add(
-            ListRow(
-                HeaderItem(0L, "ACCIONES"),
-                actionsAdapter
-            )
-        )
+        rowsAdapter.add(ListRow(HeaderItem(0L, "ACCIONES"), actionsAdapter))
 
         jsonDataManager.getImportedJsons().forEach { imported ->
             val rowAdapter = ArrayObjectAdapter(cardPresenter).apply {
                 imported.videos.forEach { add(it.toMovie()) }
             }
-
             rowsAdapter.add(
                 ListRow(
                     HeaderItem(imported.fileName.hashCode().toLong(), prettyTitle(imported.fileName)),
@@ -183,6 +246,68 @@ class MainFragment : BrowseSupportFragment() {
         onItemViewSelectedListener = ItemViewSelectedListener()
     }
 
+    private inner class ItemViewSelectedListener : OnItemViewSelectedListener {
+        override fun onItemSelected(
+            itemViewHolder: Presenter.ViewHolder?,
+            item: Any?,
+            rowViewHolder: RowPresenter.ViewHolder,
+            row: Row
+        ) {
+            when (item) {
+                is Movie -> {
+                    mBackgroundUri = item.backgroundImageUrl
+                    startBackgroundTimer()
+                }
+                else -> resetBackgroundToDefault()
+            }
+        }
+    }
+
+    private fun updateBackground(uri: String?) {
+        Glide.with(requireActivity())
+            .load(uri)
+            .centerCrop()
+            .error(mDefaultBackground)
+            .listener(object : RequestListener<Drawable> {
+                override fun onLoadFailed(
+                    e: GlideException?,
+                    model: Any?,
+                    target: Target<Drawable>?,
+                    isFirstResource: Boolean
+                ): Boolean {
+                    Log.e(TAG, "BG Glide FAILED model=$model err=${e?.rootCauses?.firstOrNull()?.message}", e)
+                    return false
+                }
+
+                override fun onResourceReady(
+                    resource: Drawable?,
+                    model: Any?,
+                    target: Target<Drawable>?,
+                    dataSource: DataSource?,
+                    isFirstResource: Boolean
+                ): Boolean = false
+            })
+            .into(object : SimpleTarget<Drawable>(mMetrics.widthPixels, mMetrics.heightPixels) {
+                override fun onResourceReady(resource: Drawable, transition: Transition<in Drawable>?) {
+                    mBackgroundManager.drawable = resource
+                }
+            })
+        mBackgroundTimer?.cancel()
+    }
+
+    private fun startBackgroundTimer() {
+        mBackgroundTimer?.cancel()
+        mBackgroundTimer = Timer().apply {
+            schedule(UpdateBackgroundTask(), BACKGROUND_UPDATE_DELAY.toLong())
+        }
+    }
+
+    private inner class UpdateBackgroundTask : TimerTask() {
+        override fun run() {
+            mHandler.post { updateBackground(mBackgroundUri) }
+        }
+    }
+
     private inner class ItemViewClickedListener : OnItemViewClickedListener {
         override fun onItemClicked(
             itemViewHolder: Presenter.ViewHolder,
@@ -191,12 +316,12 @@ class MainFragment : BrowseSupportFragment() {
             row: Row
         ) {
             when (item) {
-                is Movie -> navigateToDetails(itemViewHolder, item)
+                is Movie -> navigateToDetails(item)
                 is String -> handleStringAction(item)
             }
         }
 
-        private fun navigateToDetails(itemViewHolder: Presenter.ViewHolder, movie: Movie) {
+        private fun navigateToDetails(movie: Movie) {
             val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
                 putExtra(DetailsActivity.MOVIE, movie)
             }
@@ -206,7 +331,7 @@ class MainFragment : BrowseSupportFragment() {
         private fun handleStringAction(item: String) {
             when (item) {
                 getString(R.string.erase_json) -> showDeleteDialog()
-                "Eliminar todos los JSON" -> showDeleteAllDialog()
+                "Borrar todos los JSON" -> showDeleteAllDialog()
                 "Credenciales SMB" -> openSmbConnectFlow()
                 "Limpiar credenciales" -> showClearSmbDialog()
                 "Importar de SMB" -> runAutoImport()
@@ -260,21 +385,9 @@ class MainFragment : BrowseSupportFragment() {
             jsonDataManager = jsonDataManager,
             serverPort = 8080
         ).run(
-            toast = { msg ->
-                activity?.runOnUiThread {
-                    Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show()
-                }
-            },
-            onDone = { count ->
-                activity?.runOnUiThread {
-                    refreshUI()
-                }
-            },
-            onError = { err ->
-                activity?.runOnUiThread {
-                    Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show()
-                }
-            }
+            toast = { msg -> activity?.runOnUiThread { Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() } },
+            onDone = { activity?.runOnUiThread { refreshUI() } },
+            onError = { err -> activity?.runOnUiThread { Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() } }
         )
     }
 
@@ -285,21 +398,9 @@ class MainFragment : BrowseSupportFragment() {
             jsonDataManager = jsonDataManager,
             proxyPort = 8081
         ).run(
-            toast = { msg ->
-                activity?.runOnUiThread {
-                    Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show()
-                }
-            },
-            onDone = { count ->
-                activity?.runOnUiThread {
-                    refreshUI()
-                }
-            },
-            onError = { err ->
-                activity?.runOnUiThread {
-                    Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show()
-                }
-            }
+            toast = { msg -> activity?.runOnUiThread { Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() } },
+            onDone = { activity?.runOnUiThread { refreshUI() } },
+            onError = { err -> activity?.runOnUiThread { Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() } }
         )
     }
 
@@ -315,7 +416,7 @@ class MainFragment : BrowseSupportFragment() {
             .setMessage("Vas a eliminar $count JSON importados. ¿Seguro?")
             .setPositiveButton("Eliminar todo") { _, _ ->
                 jsonDataManager.removeAll(requireContext())
-                preloadedPosterUrls.clear() // ✅ reset preload cache
+                preloadedPosterUrls.clear()
                 refreshUI()
                 resetBackgroundToDefault()
                 Toast.makeText(requireContext(), "JSONs eliminados", Toast.LENGTH_SHORT).show()
@@ -351,18 +452,14 @@ class MainFragment : BrowseSupportFragment() {
 
             AlertDialog.Builder(requireContext())
                 .setTitle("SMB encontrados")
-                .setItems(labels) { _, which ->
-                    showCredentialsDialog(servers[which])
-                }
+                .setItems(labels) { _, which -> showCredentialsDialog(servers[which]) }
                 .setNegativeButton("Cancelar", null)
                 .show()
         }, 2000)
     }
 
     private fun showManualSmbDialog() {
-        val hostInput = EditText(requireContext()).apply {
-            hint = "IP o hostname (ej: 192.168.1.33)"
-        }
+        val hostInput = EditText(requireContext()).apply { hint = "IP o hostname (ej: 192.168.1.33)" }
 
         AlertDialog.Builder(requireContext())
             .setTitle("Agregar SMB manual")
@@ -473,7 +570,6 @@ class MainFragment : BrowseSupportFragment() {
             setItems(labels) { _, which ->
                 val realName = imported[which].fileName
                 jsonDataManager.removeJson(requireContext(), realName)
-                // ✅ al borrar, limpiamos cache de preload y recargamos (evita quedarse con URLs “muertas”)
                 preloadedPosterUrls.clear()
                 refreshUI()
             }
@@ -482,89 +578,17 @@ class MainFragment : BrowseSupportFragment() {
         }
     }
 
-    private fun resetBackgroundToDefault() {
-        mBackgroundTimer?.cancel()
-        mBackgroundTimer = null
-        mBackgroundUri = null
-        mBackgroundManager.drawable = mDefaultBackground
-    }
-
     private fun refreshUI() {
         jsonDataManager.loadData(requireContext())
-        debugDumpFirstItem("after refreshUI() loadData()")
-
-        // ✅ Preload para el nuevo dataset (solo 1 vez por URL)
         preloadPostersForImportedJsons()
-
         loadRows()
 
         val hasAnyMovie = jsonDataManager.getImportedJsons().any { it.videos.isNotEmpty() }
         if (!hasAnyMovie) resetBackgroundToDefault() else startBackgroundTimer()
     }
 
-    private inner class ItemViewSelectedListener : OnItemViewSelectedListener {
-        override fun onItemSelected(
-            itemViewHolder: Presenter.ViewHolder?,
-            item: Any?,
-            rowViewHolder: RowPresenter.ViewHolder,
-            row: Row
-        ) {
-            when (item) {
-                is Movie -> {
-                    mBackgroundUri = item.backgroundImageUrl
-                    startBackgroundTimer()
-                }
-                else -> resetBackgroundToDefault()
-            }
-        }
-    }
-
-    private fun updateBackground(uri: String?) {
-        Glide.with(requireActivity())
-            .load(uri)
-            .centerCrop()
-            .error(mDefaultBackground)
-            .listener(object : RequestListener<Drawable> {
-                override fun onLoadFailed(
-                    e: GlideException?,
-                    model: Any?,
-                    target: Target<Drawable>?,
-                    isFirstResource: Boolean
-                ): Boolean {
-                    Log.e(TAG, "BG Glide FAILED model=$model err=${e?.rootCauses?.firstOrNull()?.message}", e)
-                    return false
-                }
-
-                override fun onResourceReady(
-                    resource: Drawable?,
-                    model: Any?,
-                    target: Target<Drawable>?,
-                    dataSource: DataSource?,
-                    isFirstResource: Boolean
-                ): Boolean = false
-            })
-            .into(object : SimpleTarget<Drawable>(mMetrics.widthPixels, mMetrics.heightPixels) {
-                override fun onResourceReady(resource: Drawable, transition: Transition<in Drawable>?) {
-                    mBackgroundManager.drawable = resource
-                }
-            })
-        mBackgroundTimer?.cancel()
-    }
-
-    private fun startBackgroundTimer() {
-        mBackgroundTimer?.cancel()
-        mBackgroundTimer = Timer().apply {
-            schedule(UpdateBackgroundTask(), BACKGROUND_UPDATE_DELAY.toLong())
-        }
-    }
-
-    private inner class UpdateBackgroundTask : TimerTask() {
-        override fun run() {
-            mHandler.post { updateBackground(mBackgroundUri) }
-        }
-    }
-
     private inner class GridItemPresenter : Presenter() {
+
         private fun dp(v: Int): Int =
             TypedValue.applyDimension(
                 TypedValue.COMPLEX_UNIT_DIP,
@@ -572,64 +596,74 @@ class MainFragment : BrowseSupportFragment() {
                 requireContext().resources.displayMetrics
             ).toInt()
 
+        private fun makeBg(focused: Boolean): Drawable {
+            return android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = dp(14).toFloat()
+
+                val fill = if (focused) 0xFF0E8A9A.toInt() else 0xFF2C2C2C.toInt()
+                val stroke = if (focused) 0xFFFFFFFF.toInt() else 0x66FFFFFF.toInt()
+
+                setColor(fill)
+                setStroke(dp(2), stroke)
+            }
+        }
+
         override fun onCreateViewHolder(parent: ViewGroup): ViewHolder {
-            val tv = TextView(parent.context).apply {
-                layoutParams = ViewGroup.LayoutParams(dp(130), dp(100))
+            val ctx = parent.context
+
+            val container = FrameLayout(ctx).apply {
+                layoutParams = ViewGroup.LayoutParams(dp(180), dp(180))
+                clipToOutline = true
+                outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+                background = makeBg(false)
                 isFocusable = true
                 isFocusableInTouchMode = true
-                setBackgroundResource(R.drawable.action_tile_bg)
+            }
 
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            val tv = TextView(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+                setPadding(dp(10), dp(10), dp(10), dp(10))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                includeFontPadding = false
                 typeface = Typeface.DEFAULT_BOLD
                 gravity = Gravity.CENTER
-
+                textAlignment = View.TEXT_ALIGNMENT_CENTER
                 maxLines = 2
                 ellipsize = TextUtils.TruncateAt.END
+                setLineSpacing(0f, 1.05f)
             }
 
-            tv.setOnFocusChangeListener { v, hasFocus ->
+            container.addView(tv)
+
+            container.setOnFocusChangeListener { v, hasFocus ->
+                v.background = makeBg(hasFocus)
                 v.animate()
-                    .scaleX(if (hasFocus) 1.08f else 1f)
-                    .scaleY(if (hasFocus) 1.08f else 1f)
+                    .scaleX(if (hasFocus) 1.04f else 1f)
+                    .scaleY(if (hasFocus) 1.04f else 1f)
                     .setDuration(120)
                     .start()
-                v.alpha = if (hasFocus) 1f else 0.92f
             }
 
-            return ViewHolder(tv)
+            return ViewHolder(container)
         }
 
         override fun onBindViewHolder(viewHolder: ViewHolder, item: Any) {
-            (viewHolder.view as TextView).text = (item as String).uppercase(Locale.getDefault())
+            val container = viewHolder.view as FrameLayout
+            val tv = container.getChildAt(0) as TextView
+            tv.text = (item as String).uppercase(Locale.getDefault())
         }
 
         override fun onUnbindViewHolder(viewHolder: ViewHolder) = Unit
-    }
-
-    // =========================
-    // ✅ DEBUG HELPERS
-    // =========================
-
-    private fun debugDumpFirstItem(where: String) {
-        val imported = jsonDataManager.getImportedJsons()
-        val first = imported.firstOrNull()?.videos?.firstOrNull()
-        Log.i(TAG, "DEBUG [$where] importedCount=${imported.size}")
-        if (first == null) {
-            Log.i(TAG, "DEBUG [$where] no videos")
-            return
-        }
-        Log.i(TAG, "DEBUG [$where] firstVideo title='${first.title}' skip=${first.skipToSecond}")
-        Log.i(TAG, "DEBUG [$where] firstVideo imgSml='${first.imgSml}' imgBig='${first.imgBig}'")
     }
 
     companion object {
         private const val TAG = "MainFragment"
         private const val BACKGROUND_UPDATE_DELAY = 300
         private const val POSTER_PRELOAD_SIZE_DP = 180
-
-        // ✅ evita depender de BuildConfig
         private const val DEBUG_LOGS = false
     }
-
 }
