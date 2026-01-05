@@ -118,6 +118,7 @@ class AutoImporter(
         Thread {
             try {
                 val startTime = System.nanoTime()
+                toast("Importando de SMBs")
                 val proxyOk = smbGateway.ensureProxyStarted(proxyPort)
                 if (!proxyOk) { onError("Error Proxy SMB."); return@Thread }
 
@@ -244,36 +245,34 @@ class AutoImporter(
 
         val fileName = parts.last()
         val fileNoExt = fileName.substringBeforeLast(".")
-
-        // Intentamos extraer SxxExx o XxYY (ej: 4x06)
         val se = parseSeasonEpisodeFromFilename(path)
-        // Intentamos extraer el número de episodio solo (ej: para animes 001.mp4)
         val epOnly = parseEpisodeOnlyFromFilename(path)
 
-        // --- REGLA 1: ANIMES (nombreserie_n) ---
-        // Si estamos en una estructura de carpetas (Serie/Temporada/Archivo)
+        // 1. REGLA ANIME / EPISODIOS CONTINUOS
+        // Solo usamos la carpeta abuela si la ruta es profunda (mínimo 3 niveles)
+        // Ejemplo: /Animes/Evangelion/01.mkv -> parts.size es 3
         if (parts.size >= 3 && epOnly != null) {
             val seriesFolderName = parts[parts.size - 3]
-            val seriesKey = normalizeName(seriesFolderName).replace(" ", "_")
-            // Resultado: malcolm_06 o dragon_ball_z_001
-            return "${seriesKey}_${epOnly}"
+
+            // Evitamos que use "0" o "emulated" chequeando que no sea solo un número
+            if (seriesFolderName.length > 1) {
+                val seriesKey = normalizeName(seriesFolderName).replace(" ", "_")
+                return "${seriesKey}_$epOnly"
+            }
         }
 
-        // --- REGLA 2: SERIES (Formatos TxxExx, XxYY, SxxExx) ---
+        // 2. REGLA SERIES (4x06, S01E01)
         if (se != null) {
-            // Obtenemos el nombre de la serie desde la carpeta abuela o el inicio del path
-            val seriesName = if (parts.size >= 3) parts[parts.size - 3] else parts[0]
+            // Si no hay profundidad, usamos la primera parte de la ruta o el nombre del archivo
+            val seriesName = if (parts.size >= 3) parts[parts.size - 3]
+            else if (parts.size >= 2) parts[parts.size - 2]
+            else fileNoExt.replace(Regex("""\d+.*"""), "").trim()
 
-            // Aquí NO forzamos un formato inventado.
-            // Si el archivo ya es "4x06", intentamos reconstruir un query limpio para la API
-            val s = se.first
-            val e = se.second
-
-            // Retornamos "serie 4x06" que es un estándar que los scrapers entienden perfectamente
-            return "${normalizeName(seriesName)} ${s}x${pad2(e)}"
+            return "${normalizeName(seriesName)} ${se.first}x${pad2(se.second)}"
         }
 
-        // --- REGLA 3: PELÍCULAS O DESCARTE ---
+        // 3. FALLBACK PELÍCULAS
+        // Aquí es donde unimos palabras si quieres evitar espacios en la búsqueda final
         return normalizeName(fileNoExt)
     }
 

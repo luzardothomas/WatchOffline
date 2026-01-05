@@ -116,16 +116,33 @@ class LocalAutoImporter(
                     val imgUrl = cover?.url?.trim().orEmpty().ifBlank { placeholder }
                     val displayTitle = buildDisplayTitleForItem(absPath, cover)
 
-                    // ✅ Se eliminó la restricción 'isSeries'. Si la API devuelve skip, lo usamos.
-                    val skipFinal = cover?.skipToSecond ?: 0
-                    val delayFinal = cover?.delaySkip ?: 0
+                    // Lógica de validación de Serie
+                    val isSeries = cover?.type.equals("series", ignoreCase = true)
+
+                    // 🔍 LOG DE DEPURACIÓN LOCAL (Espejo del AutoImporter)
+                    if (cover != null) {
+                        Log.d("DEBUG_DATA_LOCAL", "--- Analizando Archivo Local ---")
+                        Log.d("DEBUG_DATA_LOCAL", "Path: $absPath")
+                        Log.d("DEBUG_DATA_LOCAL", "Query usada: $q")
+                        Log.d("DEBUG_DATA_LOCAL", "API skipSeconds: ${cover.skipToSecond}")
+                        Log.d("DEBUG_DATA_LOCAL", "API delaySeconds: ${cover.delaySkip}")
+                        Log.d("DEBUG_DATA_LOCAL", "Tipo detectado: ${cover.type}")
+                    } else {
+                        Log.w("DEBUG_DATA_LOCAL", "⚠️ Sin respuesta de API para archivo: ${absPath.substringAfterLast("/")}")
+                    }
+
+                    // Asignación de valores finales (Respetando el flag isSeries)
+                    val finalSkip = if (isSeries) (cover?.skipToSecond ?: 0) else 0
+                    val finalDelay = if (isSeries) (cover?.delaySkip ?: 0) else 0
+
+                    Log.d("DEBUG_DATA_LOCAL", "Resultado Final -> isSeries: $isSeries | Skip: $finalSkip | Delay: $finalDelay")
 
                     rawItems.add(RawItem(
                         path = absPath,
                         title = displayTitle,
                         img = imgUrl,
-                        skip = skipFinal,
-                        delay = delayFinal,
+                        skip = finalSkip,
+                        delay = finalDelay,
                         videoSrc = "http://127.0.0.1:$serverPort${encodePathForUrl(absPath)}"
                     ))
                 }
@@ -269,39 +286,43 @@ class LocalAutoImporter(
 
     private fun fallbackImageUri() = "android.resource://${context.packageName}/${R.drawable.movie}"
     private fun normalizeAbsPath(p: String): String = try { File(p).canonicalPath.replace("\\", "/") } catch (_: Exception) { p.replace("\\", "/") }
-    private fun pad2(n: Int) = n.toString().padStart(2, '0')
-    private fun pad3(n: Int) = n.toString().padStart(3, '0')
-    private fun normalizeName(s: String) = s.trim().replace('_', ' ').replace(Regex("""\s+"""), " ").lowercase()
+
 
     private fun buildQueryForPathSmart(path: String): String {
         val clean = path.replace("\\", "/").trim('/')
         val parts = clean.split("/").filter { it.isNotBlank() }
         if (parts.isEmpty()) return ""
 
-        val fileNoExt = parts.last().substringBeforeLast(".")
-        val se = parseSeasonEpisodeFromFilename(path) // Detecta 1x02, S01E02
-        val epOnly = parseEpisodeOnlyFromFilename(path) // Detecta "01" al final o "Cap 01"
+        val fileName = parts.last()
+        val fileNoExt = fileName.substringBeforeLast(".")
+        val se = parseSeasonEpisodeFromFilename(path)
+        val epOnly = parseEpisodeOnlyFromFilename(path)
 
-        // 1. REGLA DE ORO PARA ANIMES (Carpeta Abuela + Episodio)
-        // Si tenemos al menos 3 partes (Serie/Temporada/Archivo) y detectamos un episodio
-        if (parts.size >= 3) {
-            val seriesName = parts[parts.size - 3]
-            val ep = se?.second ?: epOnly
+        // 1. REGLA ANIME / EPISODIOS CONTINUOS
+        // Solo usamos la carpeta abuela si la ruta es profunda (mínimo 3 niveles)
+        // Ejemplo: /Animes/Evangelion/01.mkv -> parts.size es 3
+        if (parts.size >= 3 && epOnly != null) {
+            val seriesFolderName = parts[parts.size - 3]
 
-            if (ep != null) {
-                val seriesKey = normalizeName(seriesName).replace(" ", "_")
-                // Retorna nombreserie_001
-                return "${seriesKey}_${pad3(ep)}"
+            // Evitamos que use "0" o "emulated" chequeando que no sea solo un número
+            if (seriesFolderName.length > 1) {
+                val seriesKey = normalizeName(seriesFolderName).replace(" ", "_")
+                return "${seriesKey}_$epOnly"
             }
         }
 
-        // 2. REGLA PARA SERIES OCCIDENTALES (Si tiene Temporada explícita)
-        if (se != null && parts.size >= 2) {
-            val seriesName = if (parts.size >= 3) parts[parts.size - 3] else parts[0]
-            return "${normalizeName(seriesName)} s${pad2(se.first)} ${pad2(se.second)}"
+        // 2. REGLA SERIES (4x06, S01E01)
+        if (se != null) {
+            // Si no hay profundidad, usamos la primera parte de la ruta o el nombre del archivo
+            val seriesName = if (parts.size >= 3) parts[parts.size - 3]
+            else if (parts.size >= 2) parts[parts.size - 2]
+            else fileNoExt.replace(Regex("""\d+.*"""), "").trim()
+
+            return "${normalizeName(seriesName)} ${se.first}x${pad2(se.second)}"
         }
 
-        // 3. FALLBACK: Nombre del archivo normalizado
+        // 3. FALLBACK PELÍCULAS
+        // Aquí es donde unimos palabras si quieres evitar espacios en la búsqueda final
         return normalizeName(fileNoExt)
     }
 
@@ -358,20 +379,49 @@ class LocalAutoImporter(
         }
     }
 
-    private fun filterAlreadyImported(previews: List<PreviewJson>) =
-        previews.filter { it.fileName !in jsonDataManager.getImportedJsons().map { it.fileName }.toSet() }
-
-    private fun fileBaseName(path: String) = path.substringAfterLast("/").substringBeforeLast(".")
-
     private fun buildDisplayTitleForItem(absPath: String, cover: ApiCover?): String {
         val fallback = fileBaseName(absPath)
-        val se = parseSeasonEpisodeFromFilename(absPath)
-        val ep = se?.second ?: parseEpisodeOnlyFromFilename(absPath) ?: cover?.episode
-        val season = se?.first ?: cover?.season
+        val seriesName = cover?.id ?: fallback
+
+        val seFile = parseSeasonEpisodeFromFilename(absPath)
+        val epFileOnly = parseEpisodeOnlyFromFilename(absPath)
+
+        val season = seFile?.first
+        val ep = seFile?.second ?: epFileOnly ?: cover?.episode
+
+        // Verificamos si es serie por tags de la API o por detección de temporada/episodio
         val isSeries = season != null || ep != null || cover?.type?.lowercase() == "series"
-        if (!isSeries) return cover?.id ?: fallback
+
+        if (!isSeries) return seriesName
+
         val capStr = if (ep != null) "Cap ${pad2(ep)}" else ""
         val tempStr = if (season != null) "T${pad2(season)}" else ""
-        return "$tempStr $capStr - ${cover?.id ?: fallback}".trim()
+
+        // Resultado: T04 Cap06 - Malcolm
+        return when {
+            tempStr.isNotEmpty() && capStr.isNotEmpty() -> "$tempStr $capStr - $seriesName"
+            capStr.isNotEmpty() -> "$capStr - $seriesName"
+            else -> seriesName
+        }.trim()
     }
+
+    // =========================
+    // 🛠 HELPERS ADAPTADOS
+    // =========================
+
+    private fun filterAlreadyImported(previews: List<PreviewJson>): List<PreviewJson> {
+        // Optimizamos creando el Set una sola vez para la comparación
+        val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toSet()
+        return previews.filter { it.fileName !in existing }
+    }
+
+    private fun fileBaseName(path: String): String {
+        return path.replace("\\", "/").substringAfterLast("/").substringBeforeLast(".")
+    }
+
+    private fun pad2(n: Int): String = n.toString().padStart(2, '0')
+    private fun pad3(n: Int): String = n.toString().padStart(3, '0')
+
+    private fun normalizeName(s: String): String =
+        s.trim().replace('_', ' ').replace(Regex("""\s+"""), " ").lowercase()
 }

@@ -855,12 +855,10 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
                     android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
-        val domainInput = EditText(requireContext()).apply { hint = "Dominio (opcional)" }
         val shareInput = EditText(requireContext()).apply { hint = "Share (ej: pelis)" }
 
         layout.addView(userInput)
         layout.addView(passInput)
-        layout.addView(domainInput)
         layout.addView(shareInput)
 
         val dialog = AlertDialog.Builder(requireContext())
@@ -874,7 +872,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val user = userInput.text.toString().trim()
                 val pass = passInput.text.toString()
-                val domain = domainInput.text.toString().trim().ifBlank { null }
+                val domain = null
                 val share = shareInput.text.toString().trim()
 
                 if (user.isBlank()) {
