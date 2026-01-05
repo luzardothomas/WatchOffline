@@ -85,7 +85,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     ): FocusTarget? {
         for (sIndex in sections.indices) {
             val section = sections[sIndex]
-            if (section.title == "ACCIONES") continue
+            if (section.title == "ACCIONES PARA VIDEOS") continue
             if (section.title == "ARMADO DE REPRODUCCIÓN") continue
 
 
@@ -117,7 +117,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
         val target = findLastPlayedTarget(sections, key) ?: return
 
-        // ✅ si estaba en search, limpiamos focus visual del input (no pedimos focus a nada)
         try {
             btnToggleSearchRef.clearFocus()
             searchInputRef.clearFocus()
@@ -126,10 +125,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         rv.post {
             rv.scrollToPosition(target.sectionIndex)
 
-            // ✅ marca visualmente (tu adapter ya lo soporta)
-            (rv.adapter as? MobileSectionsAdapter)?.setSelectedVideoUrl(key)
-
-            // ✅ opcional: también scrollear dentro de la fila horizontal, pero sin focus
             rv.postDelayed({
                 val vh = rv.findViewHolderForAdapterPosition(target.sectionIndex)
                 val rowRv = vh?.itemView?.findViewById<RecyclerView>(R.id.sectionRowRecycler)
@@ -137,6 +132,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             }, 120)
         }
     }
+
 
     override fun onResume() {
         super.onResume()
@@ -316,7 +312,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         // - NO launcher playlist:// (RANDOM)
         playlistCtxByKey = HashMap()
         sections.forEach { section ->
-            if (section.title == "ACCIONES") return@forEach
+            if (section.title == "ACCIONES PARA VIDEOS") return@forEach
             if (section.title == "ARMADO DE REPRODUCCIÓN") return@forEach
 
             val onlyReal = section.items.filter { it.videoUrl?.startsWith("playlist://") != true }
@@ -342,6 +338,8 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                     writeLastPlayed(url)
                 }
 
+
+
                 // =========================
                 // ✅ ARMADO DE REPRODUCCIÓN (acciones RANDOM)
                 // =========================
@@ -350,6 +348,12 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                     "__action_random_update__" -> { runRandomUpdate(); return@MobileSectionsAdapter }
                     "__action_random_delete__" -> { runRandomDeleteOne(); return@MobileSectionsAdapter }
                     "__action_random_delete_all__" -> { runRandomDeleteAll(); return@MobileSectionsAdapter }
+                    "__action_language_settings__" -> {
+                        writeLastPlayed("__action_language_settings__")
+                        startActivity(Intent(requireContext(), LanguageSettings::class.java))
+                        return@MobileSectionsAdapter
+                    }
+
                 }
 
                 // =========================
@@ -367,7 +371,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                     }
 
                     val playlist = ArrayList<Movie>().apply {
-                        imported.videos.forEach { v -> add(v.toMovie()) }
+                        imported.videos.forEach { v -> add(v.toMovie(imported.fileName)) }
                     }
 
                     startActivity(
@@ -430,6 +434,13 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
     private fun buildSectionsFiltered(queryRaw: String): List<MobileSection> {
 
+        val langSettingsSection = MobileSection(
+            title = "CONFIGURACIÓN DE IDIOMAS",
+            items = listOf(
+                actionCard("CONFIGURAR IDIOMAS", "__action_language_settings__")
+            )
+        )
+
         val playbackBuildSection = MobileSection(
             title = "ARMADO DE REPRODUCCIÓN",
             items = listOf(
@@ -441,7 +452,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         )
 
         val actionsSection = MobileSection(
-            title = "ACCIONES",
+            title = "ACCIONES PARA VIDEOS",
             items = listOf(
                 actionCard("Borrar JSON", "__action_erase_json__"),
                 actionCard("Borrar todos los JSON", "__action_erase_all_json__"),
@@ -484,7 +495,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                             )
                         )
                     } else {
-                        one.videos.map { it.toMovie() }
+                        one.videos.map { it.toMovie(one.fileName) }
                     }
 
                 MobileSection(title = title, items = items)
@@ -517,12 +528,12 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                 if (filtered.isEmpty()) null
                 else MobileSection(
                     title = jsonTitle,
-                    items = filtered.map { it.toMovie() }
+                    items = filtered.map { it.toMovie(one.fileName) }
                 )
             }
         }
 
-        return listOf(playbackBuildSection, actionsSection) + contentSections
+        return listOf(langSettingsSection, playbackBuildSection, actionsSection) + contentSections
     }
 
     private fun runRandomGenerate() {
@@ -592,14 +603,15 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         description = ""
     )
 
-    private fun VideoItem.toMovie() = Movie(
+    private fun VideoItem.toMovie(sourceFileName: String) = Movie(
         title = title,
         videoUrl = videoUrl,
         cardImageUrl = cardImageUrl,
         backgroundImageUrl = backgroundImageUrl,
         skipToSecond = skip,
         delaySkip = delaySkip,
-        description = "Importado desde un JSON"
+        description = "Importado desde un JSON",
+        studio = sourceFileName
     )
 
 

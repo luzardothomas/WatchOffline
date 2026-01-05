@@ -60,18 +60,17 @@
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
         <activity
-            android:name=".BrowseErrorActivity"
+            android:name=".SearchActivity"
             android:theme="@style/Theme.MyApp"
             android:exported="false"
             android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
         <activity
-            android:name=".SearchActivity"
-            android:theme="@style/Theme.MyApp"
-            android:exported="false"
-            android:screenOrientation="landscape"
-            android:configChanges="orientation|screenSize|keyboardHidden" />
+            android:name=".LanguageSettings"
+            android:exported="false" />
+
+
 
     </application>
 

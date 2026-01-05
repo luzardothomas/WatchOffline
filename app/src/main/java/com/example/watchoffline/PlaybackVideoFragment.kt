@@ -14,6 +14,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.ImageButton
+import android.widget.LinearLayout
+import android.widget.ListView
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -98,28 +100,123 @@ class PlaybackVideoFragment : Fragment() {
         previewSeekMs = null
     }
 
-    // ===== Subtitles (SPU) =====
+    // Tracks
+
+    private var tracksAppliedForThisMovie = false
+
     private var spuTracks: Array<TrackDescription> = emptyArray()
-    private var currentSpuTrackId: Int = -1 // VLC Disable = -1
+    private var audioTracks: Array<TrackDescription> = emptyArray()
+    private var currentAudioTrackId: Int = -1 // VLC suele usar -1 como "default" en audio (depende stream)
+    private var currentSpuTrackId: Int = -1   // VLC Disable = -1
     private var spuRefreshTries = 0
-    private val MAX_SPU_REFRESH_TRIES = 8
+    private var tracksRefreshTries = 0
+    private val MAX_TRACKS_REFRESH_TRIES = 18
+    private val TRACKS_REFRESH_DELAY_MS = 650L
 
-    private val spuRefreshRunnable = object : Runnable {
+    // Cache en RAM (rápido) + persistencia en prefs (sobrevive app)
+    private val trackCache = HashMap<String, Pair<Int, Int>>() // key -> (audioId, spuId)
+
+
+    private val tracksRefreshRunnable = object : Runnable {
         override fun run() {
-            refreshSpuTracks()
-            if (spuTracks.isNotEmpty()) return
+            refreshTracks()
 
-            spuRefreshTries++
-            if (spuRefreshTries >= MAX_SPU_REFRESH_TRIES) return
+            val hasRealSubs = spuTracks.any { it.id != -1 }
+            val hasRealAudio = audioTracks.any { it.id != -1 }
 
-            ui.postDelayed(this, 600L) // ~4.8s total
+            // ✅ apenas hay tracks reales, aplico saved/default UNA vez
+            if (!tracksAppliedForThisMovie && (hasRealSubs || hasRealAudio)) {
+                tracksAppliedForThisMovie = true
+                applySavedOrDefaultTracksForCurrentMovie()
+                // opcional: persistir lo que quedó aplicado
+                persistCurrentTracks("afterApply")
+            }
+
+            tracksRefreshTries++
+            if ((hasRealSubs || hasRealAudio) || tracksRefreshTries >= MAX_TRACKS_REFRESH_TRIES) return
+
+            ui.postDelayed(this, TRACKS_REFRESH_DELAY_MS)
         }
     }
 
-    private fun scheduleSpuRefreshLoop() {
-        ui.removeCallbacks(spuRefreshRunnable)
-        spuRefreshTries = 0
-        ui.post(spuRefreshRunnable)
+
+    private fun scheduleTracksRefreshLoop() {
+        ui.removeCallbacks(tracksRefreshRunnable)
+        tracksRefreshTries = 0
+        ui.post(tracksRefreshRunnable)
+    }
+
+    private fun refreshTracks() {
+        val p = vlcPlayer ?: run {
+            spuTracks = emptyArray()
+            audioTracks = emptyArray()
+            btnSubtitles.isEnabled = false
+            btnSubtitles.alpha = 0.35f
+            return
+        }
+
+        spuTracks = try { p.spuTracks ?: emptyArray() } catch (_: Exception) { emptyArray() }
+        audioTracks = try { p.audioTracks ?: emptyArray() } catch (_: Exception) { emptyArray() }
+
+        // Audio sin Disable
+        val audioRealCount = audioTracks.count { it.id != -1 }
+        // Subs puede ser solo Disable al principio, igual sirve mostrarlo (OFF)
+        val hasAny = (audioRealCount > 0) || spuTracks.isNotEmpty()
+
+        btnSubtitles.isEnabled = hasAny
+        btnSubtitles.alpha = if (hasAny) 1f else 0.35f
+
+        if (isTvDevice()) {
+            btnSubtitles.isFocusable = hasAny
+            btnSubtitles.isFocusableInTouchMode = hasAny
+        }
+    }
+
+
+    private fun setSubtitleTrack(trackId: Int) {
+        val p = vlcPlayer ?: return
+        currentSpuTrackId = trackId
+        try { p.spuTrack = trackId } catch (_: Exception) {}
+    }
+
+    private fun setAudioTrack(trackId: Int) {
+        val p = vlcPlayer ?: return
+        currentAudioTrackId = trackId
+        try { p.audioTrack = trackId } catch (_: Exception) {}
+    }
+
+
+
+    private fun trackPrefsKey(url: String) = "TRACKS::" + url.trim()
+
+    private fun loadSavedTracks(url: String): Pair<Int, Int>? {
+        val k = trackPrefsKey(url)
+        trackCache[k]?.let { return it }
+
+        val prefs = requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (!prefs.contains("$k::audio") && !prefs.contains("$k::spu")) return null
+
+        val a = prefs.getInt("$k::audio", Int.MIN_VALUE)
+        val s = prefs.getInt("$k::spu", Int.MIN_VALUE)
+        if (a == Int.MIN_VALUE && s == Int.MIN_VALUE) return null
+
+        val pair = Pair(
+            if (a == Int.MIN_VALUE) -1 else a,
+            if (s == Int.MIN_VALUE) -1 else s
+        )
+        trackCache[k] = pair
+        return pair
+    }
+
+    private fun saveTracks(url: String, audioId: Int, spuId: Int) {
+        val k = trackPrefsKey(url)
+        trackCache[k] = Pair(audioId, spuId)
+
+        requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt("$k::audio", audioId)
+            .putInt("$k::spu", spuId)
+            .apply()
     }
 
     // ===== Mobile exit: show/hide por alpha =====
@@ -169,9 +266,6 @@ class PlaybackVideoFragment : Fragment() {
         }
     }
 
-
-
-
     // =========================
     // ✅ Persistencia “último reproducido”
     // =========================
@@ -192,6 +286,21 @@ class PlaybackVideoFragment : Fragment() {
 
         Log.e(TAG, "PERSIST lastUrl=$url reason=$reason idx=$currentIndex size=${playlist.size}")
     }
+
+    private fun persistCurrentTracks(reason: String = "") {
+        val url = currentMovie?.videoUrl?.trim().orEmpty()
+        val p = vlcPlayer ?: return
+        if (url.isBlank()) return
+
+        val a = try { p.audioTrack } catch (_: Exception) { currentAudioTrackId }
+        val s = try { p.spuTrack } catch (_: Exception) { currentSpuTrackId }
+
+        saveTracks(url, a, s)
+        Log.d(TAG, "TRACKS persisted reason=$reason url=$url audio=$a spu=$s")
+    }
+
+
+
 
     // =========================
 
@@ -289,6 +398,7 @@ class PlaybackVideoFragment : Fragment() {
         Log.e(TAG, "ARGS movie=${dbgMovie?.videoUrl} playlistSize=${dbgList?.size} index=$dbgIndex")
 
         resolvePlaylistAndIndex()
+        tracksAppliedForThisMovie = false
         introSkipDoneForCurrent = false
         lastSkipVisible = false
 
@@ -405,6 +515,7 @@ class PlaybackVideoFragment : Fragment() {
     }
 
     private fun playIndex(newIndex: Int) {
+        persistCurrentTracks("beforePlayIndex")
         if (playlist.size <= 1) return
 
         val idx = if (loopPlaylist) {
@@ -436,6 +547,7 @@ class PlaybackVideoFragment : Fragment() {
 
         currentIndex = idx
         currentMovie = newMovie
+        tracksAppliedForThisMovie = false
         introSkipDoneForCurrent = false
         lastSkipVisible = false
         updatePrevNextState()
@@ -511,6 +623,225 @@ class PlaybackVideoFragment : Fragment() {
         }
     }
 
+    private fun looksSpanish(name: String): Boolean {
+        val n = name.trim().lowercase()
+        return n.contains("español") ||
+                n.contains("espanol") ||
+                n.contains("spanish") ||
+                n.contains("castellano") ||
+                n.contains("spa") ||          // a veces viene como "spa"
+                n.contains("es-") || n.contains("[es]") || n == "es"
+    }
+
+    private fun pickSpanishTrackId(tracks: Array<TrackDescription>): Int? {
+        // 1) match por nombre
+        tracks.firstOrNull { t -> looksSpanish(t.name ?: "") }?.let { return it.id }
+
+        // 2) fallback: si hay algo que diga "default"
+        tracks.firstOrNull { t -> (t.name ?: "").lowercase().contains("default") }?.let { return it.id }
+
+        return null
+    }
+
+    private fun langPref(scopeKey: String, kind: String): String? {
+        val k = "LANGCFG::$scopeKey::$kind"
+        val p = requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return if (p.contains(k)) p.getString(k, null) else null
+    }
+
+    private fun detectSeasonFromTitle(title: String?): String? {
+        if (title.isNullOrBlank()) return null
+
+        Regex("""\bS(\d{1,2})\s*E(\d{1,2})\b""", RegexOption.IGNORE_CASE)
+            .find(title)?.let { m ->
+                val s = m.groupValues[1].toIntOrNull() ?: return null
+                return "S" + s.toString().padStart(2, '0')
+            }
+
+        Regex("""\b(\d{1,2})x(\d{1,2})\b""", RegexOption.IGNORE_CASE)
+            .find(title)?.let { m ->
+                val s = m.groupValues[1].toIntOrNull() ?: return null
+                return "S" + s.toString().padStart(2, '0')
+            }
+
+        Regex("""\b(temporada|season)\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE)
+            .find(title)?.let { m ->
+                val s = m.groupValues[2].toIntOrNull() ?: return null
+                return "S" + s.toString().padStart(2, '0')
+            }
+
+        return null
+    }
+
+    /**
+     * Llamar cuando arranca el playback:
+     * - si hay guardado por URL => aplicar
+     * - si no, elegir español si existe (audio y subs)
+     * - y guardar
+     */
+    private fun applySavedOrDefaultTracksForCurrentMovie() {
+        val url = currentMovie?.videoUrl?.trim().orEmpty()
+        if (url.isBlank()) return
+
+        refreshTracks()
+
+        // 1️⃣ Si hay algo guardado por URL → respetarlo (máxima prioridad)
+        val saved = loadSavedTracks(url)
+        if (saved != null) {
+            val (a, s) = saved
+
+            // Audio: solo si existe
+            if (audioTracks.any { it.id == a }) {
+                setAudioTrack(a)
+                currentAudioTrackId = a
+            }
+
+            // Subs: puede ser -1 (OFF)
+            if (s == -1 || spuTracks.any { it.id == s }) {
+                setSubtitleTrack(s)
+                currentSpuTrackId = s
+            }
+            return
+        }
+
+        // 2️⃣ LanguageSettings scopes (SEASON / GROUP)
+        val group = currentMovie?.studio?.trim().orEmpty()   // viene de Movie.studio (fileName)
+        val season = detectSeasonFromTitle(currentMovie?.title)
+
+        fun langPref(scopeKey: String, kind: String): String? {
+            val k = "LANGCFG::$scopeKey::$kind"
+            val p = requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return if (p.contains(k)) p.getString(k, null) else null
+        }
+
+        // ✅ limpiar valores viejos por compat (si quedó "default" de builds anteriores)
+        fun sanitizePref(kind: String, v: String?): String? {
+            if (v == null) return null
+            if (v == "default") return if (kind == "audio") "es_lat" else "disable"
+            return v
+        }
+
+        fun pickAudioIdByPref(pref: String): Int? {
+            fun hasAny(words: List<String>, name: String) = words.any { name.contains(it) }
+
+            val list = audioTracks.filter { it.id != -1 }
+            if (list.isEmpty()) return null
+
+            val want = when (pref) {
+                "es_lat" -> listOf("español", "espanol", "spanish", "castellano", "lat", "spa", "es")
+                "en" -> listOf("english", "ingles", "inglés", "eng", "en")
+                "ja" -> listOf("japanese", "japones", "japonés", "jpn", "ja")
+                else -> emptyList()
+            }
+
+            if (want.isEmpty()) return null
+
+            return list.firstOrNull { t ->
+                hasAny(want, (t.name ?: "").lowercase())
+            }?.id
+        }
+
+        fun pickSubIdByPref(pref: String): Int? {
+            fun hasAny(words: List<String>, name: String) = words.any { name.contains(it) }
+
+            if (pref == "disable") return -1
+
+            val list = spuTracks.filter { it.id != -1 }
+            if (list.isEmpty()) return null
+
+            val want = when (pref) {
+                "es_lat" -> listOf("español", "espanol", "spanish", "castellano", "spa", "es")
+                "en" -> listOf("english", "ingles", "inglés", "eng", "en")
+                else -> emptyList()
+            }
+
+            if (want.isEmpty()) return null
+
+            return list.firstOrNull { t ->
+                hasAny(want, (t.name ?: "").lowercase())
+            }?.id
+        }
+
+        // leer prefs (prioridad: SEASON > GROUP)
+        var audioPref: String? = null
+        var subsPref: String? = null
+
+        if (group.isNotBlank()) {
+            if (season != null) {
+                audioPref = sanitizePref("audio", langPref("SEASON::$group::$season", "audio"))
+                subsPref = sanitizePref("subs", langPref("SEASON::$group::$season", "subs"))
+            }
+            if (audioPref == null) audioPref = sanitizePref("audio", langPref("GROUP::$group", "audio"))
+            if (subsPref == null) subsPref = sanitizePref("subs", langPref("GROUP::$group", "subs"))
+        }
+
+        var appliedSomething = false
+
+        // ✅ AUDIO:
+        // pref elegido -> si no existe -> Español Latino -> primer audio real (fallback final)
+        audioPref?.let { pref ->
+            val wantId = pickAudioIdByPref(pref)
+
+            val finalId =
+                if (wantId != null && audioTracks.any { it.id == wantId }) {
+                    wantId
+                } else {
+                    // ✅ fallback si NO existe lo pedido (ej japonés)
+                    pickAudioIdByPref("es_lat")
+                        ?: audioTracks.firstOrNull { it.id != -1 }?.id
+                }
+
+            if (finalId != null && audioTracks.any { it.id == finalId }) {
+                setAudioTrack(finalId)
+                currentAudioTrackId = finalId
+                appliedSomething = true
+            }
+        }
+
+        // ✅ SUBS:
+        // disable siempre -1
+        // si idioma no existe -> -1
+        subsPref?.let { pref ->
+            val id =
+                if (pref == "disable") -1
+                else pickSubIdByPref(pref) ?: -1
+
+            if (id == -1 || spuTracks.any { it.id == id }) {
+                setSubtitleTrack(id)
+                currentSpuTrackId = id
+                appliedSomething = true
+            }
+        }
+
+        // si aplicó algo por scopes, guardarlo por URL (sticky por episodio) y salir
+        if (appliedSomething) {
+            saveTracks(url, currentAudioTrackId, currentSpuTrackId)
+            return
+        }
+
+        // 3️⃣ Defaults reales:
+        // Audio: Español Latino si existe, sino primer audio real
+        // Subs: DISABLE
+        val defaultAudio =
+            pickSpanishTrackId(audioTracks)
+                ?: audioTracks.firstOrNull { it.id != -1 }?.id
+                ?: -1
+
+        val defaultSpu = -1 // DISABLE
+
+        if (defaultAudio != -1) {
+            setAudioTrack(defaultAudio)
+            currentAudioTrackId = defaultAudio
+        }
+
+        setSubtitleTrack(defaultSpu)
+        currentSpuTrackId = defaultSpu
+
+        saveTracks(url, currentAudioTrackId, currentSpuTrackId)
+    }
+
+
+
     private fun setupSubtitles() {
         btnSubtitles.isEnabled = false
         btnSubtitles.alpha = 0.35f
@@ -518,9 +849,11 @@ class PlaybackVideoFragment : Fragment() {
         btnSubtitles.setOnClickListener {
             bumpControlsTimeout()
             showExitTemporarily()
-            openSubtitlesDialog()
+            openTracksDialog()
         }
     }
+
+
 
     private fun refreshSpuTracks() {
         val p = vlcPlayer ?: run {
@@ -543,37 +876,118 @@ class PlaybackVideoFragment : Fragment() {
         }
     }
 
-    private fun setSubtitleTrack(trackId: Int) {
-        val p = vlcPlayer ?: return
-        currentSpuTrackId = trackId
-        try { p.spuTrack = trackId } catch (_: Exception) {}
-    }
+    private fun openTracksDialog() {
+        refreshTracks()
 
-    private fun openSubtitlesDialog() {
-        refreshSpuTracks()
+        val p = vlcPlayer
+        if (p == null) return
 
-        if (spuTracks.isEmpty()) {
-            Toast.makeText(requireContext(), "Este video no trae subtítulos.", Toast.LENGTH_SHORT).show()
+        // Audio: filtramos Disable (-1)
+        val audioList = audioTracks.filter { it.id != -1 }
+        // Subs: dejamos todo (incluye Disable -1)
+        val subsList = spuTracks.toList()
+
+        if (audioList.isEmpty() && subsList.isEmpty()) {
+            // sin toast como pediste: simplemente no hacemos nada
             return
         }
 
-        // ✅ No agregamos "OFF" manual: VLC ya trae "Disable" como track (normalmente id = -1)
-        val names = spuTracks.map { t ->
+        fun trackName(t: TrackDescription, fallback: String): String {
             val n = (t.name ?: "").trim()
-            if (n.isNotEmpty()) n else "Subtítulo ${t.id}"
-        }.toTypedArray()
+            return if (n.isNotEmpty()) n else fallback
+        }
 
-        val ids = spuTracks.map { it.id }.toIntArray()
+        val container = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 30, 40, 10)
+        }
 
-        val checked = ids.indexOf(currentSpuTrackId).let { if (it >= 0) it else 0 }
+        // ---- AUDIO ----
+        if (audioList.isNotEmpty()) {
+            val title = TextView(requireContext()).apply {
+                text = "Audio"
+                textSize = 16f
+                setPadding(0, 0, 0, 10)
+            }
+            container.addView(title)
+
+            val lvAudio = ListView(requireContext()).apply {
+                choiceMode = ListView.CHOICE_MODE_SINGLE
+            }
+
+            val audioNames = audioList.mapIndexed { idx, t ->
+                trackName(t, "Audio ${idx + 1}")
+            }.toTypedArray()
+
+            lvAudio.adapter = android.widget.ArrayAdapter(
+                requireContext(),
+                android.R.layout.simple_list_item_single_choice,
+                audioNames
+            )
+
+            // selección actual (si VLC da -1, elegimos 0)
+            val currentAudio = try { p.audioTrack } catch (_: Exception) { currentAudioTrackId }
+            val checkedAudio = audioList.indexOfFirst { it.id == currentAudio }.let { if (it >= 0) it else 0 }
+            lvAudio.setItemChecked(checkedAudio, true)
+
+            lvAudio.setOnItemClickListener { _, _, which, _ ->
+                val id = audioList[which].id
+                setAudioTrack(id)
+                currentAudioTrackId = id
+
+                val url = currentMovie?.videoUrl?.trim().orEmpty()
+                saveTracks(url, id, currentSpuTrackId)
+            }
+
+
+            container.addView(lvAudio)
+        }
+
+        // ---- SUBTÍTULOS ----
+        if (subsList.isNotEmpty()) {
+            val title = TextView(requireContext()).apply {
+                text = "Subtítulos"
+                textSize = 16f
+                setPadding(0, 25, 0, 10)
+            }
+            container.addView(title)
+
+            val lvSubs = ListView(requireContext()).apply {
+                choiceMode = ListView.CHOICE_MODE_SINGLE
+            }
+
+            val subsNames = subsList.map { t ->
+                // VLC ya trae "Disable" normalmente
+                trackName(t, "Subtítulo ${t.id}")
+            }.toTypedArray()
+
+            lvSubs.adapter = android.widget.ArrayAdapter(
+                requireContext(),
+                android.R.layout.simple_list_item_single_choice,
+                subsNames
+            )
+
+            val currentSpu = try { p.spuTrack } catch (_: Exception) { currentSpuTrackId }
+            val checkedSubs = subsList.indexOfFirst { it.id == currentSpu }.let { if (it >= 0) it else 0 }
+            lvSubs.setItemChecked(checkedSubs, true)
+
+            lvSubs.setOnItemClickListener { _, _, which, _ ->
+                val id = subsList[which].id
+                setSubtitleTrack(id)
+                currentSpuTrackId = id
+
+                val url = currentMovie?.videoUrl?.trim().orEmpty()
+                saveTracks(url, currentAudioTrackId, id)
+            }
+
+
+            container.addView(lvSubs)
+        }
 
         AlertDialog.Builder(requireContext())
-            .setTitle("Subtítulos")
-            .setSingleChoiceItems(names, checked) { dialog, which ->
-                setSubtitleTrack(ids[which])
-                dialog.dismiss()
-            }
-            .setNegativeButton("Cancelar", null)
+            .setTitle("Tracks")
+            .setView(container)
+            .setPositiveButton("Cerrar", null)  // ✅ único modo de cerrar
             .show()
     }
 
@@ -942,11 +1356,7 @@ class PlaybackVideoFragment : Fragment() {
                 when (ev.type) {
                     VlcMediaPlayer.Event.Playing -> ui.post {
                         btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
-
-                        // ✅ Subs OFF por defecto (VLC Disable = -1) + buscar tracks (pueden tardar)
-                        setSubtitleTrack(-1)
-                        scheduleSpuRefreshLoop()
-
+                        scheduleTracksRefreshLoop()
                         scheduleAutoHide()
                     }
 
@@ -1061,6 +1471,7 @@ class PlaybackVideoFragment : Fragment() {
 
     override fun onPause() {
         super.onPause()
+        persistCurrentTracks("onPause")
         persistLastPlayed("OnPause")
         try { vlcPlayer?.pause() } catch (_: Exception) {}
         btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
@@ -1068,7 +1479,7 @@ class PlaybackVideoFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
-
+        persistCurrentTracks("onDestroyView")
         persistLastPlayed()
 
         ui.removeCallbacks(hideExitRunnable)
@@ -1078,7 +1489,7 @@ class PlaybackVideoFragment : Fragment() {
         stopTicker()
         ui.removeCallbacks(hideControlsRunnable)
         ui.removeCallbacks(clearPreviewRunnable)
-        ui.removeCallbacks(spuRefreshRunnable)
+        ui.removeCallbacks(tracksRefreshRunnable)
 
         try { vlcPlayer?.stop() } catch (_: Exception) {}
         try { vlcPlayer?.detachViews() } catch (_: Exception) {}
