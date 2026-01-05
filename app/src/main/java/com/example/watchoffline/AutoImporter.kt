@@ -43,7 +43,7 @@ class AutoImporter(
         val title: String,
         val img: String,
         val skip: Int,
-        val delay: Int,          // ✅ NUEVO
+        val delay: Int,
         val videoSrc: String
     )
 
