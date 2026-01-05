@@ -76,7 +76,6 @@ class MainActivity : FragmentActivity() {
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
     }
 
-
     private fun startServer() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
@@ -85,14 +84,6 @@ class MainActivity : FragmentActivity() {
 
                 val url = getBestServerUrl(server.listeningPort)
                 Log.d("Server", "Servidor iniciado en $url")
-
-                runOnUiThread {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Servidor activo en:\n$url",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
 
             } catch (e: Exception) {
                 Log.e("Server", "Error al iniciar servidor: ${e.message}")
@@ -111,60 +102,8 @@ class MainActivity : FragmentActivity() {
 
     // 🔑 LOGICA CORRECTA DE INFORME
     private fun getBestServerUrl(port: Int): String {
-        val lanIp = getLanIp()
-        return if (!lanIp.isNullOrBlank()) {
-            "http://$lanIp:$port"
-        } else {
-            "http://localhost:$port"
-        }
-    }
+        return "http://localhost:$port"
 
-    private fun getLanIp(): String? {
-        val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
-        val net = cm.activeNetwork ?: return null
-        val caps = cm.getNetworkCapabilities(net) ?: return null
-
-        val isLan =
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
-                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-
-        if (!isLan) return null
-
-        getWifiIp()?.let { return it }
-        return getIpFromInterfaces()
-    }
-
-    private fun getWifiIp(): String? {
-        return try {
-            val wm = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
-            val ipInt = wm.connectionInfo?.ipAddress ?: 0
-            if (ipInt == 0) return null
-
-            val bytes = ByteBuffer.allocate(4)
-                .order(ByteOrder.LITTLE_ENDIAN)
-                .putInt(ipInt)
-                .array()
-
-            Inet4Address.getByAddress(bytes).hostAddress
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    private fun getIpFromInterfaces(): String? {
-        return try {
-            NetworkInterface.getNetworkInterfaces().toList()
-                .asSequence()
-                .filter { it.isUp && !it.isLoopback }
-                .flatMap { it.inetAddresses.toList().asSequence() }
-                .filterIsInstance<Inet4Address>()
-                .map { it.hostAddress }
-                .firstOrNull { ip ->
-                    ip != "127.0.0.1" && !ip.startsWith("169.254.")
-                }
-        } catch (_: Exception) {
-            null
-        }
     }
 
     private fun checkPermissions() {

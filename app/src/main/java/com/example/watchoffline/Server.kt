@@ -11,7 +11,7 @@ import kotlin.math.min
 
 class BackgroundServer(
     port: Int = 8080
-) : NanoHTTPD("0.0.0.0", port) {
+) : NanoHTTPD("127.0.0.1", port) {   // ✅ SOLO localhost
 
     private val tag = "BackgroundServer"
 
@@ -26,7 +26,10 @@ class BackgroundServer(
     // Root elegido automáticamente
     private val rootDir: File = pickRootDir()
 
-    override fun start() = super.start(SOCKET_READ_TIMEOUT, false)
+    override fun start() {
+        super.start(SOCKET_READ_TIMEOUT, false)
+        Log.d(tag, "Started localhost-only on http://127.0.0.1:$listeningPort (root=${rootDir.path})")
+    }
 
     override fun serve(session: IHTTPSession): Response {
         return try {
@@ -132,6 +135,7 @@ class BackgroundServer(
         }
 
         val header = """
+            <p><b>Servidor:</b> localhost-only (127.0.0.1)</p>
             <p><b>Root elegido:</b> ${escapeHtml(rootDir.path)}</p>
             <p><b>Directorio:</b> ${escapeHtml(dir.path)}</p>
         """.trimIndent()
@@ -318,3 +322,4 @@ class BackgroundServer(
         }
     }
 }
+

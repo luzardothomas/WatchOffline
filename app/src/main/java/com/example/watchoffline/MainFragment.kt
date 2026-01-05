@@ -60,12 +60,6 @@ class MainFragment : BrowseSupportFragment() {
 
         jsonDataManager.loadData(requireContext())
 
-        // ✅ DEBUG: qué hay realmente en storage (skip/img)
-        debugDumpFirstItem("after loadData()")
-
-        // ✅ DEBUG: prueba si TV puede hablar con la API (si falla, el importer también falla)
-        debugApiConnectivity()
-
         smbGateway = SmbGateway(requireContext())
         val ok = smbGateway.ensureProxyStarted(8081)
         Log.i(TAG, "SMB proxy started? $ok port=${smbGateway.getProxyPort()}")
@@ -76,8 +70,6 @@ class MainFragment : BrowseSupportFragment() {
         loadRows()
         setupEventListeners()
 
-        // ✅ DEBUG: test Glide con el primer poster real
-        debugTestGlideLoadFirstPoster()
     }
 
     override fun onDestroy() {
