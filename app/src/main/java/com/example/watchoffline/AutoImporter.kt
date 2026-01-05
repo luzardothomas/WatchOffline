@@ -6,15 +6,25 @@ import androidx.annotation.Keep
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import com.hierynomus.msfscc.FileAttributes
+import org.videolan.BuildConfig
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.security.SecureRandom
 import java.util.ArrayDeque
 import java.util.Collections
 import java.util.LinkedHashMap
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import javax.net.ssl.HostnameVerifier
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
+import java.security.cert.X509Certificate
+
+
 
 class AutoImporter(
     private val context: Context,
@@ -96,6 +106,45 @@ class AutoImporter(
     private val reMovieKey1 = Regex("""\[(\d{1,3})]""")
     private val reMovieKey2 = Regex("""^(\d{1,3})\D""")
     private val reMovieKey3 = Regex("""(?i)\b(part|parte)\s*(\d{1,3})\b""")
+
+    private val API_HOST = "api-watchoffline.luzardo-thomas.workers.dev"
+
+    private val trustAllSslSocketFactory by lazy {
+        val trustAll = arrayOf<TrustManager>(
+            object : X509TrustManager {
+                override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) = Unit
+                override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) = Unit
+                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+            }
+        )
+
+        val ctx = SSLContext.getInstance("TLS")
+        ctx.init(null, trustAll, SecureRandom())
+        ctx.socketFactory
+    }
+
+    private val trustAllHostnameVerifier = HostnameVerifier { hostname, _ ->
+        // Permitimos solo tu host (evita abrir la puerta a cualquier cosa)
+        hostname.equals(API_HOST, ignoreCase = true)
+    }
+
+    /**
+     * Devuelve conexión con TLS relajado SOLO para tu API y SOLO en debug.
+     * En release usa el stack normal del sistema.
+     */
+    private fun openConnectionForUrl(fullUrl: String): HttpURLConnection {
+        val url = URL(fullUrl)
+        val conn = url.openConnection() as HttpURLConnection
+
+        // Solo aplica a HTTPS y solo a tu host
+        if (conn is HttpsURLConnection && url.host.equals(API_HOST, ignoreCase = true) && BuildConfig.DEBUG) {
+            conn.sslSocketFactory = trustAllSslSocketFactory
+            conn.hostnameVerifier = trustAllHostnameVerifier
+        }
+
+        return conn
+    }
+
 
     // =========================
     // Public API
@@ -336,10 +385,10 @@ class AutoImporter(
     }
 
     private fun fetchCoverFromApi(q: String): ApiCover? {
-        val base = "https://api-watchoffline.luzardo-thomas.workers.dev/cover?q="
+        val base = "https://$API_HOST/cover?q="
         val full = base + URLEncoder.encode(q.replace("+", " "), "UTF-8")
 
-        val conn = (URL(full).openConnection() as HttpURLConnection).apply {
+        val conn = (openConnectionForUrl(full)).apply {
             requestMethod = "GET"
             connectTimeout = COVER_TIMEOUT_MS
             readTimeout = COVER_TIMEOUT_MS
@@ -354,12 +403,14 @@ class AutoImporter(
             if (body.isBlank()) return null
 
             gson.fromJson(body, ApiCover::class.java)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e(tag, "COVER API EXCEPTION q='$q' -> ${e::class.java.simpleName}: ${e.message}", e)
             null
         } finally {
             conn.disconnect()
         }
     }
+
 
     // =========================
     // SMB listing (iterativo, rápido)

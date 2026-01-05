@@ -25,6 +25,8 @@ import org.videolan.libvlc.MediaPlayer as VlcMediaPlayer
 
 class PlaybackVideoFragment : Fragment() {
 
+    private val TAG = "PlaybackVideoFragment"
+
     private lateinit var root: View
     private lateinit var videoLayout: VLCVideoLayout
 
@@ -37,7 +39,15 @@ class PlaybackVideoFragment : Fragment() {
     private lateinit var txtPos: TextView
     private lateinit var txtDur: TextView
 
-    // ✅ MOBILE ONLY: botón salir arriba-izquierda (puede ser ImageButton o TextView)
+    private lateinit var btnPrevVideo: ImageButton
+    private lateinit var btnNextVideo: ImageButton
+
+    // ✅ Playlist REAL (solo desde arguments)
+    private var playlist: List<Movie> = emptyList()
+    private var currentIndex: Int = 0
+    private var currentMovie: Movie? = null
+
+    // ✅ MOBILE ONLY: botón salir arriba-izquierda
     private var btnExitMobile: View? = null
     private var mobileExitEnabled = false
 
@@ -52,10 +62,7 @@ class PlaybackVideoFragment : Fragment() {
 
     private val SEEK_STEP_MS = 10_000L
     private val SEEK_STEP_BAR = 25
-    private val AUTO_HIDE_MS = 2500L
-
-    private var lastSeekAppliedAt = 0L
-    private val SEEK_APPLY_DEBOUNCE_MS = 90L
+    private val AUTO_HIDE_MS = 10000L
 
     private var previewSeekMs: Long? = null
     private val CLEAR_PREVIEW_DELAY = 650L
@@ -68,8 +75,6 @@ class PlaybackVideoFragment : Fragment() {
     // ===== Mobile exit: show/hide por alpha =====
     private val hideExitRunnable = Runnable {
         val b = btnExitMobile ?: return@Runnable
-        // OJO: en mobile lo dejamos VISIBLE siempre (para que capte click en 1 toque),
-        // solo lo "escondemos" con alpha = 0 y disabled click si querés.
         b.animate().alpha(0f).setDuration(150).start()
     }
 
@@ -126,17 +131,30 @@ class PlaybackVideoFragment : Fragment() {
         // ✅ mobile exit (si no está en XML, queda null y no pasa nada)
         btnExitMobile = root.findViewById(R.id.btn_exit_mobile)
 
-        // ✅ Evita “filtro gris molesto”
+        // Prev / Next
+        btnPrevVideo = root.findViewById(R.id.btn_prev_video)
+        btnNextVideo = root.findViewById(R.id.btn_next_video)
+
+        // Apariencia fastbackward / fastforward (sólo icono)
+        btnPrevVideo.setImageResource(android.R.drawable.ic_media_rew)
+        btnNextVideo.setImageResource(android.R.drawable.ic_media_ff)
+
+        // Evitar “filtro gris molesto”
+        btnPrevVideo.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+        btnNextVideo.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         btnSeekBack.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         btnPlayPause.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         btnSeekFwd.setBackgroundColor(android.graphics.Color.TRANSPARENT)
 
         setupControls()
+        setupPrevNextHandlers()
         setupRemoteHandlers()
 
+        addTvFocusScale(btnPrevVideo)
         addTvFocusScale(btnSeekBack)
         addTvFocusScale(btnPlayPause, 1.18f)
         addTvFocusScale(btnSeekFwd)
+        addTvFocusScale(btnNextVideo)
         addTvFocusScale(seekBar, 1.06f)
         addTvFocusScale(skipIntroButton, 1.10f)
 
@@ -151,11 +169,10 @@ class PlaybackVideoFragment : Fragment() {
         // ✅ solo mobile
         setupMobileExitButton()
 
-        // ✅ MOBILE: mostrar el botón al entrar por primera vez (para que el usuario lo descubra)
+        // ✅ MOBILE: mostrar el botón al entrar por primera vez
         if (mobileExitEnabled) {
             ui.post { showExitTemporarily(2200L) }
         }
-
 
         if (isTvDevice()) btnPlayPause.requestFocus()
 
@@ -166,19 +183,122 @@ class PlaybackVideoFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
-        val movie = arguments?.getSerializable("movie") as? Movie
-        val url = movie?.videoUrl
+        // 🔥 DEBUG DURO: ver qué llega realmente
+        val dbgMovie = arguments?.getSerializable("movie") as? Movie
+        val dbgList = arguments?.getSerializable("playlist") as? ArrayList<Movie>
+        val dbgIndex = arguments?.getInt("index", -1)
+        Log.e(TAG, "ARGS movie=${dbgMovie?.videoUrl} playlistSize=${dbgList?.size} index=$dbgIndex")
+
+        // 🔥 Resolver playlist real (la del JSON) + índice (solo desde arguments)
+        resolvePlaylistAndIndex()
+
+        Log.e(TAG, "RESOLVED playlistSize=${playlist.size} currentIndex=$currentIndex movie=${currentMovie?.videoUrl}")
+
+        val url = currentMovie?.videoUrl
         if (url.isNullOrBlank()) {
             Toast.makeText(requireContext(), "No se pudo cargar el video", Toast.LENGTH_SHORT).show()
             requireActivity().finish()
             return
         }
 
+        updatePrevNextState()
         initVlc(url)
         startTicker()
 
         // Mantener pantalla encendida mientras este fragment esté visible
         view.keepScreenOn = true
+    }
+
+    /**
+     * ✅ ÚNICA FUENTE DE VERDAD: arguments
+     * - "movie" siempre debe venir.
+     * - "playlist" + "index" vienen cuando hay más de un video en el JSON.
+     */
+    private fun resolvePlaylistAndIndex() {
+        val argMovie = arguments?.getSerializable("movie") as? Movie ?: run {
+            playlist = emptyList()
+            currentIndex = 0
+            currentMovie = null
+            return
+        }
+
+        val argList = arguments?.getSerializable("playlist") as? ArrayList<Movie>
+        val argIndex = arguments?.getInt("index", 0) ?: 0
+
+        playlist = if (!argList.isNullOrEmpty()) argList else listOf(argMovie)
+        currentIndex = argIndex.coerceIn(0, playlist.lastIndex)
+        currentMovie = playlist[currentIndex]
+    }
+
+    private fun setupPrevNextHandlers() {
+        btnPrevVideo.setOnClickListener {
+            if (!btnPrevVideo.isEnabled) return@setOnClickListener
+            playIndex(currentIndex - 1)
+            bumpControlsTimeout()
+            showExitTemporarily()
+        }
+
+        btnNextVideo.setOnClickListener {
+            if (!btnNextVideo.isEnabled) return@setOnClickListener
+            playIndex(currentIndex + 1)
+            bumpControlsTimeout()
+            showExitTemporarily()
+        }
+    }
+
+    private fun updatePrevNextState() {
+        val hasPrev = playlist.size > 1 && currentIndex > 0
+        val hasNext = playlist.size > 1 && currentIndex < playlist.lastIndex
+
+        // ✅ enable/alpha
+        btnPrevVideo.isEnabled = hasPrev
+        btnNextVideo.isEnabled = hasNext
+        btnPrevVideo.alpha = if (hasPrev) 1f else 0.35f
+        btnNextVideo.alpha = if (hasNext) 1f else 0.35f
+
+        // ✅ en TV: si está deshabilitado que ni pueda enfocarse
+        if (isTvDevice()) {
+            btnPrevVideo.isFocusable = hasPrev
+            btnPrevVideo.isFocusableInTouchMode = hasPrev
+            btnNextVideo.isFocusable = hasNext
+            btnNextVideo.isFocusableInTouchMode = hasNext
+        }
+    }
+
+    private fun playIndex(newIndex: Int) {
+        if (playlist.size <= 1) return
+        val idx = newIndex.coerceIn(0, playlist.lastIndex)
+        if (idx == currentIndex) return
+
+        val newMovie = playlist[idx]
+        val url = newMovie.videoUrl
+        if (url.isNullOrBlank()) {
+            Toast.makeText(requireContext(), "No se pudo cargar el video", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // limpia UI
+        previewSeekMs = null
+        isUserSeeking = false
+        seekBar.progress = 0
+        txtPos.text = "0:00"
+        txtDur.text = "0:00"
+
+        // parar VLC actual (sin destruir fragment)
+        try { vlcPlayer?.stop() } catch (_: Exception) {}
+        try { vlcPlayer?.detachViews() } catch (_: Exception) {}
+        try { vlcPlayer?.release() } catch (_: Exception) {}
+        vlcPlayer = null
+
+        // set nuevo
+        currentIndex = idx
+        currentMovie = newMovie
+        updatePrevNextState()
+
+        initVlc(url)
+        btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
+
+        if (isTvDevice()) btnPlayPause.requestFocus()
     }
 
     override fun onResume() {
@@ -254,7 +374,6 @@ class PlaybackVideoFragment : Fragment() {
         mobileExitEnabled = !isTvDevice()
 
         if (!mobileExitEnabled) {
-            // TV: no existe
             btn.visibility = View.GONE
             btn.alpha = 0f
             btn.isFocusable = false
@@ -264,18 +383,13 @@ class PlaybackVideoFragment : Fragment() {
             return
         }
 
-        // MOBILE:
-        // ✅ lo dejamos VISIBLE siempre, pero oculto por alpha.
-        // Así, un toque en la esquina pega directo al botón: 1 toque = salir.
         btn.visibility = View.VISIBLE
         btn.alpha = 0f
 
-        // 1 toque = salir
         btn.setOnClickListener {
             requireActivity().onBackPressedDispatcher.onBackPressed()
         }
 
-        // Interacción general -> mostrar el icono (para feedback visual)
         root.setOnTouchListener { _, ev ->
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN,
@@ -285,13 +399,9 @@ class PlaybackVideoFragment : Fragment() {
             false
         }
 
-        // Opcional: agrandar "hitbox" real del botón sin cambiar XML
-        // (esto NO cambia visual, solo área tocable)
         btn.post {
             try {
-                val hit = dp(72)
                 val lp = btn.layoutParams as ViewGroup.MarginLayoutParams
-                // mantenemos mismo tamaño, solo aseguramos margen ok; el toque ya funciona porque está visible
                 btn.layoutParams = lp
             } catch (_: Exception) {}
         }
@@ -452,7 +562,7 @@ class PlaybackVideoFragment : Fragment() {
     }
 
     private fun performSkipIntro() {
-        val movie = arguments?.getSerializable("movie") as? Movie
+        val movie = currentMovie
         val skip = movie?.skipToSecond ?: 0
         if (skip <= 0) return
 
@@ -510,7 +620,7 @@ class PlaybackVideoFragment : Fragment() {
             else -> videoUrl
         }
 
-        Log.d("PlaybackVideoFragment", "VLC url=$fixedUrl")
+        Log.d(TAG, "VLC url=$fixedUrl")
 
         libVlc = LibVLC(
             requireContext(),
@@ -587,7 +697,7 @@ class PlaybackVideoFragment : Fragment() {
                         }
                     }
 
-                    val movie = arguments?.getSerializable("movie") as? Movie
+                    val movie = currentMovie
                     val hasSkip = (movie?.skipToSecond ?: 0) > 0
                     skipIntroButton.visibility =
                         if (hasSkip && posToShow < 15_000) View.VISIBLE else View.GONE

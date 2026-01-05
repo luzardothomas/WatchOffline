@@ -186,11 +186,17 @@ class MainFragment : BrowseSupportFragment() {
 
         jsonDataManager.getImportedJsons().forEach { imported ->
             val rowAdapter = ArrayObjectAdapter(cardPresenter).apply {
-                imported.videos.forEach { add(it.toMovie()) }
+                imported.videos.forEach { v ->
+                    add(v.toMovie())
+                }
             }
+
             rowsAdapter.add(
                 ListRow(
-                    HeaderItem(imported.fileName.hashCode().toLong(), prettyTitle(imported.fileName)),
+                    HeaderItem(
+                        imported.fileName.hashCode().toLong(),
+                        prettyTitle(imported.fileName)
+                    ),
                     rowAdapter
                 )
             )
@@ -198,6 +204,7 @@ class MainFragment : BrowseSupportFragment() {
 
         adapter = rowsAdapter
     }
+
 
     private fun VideoItem.toMovie() = Movie(
         title = title,
@@ -230,7 +237,7 @@ class MainFragment : BrowseSupportFragment() {
             when (item) {
                 is Movie -> {
                     Log.d(TAG, "CLICK Movie title='${item.title}' url='${item.videoUrl}'")
-                    navigateToDetails(itemViewHolder, item)
+                    navigateToDetails(itemViewHolder, item, row)
                 }
                 is String -> {
                     Log.d(TAG, "CLICK String='$item'")
@@ -244,13 +251,39 @@ class MainFragment : BrowseSupportFragment() {
 
         private fun navigateToDetails(
             itemViewHolder: Presenter.ViewHolder,
-            movie: Movie
+            movie: Movie,
+            row: Row
         ) {
-            val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
-                putExtra(DetailsActivity.MOVIE, movie)
+            // ✅ playlist real = fila actual
+            val listRow = row as? ListRow
+            val adapter = listRow?.adapter
+
+            val playlist = ArrayList<Movie>()
+            if (adapter != null) {
+                for (i in 0 until adapter.size()) {
+                    val obj = adapter.get(i)
+                    if (obj is Movie) playlist.add(obj)
+                }
             }
 
-            // ✅ IMPORTANTE: en Search no siempre es ImageCardView, por eso es "as?"
+            val index = playlist.indexOfFirst { it.videoUrl == movie.videoUrl }
+                .let { if (it >= 0) it else 0 }
+
+            Log.e(
+                "MainFragment",
+                "NAV movie=${movie.videoUrl} playlistSize=${playlist.size} index=$index"
+            )
+
+            val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
+                putExtra(DetailsActivity.MOVIE, movie)
+
+                // ✅ solo si es playlist real
+                if (playlist.size > 1) {
+                    putExtra(DetailsActivity.EXTRA_PLAYLIST, playlist)
+                    putExtra(DetailsActivity.EXTRA_INDEX, index)
+                }
+            }
+
             val cardView = itemViewHolder.view as? ImageCardView
             val shared = cardView?.mainImageView
 
@@ -262,10 +295,10 @@ class MainFragment : BrowseSupportFragment() {
                 )
                 startActivity(intent, options.toBundle())
             } else {
-                // ✅ Search / otros presenters: sin shared element
                 startActivity(intent)
             }
         }
+
 
         private fun handleStringAction(item: String) {
             when (item) {

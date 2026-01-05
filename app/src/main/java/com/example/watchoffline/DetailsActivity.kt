@@ -2,13 +2,13 @@ package com.example.watchoffline
 
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import androidx.fragment.app.FragmentActivity
 import com.example.watchoffline.vid.PlaybackVideoFragment
 
-/**
- * Details activity class that loads [VideoDetailsFragment] class.
- */
 class DetailsActivity : FragmentActivity() {
+
+    private val TAG = "DetailsActivity"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -16,16 +16,30 @@ class DetailsActivity : FragmentActivity() {
 
         if (savedInstanceState != null) return
 
-        // ✅ Tomar el Movie que ya mandás desde MainFragment
+        // ✅ Movie (key fija)
         val movie = intent.getSerializableExtra(MOVIE) as? Movie
         if (movie == null) {
             startActivity(Intent(this, MainActivity::class.java))
             finish()
             return
         }
-        // ✅ Cargar el PlaybackVideoFragment
+
+        // ✅ Playlist + index (si vienen)
+        val playlist = intent.getSerializableExtra(EXTRA_PLAYLIST) as? ArrayList<Movie>
+        val index = intent.getIntExtra(EXTRA_INDEX, 0)
+
+        Log.e(TAG, "INTENT movie=${movie.videoUrl} playlistSize=${playlist?.size} index=$index")
+
         val frag = PlaybackVideoFragment().apply {
-            arguments = Bundle().apply { putSerializable("movie", movie) }
+            arguments = Bundle().apply {
+                putSerializable("movie", movie)
+
+                // 🔥 SOLO si llega playlist real
+                if (!playlist.isNullOrEmpty()) {
+                    putSerializable("playlist", playlist)
+                    putInt("index", index.coerceIn(0, playlist.lastIndex))
+                }
+            }
         }
 
         supportFragmentManager.beginTransaction()
@@ -35,6 +49,12 @@ class DetailsActivity : FragmentActivity() {
 
     companion object {
         const val SHARED_ELEMENT_NAME = "hero"
+
+        // ✅ key usada para el Movie
         const val MOVIE = "Movie"
+
+        // ✅ keys para playlist
+        const val EXTRA_PLAYLIST = "wo_playlist"
+        const val EXTRA_INDEX = "wo_index"
     }
 }

@@ -19,6 +19,7 @@ import androidx.leanback.widget.DetailsOverviewRow
 import androidx.leanback.widget.FullWidthDetailsOverviewRowPresenter
 import androidx.leanback.widget.FullWidthDetailsOverviewSharedElementHelper
 import androidx.leanback.widget.ImageCardView
+import androidx.leanback.widget.ListRow
 import androidx.leanback.widget.OnActionClickedListener
 import androidx.leanback.widget.OnItemViewClickedListener
 import androidx.leanback.widget.Presenter
@@ -158,21 +159,45 @@ class VideoDetailsFragment : DetailsSupportFragment() {
             row: Row
         ) {
             if (item is Movie) {
-                Log.d(TAG, "Item: " + item.toString())
-                val intent = Intent(activity!!, DetailsActivity::class.java)
-                intent.putExtra(resources.getString(R.string.movie), mSelectedMovie)
 
-                val bundle =
-                    ActivityOptionsCompat.makeSceneTransitionAnimation(
-                        activity!!,
-                        (itemViewHolder?.view as ImageCardView).mainImageView,
-                        DetailsActivity.SHARED_ELEMENT_NAME
-                    )
-                        .toBundle()
+                // ✅ playlist real desde la fila (ListRow)
+                val listRow = row as? ListRow
+                val adapter = listRow?.adapter
+
+                val playlist = ArrayList<Movie>()
+                if (adapter != null) {
+                    for (i in 0 until adapter.size()) {
+                        val obj = adapter.get(i)
+                        if (obj is Movie) playlist.add(obj)
+                    }
+                }
+
+                val index = playlist.indexOfFirst { it.videoUrl == item.videoUrl }
+                    .let { if (it >= 0) it else 0 }
+
+                val intent = Intent(requireActivity(), DetailsActivity::class.java).apply {
+
+                    // ✅ MISMA KEY QUE DetailsActivity (CRÍTICO)
+                    putExtra(DetailsActivity.MOVIE, item)
+
+                    // ✅ playlist + index (usar mismas keys que DetailsActivity)
+                    putExtra(DetailsActivity.EXTRA_PLAYLIST, playlist)
+                    putExtra(DetailsActivity.EXTRA_INDEX, index)
+                }
+
+                val bundle = ActivityOptionsCompat.makeSceneTransitionAnimation(
+                    requireActivity(),
+                    (itemViewHolder?.view as ImageCardView).mainImageView,
+                    DetailsActivity.SHARED_ELEMENT_NAME
+                ).toBundle()
+
                 startActivity(intent, bundle)
             }
         }
     }
+
+
+
 
     companion object {
         private val TAG = "VideoDetailsFragment"

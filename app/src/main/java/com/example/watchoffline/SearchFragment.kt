@@ -1,16 +1,15 @@
 package com.example.watchoffline
 
-import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.speech.RecognizerIntent
+import android.util.Log
 import androidx.core.app.ActivityOptionsCompat
 import androidx.leanback.app.SearchSupportFragment
 import androidx.leanback.widget.*
-import java.util.Locale
 import java.util.LinkedHashMap
+import java.util.Locale
 
 class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResultProvider {
 
@@ -18,53 +17,54 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
 
     private val jsonDataManager = JsonDataManager()
     private val cardPresenter = CardPresenter()
-
     private val rowsAdapter = ArrayObjectAdapter(ListRowPresenter())
 
     private var allImported: List<ImportedJson> = emptyList()
 
-    // ✅ DEDUPE: evita ejecutar dos veces la misma query
     private var lastScheduledQuery: String = ""
     private var lastExecutedQuery: String = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // ✅ HABILITAR VOZ: callback para que el mic no quede “muerto”
-        setSpeechRecognitionCallback(object : SpeechRecognitionCallback {
-            override fun recognizeSpeech() {
-                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                    putExtra(
-                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-                    )
-                    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-                    putExtra(RecognizerIntent.EXTRA_PROMPT, "Decí qué querés buscar")
-                }
-
-                try {
-                    // Leanback maneja el result y llama onActivityResult del fragment
-                    startActivityForResult(intent, REQUEST_SPEECH)
-                } catch (_: Exception) {
-                    // Si el dispositivo no tiene recognizer/assistant, simplemente no hará nada
-                }
-            }
-        })
-
-        // ❌ Sacá esto: en tu leanback no existe el id y además view acá es null
-        // view?.findViewById<View?>(androidx.leanback.R.id.lb_search_bar_speech_orb) ...
+        // ✅ CLAVE: NO disparar VOZ (evita Katniss / VoiceInputActivity)
+        setSpeechRecognitionCallback(null)
 
         jsonDataManager.loadData(requireContext())
         allImported = jsonDataManager.getImportedJsons()
+    }
 
+    override fun onViewCreated(view: android.view.View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+
+        // ✅ SIN ESTO, no hay results provider => no busca
         setSearchResultProvider(this)
 
-        setOnItemViewClickedListener { itemViewHolder, item, _, _ ->
+        setOnItemViewClickedListener { itemViewHolder, item, _, row ->
             val movie = item as? Movie ?: return@setOnItemViewClickedListener
+
+            // ✅ playlist desde la fila (ListRow)
+            val listRow = row as? ListRow
+            val adapter = listRow?.adapter
+
+            val playlist = ArrayList<Movie>()
+            if (adapter != null) {
+                for (i in 0 until adapter.size()) {
+                    val obj = adapter.get(i)
+                    if (obj is Movie) playlist.add(obj)
+                }
+            }
+
+            val index = playlist.indexOfFirst { it.videoUrl == movie.videoUrl }
+                .let { if (it >= 0) it else 0 }
 
             val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
                 putExtra(DetailsActivity.MOVIE, movie)
+
+                if (playlist.size > 1) {
+                    putExtra(DetailsActivity.EXTRA_PLAYLIST, playlist)
+                    putExtra(DetailsActivity.EXTRA_INDEX, index)
+                }
             }
 
             val cardView = itemViewHolder.view as? ImageCardView
@@ -91,32 +91,30 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
     }
 
     override fun onQueryTextSubmit(query: String?): Boolean {
-        // ✅ Dejalo activo por voz/enter; el dedupe evita repetir
         scheduleSearch(query.orEmpty())
         return true
     }
 
-    // ✅ DEDUPE + debounce
     private fun scheduleSearch(raw: String) {
         val q = normalize(raw)
-
         if (q == lastScheduledQuery) return
         lastScheduledQuery = q
 
         handler.removeCallbacksAndMessages(null)
-        handler.postDelayed({ performSearch(raw) }, 180)
+        handler.postDelayed({ performSearch(raw) }, 120)
     }
 
     private fun performSearch(raw: String) {
         val q = normalize(raw)
-
         if (q == lastExecutedQuery) return
         lastExecutedQuery = q
+
+        Log.d("SearchFragment", "SEARCH q='$q'")
 
         rowsAdapter.clear()
         if (q.isBlank()) return
 
-        val out = LinkedHashMap<String, Movie>() // dedupe por key (videoUrl)
+        val out = LinkedHashMap<String, Movie>()
 
         for (json in allImported) {
             val jsonTitle = safePrettyTitle(json.fileName)
@@ -124,7 +122,6 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
 
             for (v in json.videos) {
                 val titleMatch = normalize(v.title).contains(q)
-
                 if (titleMatch || jsonMatch) {
                     val movie = Movie(
                         title = v.title,
@@ -135,8 +132,7 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
                         description = jsonTitle
                     )
 
-                    val key = movie.videoUrl
-                        ?.takeIf { it.isNotBlank() }
+                    val key = movie.videoUrl?.takeIf { it.isNotBlank() }
                         ?: "${jsonTitle}:${movie.title}"
 
                     out[key] = movie
@@ -145,8 +141,9 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
         }
 
         val movies = out.values.toList()
-        val itemsPerRow = 6
+        Log.d("SearchFragment", "RESULTS size=${movies.size}")
 
+        val itemsPerRow = 6
         movies.chunked(itemsPerRow).forEach { chunk ->
             val rowAdapter = ArrayObjectAdapter(cardPresenter)
             chunk.forEach { rowAdapter.add(it) }
@@ -171,27 +168,4 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
                 .replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
         }
     }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-
-        if (requestCode != REQUEST_SPEECH) return
-        if (resultCode != Activity.RESULT_OK) return
-
-        val results = data
-            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-            .orEmpty()
-
-        val spoken = results.firstOrNull().orEmpty().trim()
-        if (spoken.isBlank()) return
-
-        // ✅ Pone el texto reconocido en la barra y busca
-        setSearchQuery(spoken, true)
-        scheduleSearch(spoken)
-    }
-
-    companion object {
-        private const val REQUEST_SPEECH = 9001
-    }
 }
-

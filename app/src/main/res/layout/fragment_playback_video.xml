@@ -11,7 +11,6 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- OVERLAY CONTROLES (estilo Exo, pero simples con iconos del sistema) -->
     <!-- OVERLAY CONTROLES -->
     <LinearLayout
         android:id="@+id/controls_overlay"
@@ -62,19 +61,32 @@
                 android:paddingStart="12dp" />
         </LinearLayout>
 
-        <!-- Botones abajo: <  Play/Pause  > -->
+        <!-- BOTONES PRINCIPALES -->
         <LinearLayout
             android:id="@+id/controls_row"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
+            android:layout_marginTop="14dp"
             android:orientation="horizontal"
-            android:gravity="center">
+            android:gravity="center_vertical|center">
 
+            <!-- PREV VIDEO -->
+            <ImageButton
+                android:id="@+id/btn_prev_video"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:layout_marginEnd="14dp"
+                android:background="@android:color/transparent"
+                android:contentDescription="Anterior"
+                android:focusable="true"
+                android:focusableInTouchMode="true" />
+
+            <!-- SEEK BACK -->
             <ImageButton
                 android:id="@+id/btn_seek_back"
                 android:layout_width="56dp"
                 android:layout_height="56dp"
+                android:layout_marginEnd="10dp"
                 android:background="@android:drawable/btn_default"
                 android:src="@android:drawable/ic_media_previous"
                 android:contentDescription="Back 10s"
@@ -83,12 +95,13 @@
                 android:focusable="true"
                 android:focusableInTouchMode="true" />
 
+            <!-- PLAY / PAUSE -->
             <ImageButton
                 android:id="@+id/btn_play_pause"
                 android:layout_width="64dp"
                 android:layout_height="64dp"
-                android:layout_marginStart="14dp"
-                android:layout_marginEnd="14dp"
+                android:layout_marginStart="10dp"
+                android:layout_marginEnd="10dp"
                 android:background="@android:drawable/btn_default"
                 android:src="@android:drawable/ic_media_play"
                 android:contentDescription="Play/Pause"
@@ -97,10 +110,12 @@
                 android:focusable="true"
                 android:focusableInTouchMode="true" />
 
+            <!-- SEEK FWD -->
             <ImageButton
                 android:id="@+id/btn_seek_fwd"
                 android:layout_width="56dp"
                 android:layout_height="56dp"
+                android:layout_marginStart="10dp"
                 android:background="@android:drawable/btn_default"
                 android:src="@android:drawable/ic_media_next"
                 android:contentDescription="Forward 10s"
@@ -108,8 +123,19 @@
                 android:padding="10dp"
                 android:focusable="true"
                 android:focusableInTouchMode="true" />
-        </LinearLayout>
 
+            <!-- NEXT VIDEO -->
+            <ImageButton
+                android:id="@+id/btn_next_video"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:layout_marginStart="14dp"
+                android:background="@android:color/transparent"
+                android:contentDescription="Siguiente"
+                android:focusable="true"
+                android:focusableInTouchMode="true" />
+
+        </LinearLayout>
     </LinearLayout>
 
     <!-- SKIP INTRO -->
@@ -125,7 +151,7 @@
         android:focusable="true"
         android:focusableInTouchMode="true" />
 
-    <!-- ✅ MOBILE ONLY: BACK/SALIR (arriba-izquierda) -->
+    <!-- MOBILE ONLY: BACK / SALIR -->
     <TextView
         android:id="@+id/btn_exit_mobile"
         android:layout_width="56dp"
@@ -143,5 +169,5 @@
         android:focusable="true"
         android:focusableInTouchMode="true" />
 
-
 </FrameLayout>
+

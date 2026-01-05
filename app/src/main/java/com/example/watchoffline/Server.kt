@@ -4,7 +4,9 @@ import android.util.Log
 import fi.iki.elonen.NanoHTTPD
 import java.io.File
 import java.io.FileInputStream
+import java.io.IOException
 import java.io.InputStream
+import java.net.SocketException
 import java.net.URLDecoder
 import java.net.URLEncoder
 import kotlin.math.min
@@ -35,18 +37,13 @@ class BackgroundServer(
         return try {
             val decodedUri = decodeUri(session.uri ?: "/")
 
-            // "/" => listar rootDir
             val requested = if (decodedUri == "/" || decodedUri.isBlank()) {
                 rootDir
             } else {
-                // Si te pasan un path absoluto tipo "/storage/emulated/0/Movies/a.mp4",
-                // lo respetamos. Si es relativo, lo resolvemos contra rootDir.
                 val absLike = decodedUri.startsWith("/storage/") || decodedUri.startsWith("/sdcard")
                 if (absLike) File(decodedUri) else File(rootDir, decodedUri.trimStart('/'))
             }
 
-            // Seguridad: evitar salir del root (si el requested es relativo al root)
-            // Para absolutos, permitimos sólo si están bajo alguno de los roots conocidos.
             if (!isAllowedPath(requested)) {
                 return newFixedLengthResponse(
                     Response.Status.FORBIDDEN,
@@ -83,13 +80,11 @@ class BackgroundServer(
     private fun isAllowedPath(f: File): Boolean {
         val canon = try { f.canonicalPath } catch (_: Exception) { return false }
 
-        // Permitimos si está bajo alguno de los roots típicos (cuando te pasan path absoluto)
         for (root in rootCandidates) {
             val rCanon = try { root.canonicalPath } catch (_: Exception) { continue }
             if (canon.startsWith(rCanon)) return true
         }
 
-        // Si rootCandidates falla por permisos raros, al menos restringimos a rootDir
         val rootCanon = try { rootDir.canonicalPath } catch (_: Exception) { return false }
         return canon.startsWith(rootCanon)
     }
@@ -101,7 +96,6 @@ class BackgroundServer(
     private fun listFilesHtml(dir: File): Response {
         val children = dir.listFiles()
 
-        // Si no se puede listar (scoped storage / permisos), children suele ser null
         if (children == null) {
             val diag = """
                 <p><b>No se pudo listar este directorio.</b></p>
@@ -170,7 +164,6 @@ class BackgroundServer(
             .replace("\"", "&quot;")
             .replace("'", "&#39;")
 
-    // Href absoluto, pero URL-encoded por segmentos (no rompe '/')
     private fun encodeHrefAbsolute(absPath: String, isDir: Boolean): String {
         val clean = absPath.replace("\\", "/")
         val parts = clean.split("/").map { seg ->
@@ -182,9 +175,7 @@ class BackgroundServer(
     }
 
     private fun decodeUri(uri: String): String {
-        // uri viene URL-encoded. Decode una vez.
         val decoded = URLDecoder.decode(uri, "UTF-8")
-        // normalización mínima
         return decoded.replace("\\", "/")
     }
 
@@ -195,58 +186,60 @@ class BackgroundServer(
     )
 
     // =========================
-    // File serving with Range
+    // File serving with Range (NO chunked) + ignore Broken pipe
     // =========================
 
     private fun serveFileWithRange(session: IHTTPSession, file: File): Response {
         val mime = guessMime(file)
+        val fileLen = file.length()
 
         // Range: bytes=start-end
         val rangeHeader = session.headers["range"] ?: session.headers["Range"]
-        val fileLen = file.length()
 
-        if (rangeHeader != null && rangeHeader.startsWith("bytes=") && fileLen > 0) {
-            val range = rangeHeader.removePrefix("bytes=").trim()
-            val (start, end) = parseRange(range, fileLen)
-
-            val len = (end - start + 1).coerceAtLeast(0)
-            val fis = FileInputStream(file)
-
-            // saltar al start
-            skipFully(fis, start)
-
-            val stream: InputStream = BoundedInputStream(fis, len)
-
-            return newChunkedResponse(Response.Status.PARTIAL_CONTENT, mime, stream).apply {
-                addHeader("Accept-Ranges", "bytes")
-                addHeader("Content-Range", "bytes $start-$end/$fileLen")
-                addHeader("Content-Length", len.toString())
-            }
-        }
-
-        // Sin range
         return try {
-            newChunkedResponse(Response.Status.OK, mime, FileInputStream(file)).apply {
-                addHeader("Accept-Ranges", "bytes")
-                addHeader("Content-Length", fileLen.toString())
+            if (rangeHeader != null && rangeHeader.startsWith("bytes=") && fileLen > 0) {
+                val range = rangeHeader.removePrefix("bytes=").trim()
+                val (start, end) = parseRange(range, fileLen)
+                val len = (end - start + 1).coerceAtLeast(0)
+
+                val fis = FileInputStream(file)
+                skipFully(fis, start)
+
+                // Stream acotado + tolerante a desconexión del cliente
+                val stream: InputStream = SafeBoundedInputStream(fis, len, tag)
+
+                newFixedLengthResponse(Response.Status.PARTIAL_CONTENT, mime, stream, len).apply {
+                    addHeader("Accept-Ranges", "bytes")
+                    addHeader("Content-Range", "bytes $start-$end/$fileLen")
+                    addHeader("Content-Length", len.toString())
+                }
+            } else {
+                val stream: InputStream = SafeFileInputStream(FileInputStream(file), tag)
+
+                newFixedLengthResponse(Response.Status.OK, mime, stream, fileLen).apply {
+                    addHeader("Accept-Ranges", "bytes")
+                    addHeader("Content-Length", fileLen.toString())
+                }
             }
         } catch (e: Exception) {
-            Log.e(tag, "serveFile failed: ${file.path}", e)
-            newFixedLengthResponse(
-                Response.Status.INTERNAL_ERROR,
-                "text/plain; charset=utf-8",
-                "Error del servidor: ${e.message ?: "Desconocido"}"
-            )
+            // Si el cliente cortó justo al armar, no lo tratamos como error fatal
+            if (isClientDisconnect(e)) {
+                Log.d(tag, "Client disconnected while serving '${file.path}' (${e::class.java.simpleName}: ${e.message})")
+                // NanoHTTPD requiere devolver algo: una respuesta vacía OK (no se llegará a leer).
+                newFixedLengthResponse(Response.Status.OK, "text/plain; charset=utf-8", "")
+            } else {
+                Log.e(tag, "serveFile failed: ${file.path}", e)
+                newFixedLengthResponse(
+                    Response.Status.INTERNAL_ERROR,
+                    "text/plain; charset=utf-8",
+                    "Error del servidor: ${e.message ?: "Desconocido"}"
+                )
+            }
         }
     }
 
     private fun parseRange(range: String, fileLen: Long): Pair<Long, Long> {
-        // formatos:
-        // "500-" => 500..(len-1)
-        // "500-999"
-        // "-500" => últimos 500 bytes
         val lenMinus1 = fileLen - 1
-
         return when {
             range.startsWith("-") -> {
                 val suffix = range.removePrefix("-").toLongOrNull() ?: 0L
@@ -292,33 +285,107 @@ class BackgroundServer(
         }
     }
 
-    // InputStream acotado para Range
-    private class BoundedInputStream(
+    private fun isClientDisconnect(e: Throwable): Boolean {
+        val msg = e.message?.lowercase().orEmpty()
+        return (e is SocketException && (msg.contains("broken pipe") || msg.contains("connection reset"))) ||
+                (e is IOException && (msg.contains("broken pipe") || msg.contains("connection reset")))
+    }
+
+    /**
+     * InputStream wrapper que “normaliza” desconexiones del cliente:
+     * - si al leer/escribir se corta, cerramos y devolvemos EOF.
+     *
+     * NanoHTTPD escribe al socket desde el stream; si el socket se cortó,
+     * terminará apareciendo como IOException al intentar seguir.
+     * Este wrapper minimiza el ruido y asegura close limpio del file descriptor.
+     */
+    private class SafeFileInputStream(
         private val inner: InputStream,
-        private var remaining: Long
+        private val tag: String
     ) : InputStream() {
 
+        private var closed = false
+
         override fun read(): Int {
-            if (remaining <= 0) return -1
-            val b = inner.read()
-            if (b >= 0) remaining--
-            if (remaining <= 0) inner.close()
+            if (closed) return -1
+            return try {
+                inner.read()
+            } catch (e: Exception) {
+                if (isDisconnect(e)) {
+                    safeClose()
+                    -1
+                } else {
+                    throw e
+                }
+            }
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (closed) return -1
+            return try {
+                inner.read(b, off, len)
+            } catch (e: Exception) {
+                if (isDisconnect(e)) {
+                    safeClose()
+                    -1
+                } else {
+                    throw e
+                }
+            }
+        }
+
+        override fun close() {
+            safeClose()
+        }
+
+        private fun safeClose() {
+            if (closed) return
+            closed = true
+            try { inner.close() } catch (_: Exception) {}
+        }
+
+        private fun isDisconnect(e: Throwable): Boolean {
+            val msg = e.message?.lowercase().orEmpty()
+            val isDisc = (e is SocketException || e is IOException) &&
+                    (msg.contains("broken pipe") || msg.contains("connection reset"))
+            if (isDisc) {
+                Log.d(tag, "Client disconnected (stream): ${e::class.java.simpleName}: ${e.message}")
+            }
+            return isDisc
+        }
+    }
+
+    // InputStream acotado para Range, pero tolerante a desconexión
+    private class SafeBoundedInputStream(
+        inner: InputStream,
+        remaining: Long,
+        private val tag: String
+    ) : InputStream() {
+
+        private val base = SafeFileInputStream(inner, tag)
+        private var left: Long = remaining
+
+        override fun read(): Int {
+            if (left <= 0) return -1
+            val b = base.read()
+            if (b >= 0) left--
+            if (left <= 0) close()
             return b
         }
 
         override fun read(b: ByteArray, off: Int, len: Int): Int {
-            if (remaining <= 0) return -1
-            val toRead = min(len.toLong(), remaining).toInt()
-            val r = inner.read(b, off, toRead)
+            if (left <= 0) return -1
+            val toRead = min(len.toLong(), left).toInt()
+            val r = base.read(b, off, toRead)
             if (r > 0) {
-                remaining -= r.toLong()
-                if (remaining <= 0) inner.close()
+                left -= r.toLong()
+                if (left <= 0) close()
             }
             return r
         }
 
         override fun close() {
-            inner.close()
+            base.close()
         }
     }
 }
