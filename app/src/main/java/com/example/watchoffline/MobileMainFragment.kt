@@ -341,7 +341,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             onDone = { count ->
                 activity?.runOnUiThread {
                     refreshUI()
-                    Toast.makeText(requireContext(), "Importados $count JSON", Toast.LENGTH_LONG).show()
                 }
             },
             onError = { err ->

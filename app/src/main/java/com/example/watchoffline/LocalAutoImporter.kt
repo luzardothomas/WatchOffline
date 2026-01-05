@@ -78,7 +78,6 @@ class LocalAutoImporter(
                     "${r.path}(read=${r.canRead()})"
                 }
                 Log.d(tag, "Roots: $rootsMsg")
-                toast("Roots: " + rootDirs.joinToString { it.path })
 
                 // 1) Buscar videos (dedupe por path)
                 val filesSet = linkedSetOf<String>()
@@ -91,7 +90,6 @@ class LocalAutoImporter(
                 }
 
                 Log.d(tag, "Scan counts: ${perRootCounts.joinToString(" | ")}")
-                toast("Encontrados: ${filesSet.size} videos")
 
                 if (filesSet.isEmpty()) {
                     onError("No se encontraron videos en el dispositivo (roots: ${rootDirs.joinToString { it.path }})")

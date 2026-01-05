@@ -22,7 +22,6 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import androidx.core.app.ActivityOptionsCompat
 import androidx.core.content.ContextCompat
 import androidx.leanback.app.BackgroundManager
 import androidx.leanback.app.BrowseSupportFragment
@@ -54,6 +53,9 @@ class MainFragment : BrowseSupportFragment() {
     // ✅ SMB
     private lateinit var smbGateway: SmbGateway
 
+    // ✅ Preload cache (para no golpear URLs al navegar)
+    private val preloadedPosterUrls = HashSet<String>()
+
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         super.onActivityCreated(savedInstanceState)
         Log.i(TAG, "onCreate")
@@ -64,12 +66,14 @@ class MainFragment : BrowseSupportFragment() {
         val ok = smbGateway.ensureProxyStarted(8081)
         Log.i(TAG, "SMB proxy started? $ok port=${smbGateway.getProxyPort()}")
 
+        // ✅ Preload inicial (una vez)
+        preloadPostersForImportedJsons()
+
         prepareBackgroundManager()
         resetBackgroundToDefault()
         setupUIElements()
         loadRows()
         setupEventListeners()
-
     }
 
     override fun onDestroy() {
@@ -95,6 +99,35 @@ class MainFragment : BrowseSupportFragment() {
         isHeadersTransitionOnBackEnabled = true
         brandColor = ContextCompat.getColor(requireContext(), R.color.fastlane_background)
         searchAffordanceColor = ContextCompat.getColor(requireContext(), R.color.search_opaque)
+    }
+
+    /**
+     * ✅ Preload posters (imgSml) para que al navegar no esté pegándole a la red.
+     * - Se ejecuta 1 sola vez por URL (HashSet)
+     * - Cachea al tamaño real que usa CardPresenter (180dp)
+     */
+    private fun preloadPostersForImportedJsons() {
+        val ctx = requireContext()
+        val sizePx = (POSTER_PRELOAD_SIZE_DP * ctx.resources.displayMetrics.density).toInt()
+
+        // IMPORTANTE: aplanamos todos los videos de todos los JSON importados
+        val all = jsonDataManager.getImportedJsons().flatMap { it.videos }
+
+        for (v in all) {
+            val url = v.imgSml?.trim().orEmpty()
+            if (url.isNotEmpty() && preloadedPosterUrls.add(url)) {
+                Glide.with(ctx)
+                    .load(url)
+                    .override(sizePx, sizePx)
+                    .centerCrop()
+                    .preload()
+            }
+        }
+
+        if (DEBUG_LOGS) {
+            Log.i(TAG, "preload posters: added=${preloadedPosterUrls.size}")
+        }
+
     }
 
     private fun loadRows() {
@@ -170,8 +203,6 @@ class MainFragment : BrowseSupportFragment() {
             startActivity(intent)
         }
 
-
-
         private fun handleStringAction(item: String) {
             when (item) {
                 getString(R.string.erase_json) -> showDeleteDialog()
@@ -237,7 +268,6 @@ class MainFragment : BrowseSupportFragment() {
             onDone = { count ->
                 activity?.runOnUiThread {
                     refreshUI()
-                    Toast.makeText(requireContext(), "Importados $count JSON", Toast.LENGTH_LONG).show()
                 }
             },
             onError = { err ->
@@ -263,7 +293,6 @@ class MainFragment : BrowseSupportFragment() {
             onDone = { count ->
                 activity?.runOnUiThread {
                     refreshUI()
-                    Toast.makeText(requireContext(), "Importados $count JSON", Toast.LENGTH_LONG).show()
                 }
             },
             onError = { err ->
@@ -286,6 +315,7 @@ class MainFragment : BrowseSupportFragment() {
             .setMessage("Vas a eliminar $count JSON importados. ¿Seguro?")
             .setPositiveButton("Eliminar todo") { _, _ ->
                 jsonDataManager.removeAll(requireContext())
+                preloadedPosterUrls.clear() // ✅ reset preload cache
                 refreshUI()
                 resetBackgroundToDefault()
                 Toast.makeText(requireContext(), "JSONs eliminados", Toast.LENGTH_SHORT).show()
@@ -443,6 +473,8 @@ class MainFragment : BrowseSupportFragment() {
             setItems(labels) { _, which ->
                 val realName = imported[which].fileName
                 jsonDataManager.removeJson(requireContext(), realName)
+                // ✅ al borrar, limpiamos cache de preload y recargamos (evita quedarse con URLs “muertas”)
+                preloadedPosterUrls.clear()
                 refreshUI()
             }
             setNegativeButton("Cancelar", null)
@@ -460,6 +492,10 @@ class MainFragment : BrowseSupportFragment() {
     private fun refreshUI() {
         jsonDataManager.loadData(requireContext())
         debugDumpFirstItem("after refreshUI() loadData()")
+
+        // ✅ Preload para el nuevo dataset (solo 1 vez por URL)
+        preloadPostersForImportedJsons()
+
         loadRows()
 
         val hasAnyMovie = jsonDataManager.getImportedJsons().any { it.videos.isNotEmpty() }
@@ -587,58 +623,13 @@ class MainFragment : BrowseSupportFragment() {
         Log.i(TAG, "DEBUG [$where] firstVideo imgSml='${first.imgSml}' imgBig='${first.imgBig}'")
     }
 
-    private fun debugApiConnectivity() {
-        Thread {
-            try {
-                val url = java.net.URL("https://api-watchoffline.luzardo-thomas.workers.dev/health")
-                val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    connectTimeout = 5000
-                    readTimeout = 5000
-                }
-                val code = conn.responseCode
-                val body = try { conn.inputStream.bufferedReader().use { it.readText() } } catch (_: Exception) { "" }
-                Log.i(TAG, "API TEST code=$code body=$body")
-                conn.disconnect()
-            } catch (e: Exception) {
-                Log.e(TAG, "API TEST FAILED: ${e.message}", e)
-            }
-        }.start()
-    }
-
-    private fun debugTestGlideLoadFirstPoster() {
-        val first = jsonDataManager.getImportedJsons().firstOrNull()?.videos?.firstOrNull() ?: return
-        val model = first.imgSml
-
-        Glide.with(requireActivity())
-            .load(model)
-            .listener(object : RequestListener<Drawable> {
-                override fun onLoadFailed(
-                    e: GlideException?,
-                    model: Any?,
-                    target: Target<Drawable>?,
-                    isFirstResource: Boolean
-                ): Boolean {
-                    Log.e(TAG, "POSTER Glide FAILED model=$model err=${e?.rootCauses?.firstOrNull()?.message}", e)
-                    return false
-                }
-
-                override fun onResourceReady(
-                    resource: Drawable?,
-                    model: Any?,
-                    target: Target<Drawable>?,
-                    dataSource: DataSource?,
-                    isFirstResource: Boolean
-                ): Boolean {
-                    Log.i(TAG, "POSTER Glide OK model=$model dataSource=$dataSource")
-                    return false
-                }
-            })
-            .preload()
-    }
-
     companion object {
         private const val TAG = "MainFragment"
         private const val BACKGROUND_UPDATE_DELAY = 300
+        private const val POSTER_PRELOAD_SIZE_DP = 180
+
+        // ✅ evita depender de BuildConfig
+        private const val DEBUG_LOGS = false
     }
+
 }
