@@ -10,8 +10,6 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
-import android.view.KeyEvent
-import android.view.MotionEvent
 import android.view.View
 import android.widget.EditText
 import android.widget.ImageButton
@@ -46,6 +44,22 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     private lateinit var rootViewRef: View
     private lateinit var sectionsRecyclerRef: RecyclerView
     private var backVisible = false
+
+    // =========================
+    // ✅ Next/Prev context
+    // =========================
+
+    private data class PlaylistCtx(
+        val playlist: ArrayList<Movie>,
+        val index: Int
+    )
+
+    private var playlistCtxByKey: HashMap<String, PlaylistCtx> = HashMap()
+
+    private fun movieKey(m: Movie): String {
+        // estable y con baja chance de colisión
+        return "${m.videoUrl}||${m.title}"
+    }
 
     private val hideBackRunnable = Runnable {
         backVisible = false
@@ -89,7 +103,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         rootViewRef = view.findViewById(R.id.root)
         sectionsRecyclerRef = view.findViewById(R.id.sectionsRecycler)
 
-
         setupSearchUi(view)
         render(view)
     }
@@ -106,12 +119,10 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             (v * root.resources.displayMetrics.density).toInt()
 
         fun bringSearchToFront() {
-            // input primero
             input.bringToFront()
             input.elevation = 40f
             input.translationZ = 40f
 
-            // botón arriba del input
             btn.bringToFront()
             btn.isClickable = true
             btn.isFocusable = true
@@ -127,7 +138,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                 input.setPadding(
                     input.paddingLeft,
                     input.paddingTop,
-                    space + extra, // 👈 espacio para el botón X
+                    space + extra,
                     input.paddingBottom
                 )
             }
@@ -158,10 +169,8 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             bringSearchToFront()
         }
 
-        // estado inicial
         setSearchVisible(false)
 
-        // botón lupa / X
         btn.setOnClickListener {
             val visible = input.visibility == View.VISIBLE
             setSearchVisible(!visible)
@@ -181,11 +190,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         })
     }
 
-
-
-
-
-
     // =========================
     // UI
     // =========================
@@ -196,10 +200,22 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
         val sections = buildSectionsFiltered(currentQuery)
 
+        // ✅ Arma contexto playlist+index para cada item real (no acciones)
+        playlistCtxByKey = HashMap()
+        sections.forEach { section ->
+            if (section.title == "ACCIONES") return@forEach
+            val list = ArrayList(section.items)
+            section.items.forEachIndexed { idx, movie ->
+                playlistCtxByKey[movieKey(movie)] = PlaylistCtx(
+                    playlist = list,
+                    index = idx
+                )
+            }
+        }
+
         rv.adapter = MobileSectionsAdapter(
             sections = sections,
             onMovieClick = { item ->
-
                 when (item.videoUrl) {
                     "__action_erase_json__" -> showDeleteDialog()
                     "__action_erase_all_json__" -> showDeleteAllDialog()
@@ -208,9 +224,25 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                     "__action_auto_import__" -> runAutoImport()
                     "__action_auto_import_local_folder__" -> showLocalFolderImportDialog()
                     else -> {
+                        val ctx = playlistCtxByKey[movieKey(item)]
+
                         startActivity(
                             Intent(requireContext(), DetailsActivity::class.java).apply {
                                 putExtra(DetailsActivity.MOVIE, item)
+
+                                // ✅ Keys reales (las de DetailsActivity)
+                                if (ctx != null && ctx.playlist.isNotEmpty()) {
+                                    putExtra(DetailsActivity.EXTRA_PLAYLIST, ctx.playlist)
+                                    putExtra(
+                                        DetailsActivity.EXTRA_INDEX,
+                                        ctx.index.coerceIn(0, ctx.playlist.lastIndex)
+                                    )
+                                }
+
+                                Log.d(
+                                    TAG,
+                                    "OPEN details movie=${item.videoUrl} ctxSize=${ctx?.playlist?.size} idx=${ctx?.index}"
+                                )
                             }
                         )
                     }
@@ -229,7 +261,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     // =========================
 
     private fun buildSectionsFiltered(queryRaw: String): List<MobileSection> {
-        // ✅ respeta el orden EXACTO que pusiste
         val actionsSection = MobileSection(
             title = "ACCIONES",
             items = listOf(
