@@ -11,6 +11,7 @@ import com.hierynomus.msdtyp.AccessMask
 import com.hierynomus.mssmb2.SMB2CreateDisposition
 import com.hierynomus.mssmb2.SMB2ShareAccess
 import com.hierynomus.smbj.SMBClient
+import com.hierynomus.smbj.SmbConfig
 import com.hierynomus.smbj.auth.AuthenticationContext
 import com.hierynomus.smbj.connection.Connection
 import com.hierynomus.smbj.session.Session
@@ -38,50 +39,71 @@ class SmbGateway(private val context: Context) {
 
     private val tag = "SmbGateway"
 
+    // ✅ LOCK: Objeto de bloqueo estricto para operaciones de escritura en SharedPreferences
+    // Esto evita que dos hilos escriban al mismo tiempo y corrompan la lista.
+    private val prefsLock = Any()
+
     // =========================
-// ✅ LIMPIEZA DE CREDENCIALES SMB
-// =========================
+    // ✅ LIMPIEZA DE CREDENCIALES SMB (Transaccional)
+    // =========================
 
-    /** Borra un serverId específico (creds + metadata + share) */
+    /**
+     * Borra un serverId específico de forma atómica.
+     */
     fun clearServer(serverId: String) {
-        val ids = (prefs.getStringSet(KEY_SERVER_IDS, emptySet()) ?: emptySet()).toMutableSet()
-        ids.remove(serverId)
+        synchronized(prefsLock) {
+            // 1. Leer estado actual (Creando nueva instancia del Set para evitar referencias viejas)
+            val currentIds = HashSet(prefs.getStringSet(KEY_SERVER_IDS, emptySet()) ?: emptySet())
 
-        prefs.edit()
-            .remove("creds_$serverId")
-            .remove(keyNameFor(serverId))
-            .remove(keyPortFor(serverId))
-            .remove(keyShareFor(serverId))
-            .putStringSet(KEY_SERVER_IDS, ids)
-            .apply()
+            val wasRemoved = currentIds.remove(serverId)
 
-        // si era el último usado, borrarlo
-        val last = getLastServerId()
-        if (last == serverId) {
-            prefs.edit().remove(KEY_LAST_SERVER_ID).apply()
+            // 2. Preparar editor único
+            val editor = prefs.edit()
+
+            // 3. Borrar datos específicos
+            editor.remove("creds_$serverId")
+            editor.remove(keyNameFor(serverId))
+            editor.remove(keyPortFor(serverId))
+            editor.remove(keyShareFor(serverId))
+
+            // 4. Actualizar lista maestra si hubo cambios
+            if (wasRemoved) {
+                editor.putStringSet(KEY_SERVER_IDS, currentIds)
+            }
+
+            // 5. Verificar si era el último usado
+            val last = prefs.getString(KEY_LAST_SERVER_ID, null)
+            if (last == serverId) {
+                editor.remove(KEY_LAST_SERVER_ID)
+            }
+
+            // 6. COMMIT ÚNICO (Bloqueante para asegurar consistencia antes de soltar el lock)
+            editor.commit()
+
+            Log.i(tag, "Cleared SMB server: $serverId. Remaining: ${currentIds.size}")
         }
-
-        Log.i(tag, "Cleared SMB server: $serverId")
     }
 
     /** Borra absolutamente todo lo relacionado a SMB (recomendado para “reset”) */
     fun clearAllSmbData() {
-        val ids = prefs.getStringSet(KEY_SERVER_IDS, emptySet()) ?: emptySet()
+        synchronized(prefsLock) {
+            val ids = prefs.getStringSet(KEY_SERVER_IDS, emptySet()) ?: emptySet()
+            val editor = prefs.edit()
 
-        val editor = prefs.edit()
-        ids.forEach { id ->
-            editor.remove("creds_$id")
-            editor.remove(keyNameFor(id))
-            editor.remove(keyPortFor(id))
-            editor.remove(keyShareFor(id))
+            ids.forEach { id ->
+                editor.remove("creds_$id")
+                editor.remove(keyNameFor(id))
+                editor.remove(keyPortFor(id))
+                editor.remove(keyShareFor(id))
+            }
+
+            editor.remove(KEY_SERVER_IDS)
+            editor.remove(KEY_LAST_SERVER_ID)
+            editor.remove(KEY_LAST_SHARE)
+
+            editor.commit()
+            Log.i(tag, "Cleared ALL SMB data")
         }
-
-        editor.remove(KEY_SERVER_IDS)
-        editor.remove(KEY_LAST_SERVER_ID)
-        editor.remove(KEY_LAST_SHARE)
-        editor.apply()
-
-        Log.i(tag, "Cleared ALL SMB data")
     }
 
     /** Helper: detecta si un host es IPv6 (tiene ':') */
@@ -146,8 +168,10 @@ class SmbGateway(private val context: Context) {
     }
 
     fun listCachedServerIds(): List<String> {
-        val set = prefs.getStringSet(KEY_SERVER_IDS, emptySet()) ?: emptySet()
-        return set.toList().sorted()
+        synchronized(prefsLock) {
+            val set = prefs.getStringSet(KEY_SERVER_IDS, emptySet()) ?: emptySet()
+            return set.toList().sorted()
+        }
     }
 
     /** ✅ Lista completa de SMB guardados (id, name, host, port) */
@@ -167,7 +191,7 @@ class SmbGateway(private val context: Context) {
     }
 
     fun saveLastServerId(serverId: String) {
-        prefs.edit().putString(KEY_LAST_SERVER_ID, serverId).commit()
+        prefs.edit().putString(KEY_LAST_SERVER_ID, serverId).apply()
     }
 
     fun getLastServerId(): String? = prefs.getString(KEY_LAST_SERVER_ID, null)
@@ -176,7 +200,7 @@ class SmbGateway(private val context: Context) {
         prefs.edit()
             .putString(KEY_LAST_SHARE, share)
             .putString(keyShareFor(serverId), share)
-            .commit()
+            .apply()
     }
 
     fun getLastShare(serverId: String? = null): String? {
@@ -188,8 +212,10 @@ class SmbGateway(private val context: Context) {
     }
 
     /**
-     * ✅ Guarda creds por serverId y actualiza índice.
-     * ✅ NORMALIZA host antes de guardar.
+     * ✅ SAVE CREDS TRANSACCIONAL (ATÓMICO):
+     * Realiza todas las escrituras (creds + metadata + index update) en un SOLO commit
+     * bajo un bloqueo sincronizado. Esto evita que la segunda importación lea una lista "vieja"
+     * antes de que la primera termine de guardarse.
      */
     fun saveCreds(
         serverId: String,
@@ -204,21 +230,38 @@ class SmbGateway(private val context: Context) {
         val blob = "${creds.username}\u0000${creds.password}\u0000${creds.domain.orEmpty()}\u0000$cleanHost"
         val enc = Base64.encodeToString(blob.toByteArray(StandardCharsets.UTF_8), Base64.NO_WRAP)
 
-        prefs.edit()
-            .putString("creds_$cleanId", enc)
-            .putString(keyNameFor(cleanId), (serverName ?: cleanHost))
-            .putInt(keyPortFor(cleanId), port)
-            .commit()
+        synchronized(prefsLock) {
+            // 1. Obtener lista actual asegurando una NUEVA instancia del Set (HashSet)
+            // Esto es vital porque Android a veces cachea el Set devuelto y no detecta cambios
+            val currentIds = HashSet(prefs.getStringSet(KEY_SERVER_IDS, emptySet()) ?: emptySet())
 
-        val current = prefs.getStringSet(KEY_SERVER_IDS, emptySet())?.toMutableSet() ?: mutableSetOf()
-        current.add(cleanId)
-        prefs.edit()
-            .putStringSet(KEY_SERVER_IDS, current)
-            .commit()
+            // 2. Agregar nuevo ID
+            currentIds.add(cleanId)
 
-        saveLastServerId(cleanId)
+            // 3. Preparar UN solo editor para todo
+            val editor = prefs.edit()
 
-        Log.i(tag, "Saved SMB creds: serverId=$cleanId host=$cleanHost port=$port name=${serverName ?: cleanHost} user=${creds.username}")
+            // 4. Poner credenciales y metadatos
+            editor.putString("creds_$cleanId", enc)
+            editor.putString(keyNameFor(cleanId), (serverName ?: cleanHost))
+            editor.putInt(keyPortFor(cleanId), port)
+
+            // 5. Poner lista actualizada de IDs
+            editor.putStringSet(KEY_SERVER_IDS, currentIds)
+
+            // 6. Actualizar último server usado
+            editor.putString(KEY_LAST_SERVER_ID, cleanId)
+
+            // 7. COMMIT SÍNCRONO (Crucial para importaciones en bucle o rápidas)
+            // Usamos commit() en vez de apply() para asegurar que se escribió en disco antes de liberar el lock
+            val success = editor.commit()
+
+            if (success) {
+                Log.i(tag, "✅ Saved SMB creds ATOMICALLY: id=$cleanId host=$cleanHost setSize=${currentIds.size}")
+            } else {
+                Log.e(tag, "❌ Failed to commit SMB creds to SharedPreferences")
+            }
+        }
     }
 
     /**
@@ -309,7 +352,12 @@ class SmbGateway(private val context: Context) {
     }
 
     // --- SMB client ---
-    private val smbClient = SMBClient()
+    private val smbConfig = SmbConfig.builder()
+        .withTimeout(120, TimeUnit.SECONDS)
+        .withSoTimeout(180, TimeUnit.SECONDS)
+        .build()
+
+    private val smbClient = SMBClient(smbConfig)
 
     fun connectSession(host: String, creds: SmbCreds): Pair<Connection, Session> {
         val cleanHost = normalizeHost(host)
@@ -440,16 +488,7 @@ class SmbGateway(private val context: Context) {
      * Devuelve todos los serverIds guardados (cache).
      */
     fun listSavedServers(): List<SmbServer> {
-        val ids = listCachedServerIds()
-        val out = mutableListOf<SmbServer>()
-        for (id in ids) {
-            val loaded = loadCreds(id) ?: continue
-            val host = loaded.first
-            val port = prefs.getInt(keyPortFor(id), 445)
-            val name = prefs.getString(keyNameFor(id), host) ?: host
-            out.add(SmbServer(id = id, name = name, host = host, port = port))
-        }
-        return out
+        return listCachedServers()
     }
 
     /**

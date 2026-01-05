@@ -143,7 +143,7 @@ class AutoImporter(
     // =========================
     // Public API
     // =========================
-
+/*
     fun run(
         toast: (String) -> Unit,
         onDone: (Int) -> Unit,
@@ -192,7 +192,6 @@ class AutoImporter(
 
                         val skipFinal = if (isSeries) (cover?.skipToSecond ?: 0) else 0
 
-                        // ✅ NUEVO: delay solo para series (default 0)
                         val delayFinal = if (isSeries) (cover?.delaySkip ?: 0) else 0
 
                         allRawItems.add(
@@ -203,7 +202,7 @@ class AutoImporter(
                                 title = title,
                                 img = img,
                                 skip = skipFinal,
-                                delay = delayFinal,  // ✅ NUEVO
+                                delay = delayFinal,
                                 videoSrc = videoUrl
                             )
                         )
@@ -323,6 +322,181 @@ class AutoImporter(
             } catch (e: Exception) {
                 Log.e(tag, "FAILED", e)
                 onError("Error: ${e.message}")
+            }
+        }.start()
+    }
+
+ */
+
+    fun run(
+        toast: (String) -> Unit,
+        onDone: (Int) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        Thread {
+            var partialSuccess = false
+
+            try {
+                toast("Importando desde SMB…")
+                val proxyOk = smbGateway.ensureProxyStarted(8081)
+                if (!proxyOk) {
+                    onError("No se pudo iniciar el Proxy SMB interno.")
+                    return@Thread
+                }
+
+                val serverIds = smbGateway.listCachedServerIds()
+                if (serverIds.isEmpty()) {
+                    onError("No hay SMB guardados. Usá 'Conectarse al SMB' y guardá al menos uno.")
+                    return@Thread
+                }
+
+                val allRawItems = ArrayList<RawItem>(512)
+                var scannedServers = 0
+
+                // 1. ESCANEO (Con try/catch interno para no detenerse si falla uno)
+                for (serverId in serverIds) {
+                    try {
+                        val share = smbGateway.getLastShare(serverId)
+                        if (share.isNullOrBlank()) continue
+
+                        scannedServers++
+                        toast("Escaneando SMB ($scannedServers/${serverIds.size})...")
+
+                        val smbFiles = listSmbVideos(serverId, share)
+                        if (smbFiles.isEmpty()) continue
+
+                        val jobs = ArrayList<Pair<String, String>>(smbFiles.size)
+                        for (p in smbFiles) jobs.add(p to buildQueryForPathSmart(p))
+
+                        val coverMap = fetchCoversBatch(jobs.map { it.second }.distinct())
+
+                        for ((smbPath, q) in jobs) {
+                            val cover = coverMap[q]
+                            val videoUrl = buildProxyUrl(serverId, share, smbPath)
+                            val img = resolveCoverUrl(cover?.url)
+                            val title = buildDisplayTitleForItem(smbPath, cover)
+                            val isSeries = cover?.type.equals("series", ignoreCase = true)
+                            val skipFinal = if (isSeries) (cover?.skipToSecond ?: 0) else 0
+                            val delayFinal = if (isSeries) (cover?.delaySkip ?: 0) else 0
+
+                            allRawItems.add(
+                                RawItem(
+                                    serverId = serverId,
+                                    share = share,
+                                    smbPath = smbPath,
+                                    title = title,
+                                    img = img,
+                                    skip = skipFinal,
+                                    delay = delayFinal,
+                                    videoSrc = videoUrl
+                                )
+                            )
+                        }
+                        partialSuccess = true
+
+                    } catch (e: Exception) {
+                        Log.e(tag, "Error importando server $serverId", e)
+                        // No mostramos toast de error individual para no interrumpir visualmente, solo log
+                    }
+                }
+
+                // 2. VALIDACIÓN VACÍO
+                if (allRawItems.isEmpty()) {
+                    if (partialSuccess) {
+                        toast("Escaneo finalizado: No se encontraron videos.")
+                        onDone(0)
+                    } else {
+                        onError("No se pudieron conectar los servidores.")
+                    }
+                    return@Thread
+                }
+
+                // (Aquí quitamos el toast de "Procesando..." para poner el final que querías)
+
+                // 3. AGRUPAMIENTO
+                val unique = LinkedHashMap<String, RawItem>(allRawItems.size)
+                for (ri in allRawItems) unique.putIfAbsent(ri.videoSrc, ri)
+                val itemsUnique = unique.values.toList()
+
+                val seriesMap = linkedMapOf<Pair<String, Int>, MutableList<RawItem>>()
+                val movies = ArrayList<RawItem>(itemsUnique.size)
+
+                for (ri in itemsUnique) {
+                    val parts = splitPathParts(ri.smbPath)
+                    if (parts.size >= 3) {
+                        val series = parts[parts.size - 3]
+                        val season = parseSeasonFromFolderOrName(parts[parts.size - 2])
+                        if (season != null) {
+                            seriesMap.getOrPut(series to season) { ArrayList() }.add(ri)
+                            continue
+                        }
+                    }
+                    movies.add(ri)
+                }
+
+                val previews = ArrayList<PreviewJson>(seriesMap.size + 16)
+
+                // Series
+                val seriesEntries = seriesMap.entries.toList()
+                    .sortedWith(compareBy({ normalizeName(it.key.first) }, { it.key.second }))
+
+                for ((key, list) in seriesEntries) {
+                    val (series, season) = key
+                    list.sortWith(
+                        compareBy<RawItem>(
+                            { parseEpisodeForSort(it.smbPath) ?: Int.MAX_VALUE },
+                            { it.smbPath.lowercase() }
+                        )
+                    )
+                    val videos = list.map { VideoItem(it.title, it.skip, it.delay, it.img, it.img, it.videoSrc) }
+                    previews.add(PreviewJson("${normalizeName(series)}_s${pad2(season)}.json", videos, "SMB SERIES"))
+                }
+
+                // Películas
+                val sagaMap = linkedMapOf<String, MutableList<RawItem>>()
+                for (m in movies) sagaMap.getOrPut(inferSagaNameFromPath(m.smbPath)) { ArrayList() }.add(m)
+                val sagaEntries = sagaMap.entries.toList().sortedWith(compareBy({ normalizeName(it.key) }))
+
+                for ((saga, list) in sagaEntries) {
+                    list.sortWith(compareBy({ extractMovieSortKey(it.smbPath, it.title) }, { it.title }))
+                    val videos = list.map { VideoItem(it.title, it.skip, it.delay, it.img, it.img, it.videoSrc) }
+                    val fName = if (list.size > 1) "saga_${normalizeName(saga).replace(" ", "_")}.json"
+                    else "${normalizeName(list.first().title).replace(" ", "_")}.json"
+                    previews.add(PreviewJson(fName, videos, "SMB MOVIES"))
+                }
+
+                // 4. GUARDADO
+                val toImport = filterAlreadyImported(previews)
+
+                // Si no hay nada nuevo, igual mostramos el total encontrado, pero avisamos que 0 se importaron
+                if (toImport.isEmpty()) {
+                    val msg = "Se importaron 0 JSONs y se encontraron un total de ${allRawItems.size} videos en total"
+                    toast(msg)
+                    onDone(0)
+                    return@Thread
+                }
+
+                val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toHashSet()
+                var importedFilesCount = 0
+
+                for (p in toImport) {
+                    val safeName = uniqueJsonNameFast(p.fileName, existing)
+                    jsonDataManager.addJson(context, safeName, p.videos)
+                    existing.add(safeName)
+                    importedFilesCount++
+                }
+
+                // ✅ AQUÍ ESTÁ EL MENSAJE FINAL EXACTO QUE PEDISTE
+                // importedFilesCount = Cantidad de archivos JSON creados/guardados
+                // allRawItems.size = Total absoluto de videos detectados en el escaneo
+                val finalMsg = "JSONS IMPORTADOS: $importedFilesCount\nVIDEOS IMPORTADOS: ${allRawItems.size}"
+
+                toast(finalMsg)
+                onDone(importedFilesCount)
+
+            } catch (e: Exception) {
+                Log.e(tag, "FAILED GLOBAL", e)
+                onError("Error general: ${e.message}")
             }
         }.start()
     }
