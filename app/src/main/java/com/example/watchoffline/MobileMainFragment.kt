@@ -102,30 +102,69 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         val btn = root.findViewById<ImageButton>(R.id.btnToggleSearch)
         val input = root.findViewById<EditText>(R.id.searchInput)
 
+        fun dp(v: Int): Int =
+            (v * root.resources.displayMetrics.density).toInt()
+
+        fun bringSearchToFront() {
+            // input primero
+            input.bringToFront()
+            input.elevation = 40f
+            input.translationZ = 40f
+
+            // botón arriba del input
+            btn.bringToFront()
+            btn.isClickable = true
+            btn.isFocusable = true
+            btn.isFocusableInTouchMode = true
+            btn.elevation = 60f
+            btn.translationZ = 60f
+        }
+
+        fun reserveSpaceForButton() {
+            btn.post {
+                val space = btn.width.takeIf { it > 0 } ?: dp(48)
+                val extra = dp(12)
+                input.setPadding(
+                    input.paddingLeft,
+                    input.paddingTop,
+                    space + extra, // 👈 espacio para el botón X
+                    input.paddingBottom
+                )
+            }
+        }
+
+        fun clearSearch() {
+            input.setText("")
+            input.clearFocus()
+            currentQuery = ""
+            refreshUI()
+        }
+
         fun setSearchVisible(visible: Boolean) {
             input.visibility = if (visible) View.VISIBLE else View.GONE
+
             btn.setImageResource(
                 if (visible) android.R.drawable.ic_menu_close_clear_cancel
                 else android.R.drawable.ic_menu_search
             )
 
-            if (!visible) {
-                input.setText("")
-                input.clearFocus()
-                currentQuery = ""
-                refreshUI()
-            } else {
+            if (visible) {
+                reserveSpaceForButton()
                 input.requestFocus()
+            } else {
+                clearSearch()
             }
+
+            bringSearchToFront()
         }
 
-        // ✅ estado inicial (oculto)
+        // estado inicial
         setSearchVisible(false)
 
-        // ✅ el botón ahora alterna search on/off
+        // botón lupa / X
         btn.setOnClickListener {
-            val nowVisible = input.visibility == View.VISIBLE
-            setSearchVisible(!nowVisible)
+            val visible = input.visibility == View.VISIBLE
+            setSearchVisible(!visible)
         }
 
         input.addTextChangedListener(object : android.text.TextWatcher {
@@ -141,6 +180,10 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             }
         })
     }
+
+
+
+
 
 
     // =========================
