@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.RecognizerIntent
 import android.util.Log
+import android.view.View
 import androidx.core.app.ActivityOptionsCompat
 import androidx.leanback.app.SearchSupportFragment
 import androidx.leanback.widget.*
@@ -15,6 +16,7 @@ import java.util.Locale
 import java.util.LinkedHashMap
 
 class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResultProvider {
+    private var voiceArmed = false
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -34,6 +36,15 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
 
         setSpeechRecognitionCallback(object : SpeechRecognitionCallback {
             override fun recognizeSpeech() {
+                // ✅ Evita el auto-start al entrar al SearchFragment
+                if (!voiceArmed) {
+                    Log.d(TAG, "VOICE: ignore auto-start")
+                    return
+                }
+
+                // ✅ Se armó por click del usuario: consumir “un uso”
+                voiceArmed = false
+
                 val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
@@ -46,6 +57,7 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
             }
         })
 
+
         jsonDataManager.loadData(requireContext())
         allImported = jsonDataManager.getImportedJsons()
 
@@ -55,57 +67,37 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
     override fun onViewCreated(view: android.view.View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
-        setOnItemViewClickedListener { itemViewHolder, item, _, row ->
-            val movie = item as? Movie ?: return@setOnItemViewClickedListener
+        // ✅ No arrancar con el foco en el mic
+        view.post {
+            // intenta enfocar el editor de texto para que no “pida voz” solo
+            view.findViewById<View>(androidx.leanback.R.id.lb_search_text_editor)?.requestFocus()
 
-            // ✅ playlist desde la fila
-            val listRow = row as? ListRow
-            val adapter = listRow?.adapter
-
-            val playlist = ArrayList<Movie>()
-            if (adapter != null) {
-                for (i in 0 until adapter.size()) {
-                    val obj = adapter.get(i)
-                    if (obj is Movie) playlist.add(obj)
-                }
-            }
-
-            val index = playlist.indexOfFirst { it.videoUrl == movie.videoUrl }
-                .let { if (it >= 0) it else 0 }
-
-            val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
-                putExtra(DetailsActivity.MOVIE, movie)
-                if (playlist.size > 1) {
-                    putExtra(DetailsActivity.EXTRA_PLAYLIST, playlist)
-                    putExtra(DetailsActivity.EXTRA_INDEX, index)
-                }
-            }
-
-            val cardView = itemViewHolder.view as? ImageCardView
-            val shared = cardView?.mainImageView
-
-            if (shared != null) {
-                val options = ActivityOptionsCompat.makeSceneTransitionAnimation(
-                    requireActivity(),
-                    shared,
-                    DetailsActivity.SHARED_ELEMENT_NAME
-                )
-                startActivity(intent, options.toBundle())
-            } else {
-                startActivity(intent)
+            // ✅ Cuando el usuario toca el mic, ahí sí habilitamos y arrancamos
+            view.findViewById<View>(androidx.leanback.R.id.lb_search_bar_speech_orb)?.setOnClickListener {
+                voiceArmed = true
+                startRecognition() // esto termina llamando a recognizeSpeech()
             }
         }
+
+        setOnItemViewClickedListener { itemViewHolder, item, _, row ->
+            // ... tu código actual
+        }
     }
+
 
     override fun onResume() {
         super.onResume()
 
-        // ✅ igual que en MainFragment: al volver del video, forzar foco al último reproducido
+        view?.post {
+            view?.findViewById<View>(androidx.leanback.R.id.lb_search_text_editor)?.requestFocus()
+        }
+
         handler.post {
             Log.e(TAG, "FOCUSDBG_SEARCH onResume() -> try focusLastPlayedIfAny")
             focusLastPlayedIfAny()
         }
     }
+
 
     override fun getResultsAdapter(): ObjectAdapter = rowsAdapter
 

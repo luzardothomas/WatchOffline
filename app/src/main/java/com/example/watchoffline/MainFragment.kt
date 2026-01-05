@@ -34,12 +34,6 @@ import java.util.UUID
 
 class MainFragment : BrowseSupportFragment() {
 
-    private val KEY_LAST_FOCUS = "LAST_FOCUS_KEY"
-    private val FOCUS_LANG_SETTINGS = "__focus_lang_settings__"
-
-    private val ROW_LANG_HEADER = "CONFIGURACIÓN DE IDIOMAS"
-    private val ACTION_LANG_SETTINGS = "CONFIGURAR IDIOMAS"
-
     private val mHandler = Handler(Looper.getMainLooper())
 
     private val jsonDataManager = JsonDataManager()
@@ -57,31 +51,23 @@ class MainFragment : BrowseSupportFragment() {
     private var pendingFocusLastPlayed = false
 
 
-    private fun writeLastFocus(key: String) {
-        if (key.isBlank()) return
+
+    private fun writeLastPlayedUrl(url: String) {
+        val u = url.trim()
+        if (u.isEmpty()) return
         requireContext()
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
-            .putString(KEY_LAST_FOCUS, key.trim())
+            .putString(KEY_LAST_PLAYED, u)
             .apply()
     }
 
-    private fun readLastFocus(): String? {
-        return requireContext()
-            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getString(KEY_LAST_FOCUS, null)
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
+    private fun readLastPlayedUrl(): String? {
+        val prefs = requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val u = prefs.getString(KEY_LAST_PLAYED, null)?.trim()
+        Log.e(TAG, "READ lastPlayedUrl=$u")
+        return u?.takeIf { it.isNotEmpty() }
     }
-
-    private fun clearLastFocus() {
-        requireContext()
-            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .remove(KEY_LAST_FOCUS)
-            .apply()
-    }
-
 
 
 
@@ -124,70 +110,11 @@ class MainFragment : BrowseSupportFragment() {
 
     override fun onResume() {
         super.onResume()
+        Log.e(TAG, "FOCUSDBG onResume() CALLED adapter=${adapter?.javaClass?.simpleName}")
 
         mHandler.post {
-            // 1) si venimos de LanguageSettings -> enfocar la card CONFIGURAR IDIOMAS
-            if (readLastFocus() == FOCUS_LANG_SETTINGS) {
-                val ok = focusCardInRow(rowHeader = ROW_LANG_HEADER, itemTitle = ACTION_LANG_SETTINGS)
-                if (ok) {
-                    clearLastFocus()
-                    return@post
-                }
-            }
-
-            // 2) fallback: comportamiento viejo
             focusLastPlayedIfAny()
         }
-    }
-
-    private fun focusCardInRow(rowHeader: String, itemTitle: String): Boolean {
-        val rows = adapter as? ArrayObjectAdapter ?: return false
-
-        var targetRow = -1
-        var targetCol = -1
-
-        for (r in 0 until rows.size()) {
-            val listRow = rows.get(r) as? ListRow ?: continue
-            if (listRow.headerItem?.name != rowHeader) continue
-
-            val rowAdapter = listRow.adapter ?: continue
-            for (c in 0 until rowAdapter.size()) {
-                val it = rowAdapter.get(c)
-                if (it is String && it == itemTitle) {
-                    targetRow = r
-                    targetCol = c
-                    break
-                }
-            }
-            break
-        }
-
-        if (targetRow < 0 || targetCol < 0) return false
-
-        setSelectedPosition(targetRow, false, object : Presenter.ViewHolderTask() {
-            private var tries = 0
-            override fun run(holder: Presenter.ViewHolder?) {
-                tries++
-                if (holder == null) {
-                    if (tries < 30) mHandler.postDelayed({ setSelectedPosition(targetRow, false, this) }, 16)
-                    return
-                }
-
-                val rowContent = holder.view.findViewById<HorizontalGridView>(androidx.leanback.R.id.row_content)
-                if (rowContent == null) {
-                    if (tries < 30) mHandler.postDelayed({ setSelectedPosition(targetRow, false, this) }, 16)
-                    return
-                }
-
-                rowContent.scrollToPosition(targetCol)
-                rowContent.post {
-                    rowContent.setSelectedPosition(targetCol)
-                    rowContent.requestFocus()
-                }
-            }
-        })
-
-        return true
     }
 
 
@@ -276,7 +203,7 @@ class MainFragment : BrowseSupportFragment() {
     private fun focusLastPlayedIfAny(): Boolean {
         Log.e(TAG, "FOCUSDBG ENTER focusLastPlayedIfAny")
 
-        val lastUrl = readLastFocus()?.trim()
+        val lastUrl = readLastPlayedUrl()?.trim()
         if (lastUrl.isNullOrEmpty()) {
             Log.e(TAG, "FOCUSDBG no lastUrl")
             return false
@@ -381,13 +308,12 @@ class MainFragment : BrowseSupportFragment() {
         val rowsAdapter = ArrayObjectAdapter(ListRowPresenter())
         val cardPresenter = CardPresenter()
 
-        // =========================
-        // ✅ CONFIGURACIÓN DE IDIOMAS (FILA PROPIA)
-        // =========================
+        /// CONFIGURACIÓN DE IDIOMA
+
         val langAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
-            add(ACTION_LANG_SETTINGS)
+            add("Configurar IDIOMA")
         }
-        rowsAdapter.add(ListRow(HeaderItem(0L, ROW_LANG_HEADER), langAdapter))
+        rowsAdapter.add(ListRow(HeaderItem(0L, "CONFIGURACION DE IDIOMA"), langAdapter))
 
         // =========================
         // ✅ ARMADO DE REPRODUCCIÓN
@@ -518,7 +444,7 @@ class MainFragment : BrowseSupportFragment() {
 
             val clickedUrl = movie.videoUrl?.trim().orEmpty()
             if (clickedUrl.isNotEmpty()) {
-                writeLastFocus(clickedUrl)   // ✅ SIEMPRE la última card clickeada (incluye playlist://)
+                writeLastPlayedUrl(clickedUrl)   // ✅ SIEMPRE la última card clickeada (incluye playlist://)
             }
 
 
@@ -616,17 +542,13 @@ class MainFragment : BrowseSupportFragment() {
             }
         }
 
-
-
-
         private fun handleStringAction(item: String) {
             when (item) {
-                // ✅ CONFIGURACIÓN DE IDIOMAS
-                ACTION_LANG_SETTINGS -> {
-                    // ✅ al volver, queremos enfocar ESTA card
-                    writeLastFocus(FOCUS_LANG_SETTINGS)
-                    startActivity(Intent(requireContext(), LanguageSettingsTvActivity::class.java))
-                }
+
+                // CONFIGURACIÓN DE IDIOMAS
+
+                "Configurar IDIOMA" -> startActivity(Intent(requireContext(), LanguageSettingsTvActivity::class.java))
+
 
                 // ✅ ARMADO DE REPRODUCCIÓN
                 "Generar playlist RANDOM" -> runRandomGenerate()
