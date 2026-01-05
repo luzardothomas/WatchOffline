@@ -30,7 +30,6 @@ class AutoImporter(
     private val jsonDataManager: JsonDataManager,
     private val proxyPort: Int = 8081
 ) {
-    private val tag = "AutoImporter"
 
     // =========================
     // Models
@@ -346,7 +345,6 @@ class AutoImporter(
     }
 
     private fun pad2(n: Int) = n.toString().padStart(2, '0')
-    private fun pad3(n: Int) = n.toString().padStart(3, '0')
     private fun normalizeName(s: String) = s.trim().replace('_', ' ').replace(Regex("""\s+"""), " ").lowercase()
     private fun splitPathParts(path: String) = path.replace("\\", "/").trim('/').split("/").filter { it.isNotBlank() }
     private fun fileBaseName(path: String) = path.substringAfterLast("/").substringBeforeLast(".")

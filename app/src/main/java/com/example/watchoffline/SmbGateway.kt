@@ -106,6 +106,38 @@ class SmbGateway(private val context: Context) {
         }
     }
 
+    /** Borra un SMB especifico para resetearlo */
+
+    fun deleteSpecificSmbData(serverId: String) {
+        synchronized(prefsLock) {
+            val ids = prefs.getStringSet(KEY_SERVER_IDS, emptySet())?.toMutableSet() ?: mutableSetOf()
+
+            if (ids.contains(serverId)) {
+                val editor = prefs.edit()
+
+                // Eliminamos los datos asociados a este ID
+                editor.remove("creds_$serverId")
+                editor.remove(keyNameFor(serverId))
+                editor.remove(keyPortFor(serverId) ?: "port_$serverId") // Ajusta según tus helpers
+                editor.remove(keyShareFor(serverId) ?: "share_$serverId")
+
+                // Lo quitamos del set de IDs
+                ids.remove(serverId)
+                editor.putStringSet(KEY_SERVER_IDS, ids)
+
+                // Si era el último servidor seleccionado, limpiamos los punteros globales
+                val lastId = prefs.getString(KEY_LAST_SERVER_ID, null)
+                if (lastId == serverId) {
+                    editor.remove(KEY_LAST_SERVER_ID)
+                    editor.remove(KEY_LAST_SHARE)
+                }
+
+                editor.apply()
+                Log.i(tag, "Deleted SMB data for ID: $serverId")
+            }
+        }
+    }
+
     /** Helper: detecta si un host es IPv6 (tiene ':') */
     fun isIpv6Host(host: String): Boolean = host.contains(":")
 

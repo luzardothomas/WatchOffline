@@ -85,8 +85,9 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     ): FocusTarget? {
         for (sIndex in sections.indices) {
             val section = sections[sIndex]
-            if (section.title == "ACCIONES PARA VIDEOS") continue
+            if (section.title == "ACCIONES AVANZADAS") continue
             if (section.title == "ARMADO DE REPRODUCCIÓN") continue
+            if (section.title == "ACCIONES PRINCIPALES") continue
 
 
             for (i in section.items.indices) {
@@ -312,8 +313,9 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         // - NO launcher playlist:// (RANDOM)
         playlistCtxByKey = HashMap()
         sections.forEach { section ->
-            if (section.title == "ACCIONES PARA VIDEOS") return@forEach
+            if (section.title == "ACCIONES AVANZADAS") return@forEach
             if (section.title == "ARMADO DE REPRODUCCIÓN") return@forEach
+            if (section.title == "ACCIONES PRINCIPALES") return@forEach
 
             val onlyReal = section.items.filter { it.videoUrl?.startsWith("playlist://") != true }
             val list = ArrayList(onlyReal)
@@ -337,7 +339,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                 if (!url.startsWith("__action_")) {
                     writeLastPlayed(url)
                 }
-
 
 
                 // =========================
@@ -383,12 +384,13 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                 }
 
                 // =========================
-                // ✅ Acciones existentes + flujo normal
+                // ACCIONES
                 // =========================
                 when (url) {
                     "__action_erase_json__" -> showDeleteDialog()
                     "__action_erase_all_json__" -> showDeleteAllDialog()
                     "__action_connect_smb__" -> openSmbConnectFlow()
+                    "__action_clear_specific_smb__" -> showDeleteSpecificSmbDialog()
                     "__action_clear_smb__" -> showClearSmbDialog()
                     "__action_auto_import__" -> runAutoImport()
                     "__action_auto_import_local_folder__" -> showLocalFolderImportDialog()
@@ -428,6 +430,16 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
     private fun buildSectionsFiltered(queryRaw: String): List<MobileSection> {
 
+        val advancedActions = MobileSection(
+            title = "ACCIONES AVANZADAS",
+            items = listOf(
+                actionCard("Importar de SMB", "__action_auto_import__"),
+                actionCard("Conectarse a un SMB", "__action_connect_smb__"),
+                actionCard("Limpiar credenciales especificas", "__action_clear_specific_smb__"),
+                actionCard("Limpiar credenciales", "__action_clear_smb__"),
+            )
+        )
+
         val playbackBuildSection = MobileSection(
             title = "ARMADO DE REPRODUCCIÓN",
             items = listOf(
@@ -439,14 +451,11 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         )
 
         val actionsSection = MobileSection(
-            title = "ACCIONES PARA VIDEOS",
+            title = "ACCIONES PRINCIPALES",
             items = listOf(
+                actionCard("Importar de una RUTA del DISPOSITIVO", "__action_auto_import_local_folder__"),
                 actionCard("Borrar JSON", "__action_erase_json__"),
                 actionCard("Borrar todos los JSON", "__action_erase_all_json__"),
-                actionCard("Credenciales SMB", "__action_connect_smb__"),
-                actionCard("Limpiar credenciales", "__action_clear_smb__"),
-                actionCard("Importar de SMB", "__action_auto_import__"),
-                actionCard("Importar de RUTA", "__action_auto_import_local_folder__"),
             )
         )
 
@@ -520,7 +529,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             }
         }
 
-        return listOf(playbackBuildSection, actionsSection) + contentSections
+        return listOf(actionsSection, playbackBuildSection, advancedActions) + contentSections
     }
 
     private fun runRandomGenerate() {
@@ -612,11 +621,56 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             .setMessage("Esto borra credenciales y shares guardados. Vas a tener que reconectar el SMB. ¿Continuar?")
             .setPositiveButton("Borrar") { _, _ ->
                 smbGateway.clearAllSmbData()
-                Toast.makeText(requireContext(), "SMB reseteado ✅", Toast.LENGTH_LONG).show()
+                Toast.makeText(requireContext(), "Credenciales eliminadas ✅", Toast.LENGTH_LONG).show()
             }
             .setNegativeButton("Cancelar", null)
             .show()
     }
+
+    private fun showDeleteSpecificSmbDialog() {
+        // 1. Obtener la lista de servidores cacheados
+        val servers = smbGateway.listCachedServers()
+
+        if (servers.isEmpty()) {
+            Toast.makeText(requireContext(), "No hay servidores guardados", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // 2. Preparar los nombres legibles evitando duplicados como "IP (IP)"
+        val labels = servers.map { server ->
+            if (server.name == server.host || server.name.isBlank()) {
+                server.host // Solo la IP si no hay nombre distinto
+            } else {
+                "${server.name} (${server.host})" // Nombre (IP) si son diferentes
+            }
+        }.toTypedArray()
+
+        // 3. Mostrar diálogo de SELECCIÓN
+        AlertDialog.Builder(requireContext())
+            .setTitle("Seleccionar SMB para eliminar")
+            .setItems(labels) { _, which ->
+                val selectedServer = servers[which]
+                val serverLabel = labels[which]
+
+                // 4. Diálogo de CONFIRMACIÓN (Anidado)
+                AlertDialog.Builder(requireContext())
+                    .setTitle("Confirmar eliminación")
+                    .setMessage("¿Estás seguro de borrar la credencial y configuración de:\n$serverLabel?")
+                    .setPositiveButton("Borrar") { _, _ ->
+                        smbGateway.deleteSpecificSmbData(selectedServer.id)
+                        refreshUI()
+                        Toast.makeText(requireContext(), "Credencial eliminada ✅", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("Cancelar") { dialog, _ ->
+                        dialog.dismiss()
+                    }
+                    .show()
+            }
+            .setNegativeButton("Cerrar", null)
+            .show()
+    }
+
+
 
     private fun showLocalFolderImportDialog() {
         val options = arrayOf(

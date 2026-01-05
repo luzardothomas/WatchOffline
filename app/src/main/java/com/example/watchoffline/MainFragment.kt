@@ -309,6 +309,16 @@ class MainFragment : BrowseSupportFragment() {
         val cardPresenter = CardPresenter()
 
         // =========================
+        // ✅ ACCIONES PARA VIDEOS
+        // =========================
+        val actionsAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
+            add("Importar de DISPOSITIVO")
+            add(getString(R.string.erase_json))
+            add("Borrar todos los JSON")
+        }
+        rowsAdapter.add(ListRow(HeaderItem(0L, "ACCIONES PRINCIPALES"), actionsAdapter))
+
+        // =========================
         // ✅ ARMADO DE REPRODUCCIÓN
         // =========================
         val playbackBuildAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
@@ -317,20 +327,20 @@ class MainFragment : BrowseSupportFragment() {
             add("Borrar playlists RANDOM")
             add("Borrar TODAS las playlists RANDOM")
         }
-        rowsAdapter.add(ListRow(HeaderItem(0L, "ARMADO DE REPRODUCCIÓN"), playbackBuildAdapter))
+        rowsAdapter.add(ListRow(HeaderItem(1L, "ARMADO DE REPRODUCCIÓN"), playbackBuildAdapter))
+
 
         // =========================
-        // ✅ ACCIONES PARA VIDEOS
+        // ✅ OPCIONES AVANZADAS
         // =========================
-        val actionsAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
-            add(getString(R.string.erase_json))
-            add("Borrar todos los JSON")
-            add("Credenciales SMB")
-            add("Limpiar credenciales")
+        val advancedActions = ArrayObjectAdapter(GridItemPresenter()).apply {
             add("Importar de SMB")
-            add("Importar de DISPOSITIVO")
+            add("Conectarse a un SMB")
+            add("Limpiar credenciales especificas")
+            add("Limpiar credenciales")
         }
-        rowsAdapter.add(ListRow(HeaderItem(1L, "ACCIONES PARA VIDEOS"), actionsAdapter))
+        rowsAdapter.add(ListRow(HeaderItem(2L, "ACCIONES AVANZADAS"), advancedActions))
+
 
         // =========================
         // ✅ CATALOGO
@@ -378,9 +388,6 @@ class MainFragment : BrowseSupportFragment() {
 
         adapter = rowsAdapter
     }
-
-
-
 
 
     private fun VideoItem.toMovie() = Movie(
@@ -538,23 +545,25 @@ class MainFragment : BrowseSupportFragment() {
         private fun handleStringAction(item: String) {
             when (item) {
 
+                // ACCIONES AVANZADAS
+                "Conectarse a un SMB" -> openSmbConnectFlow()
+                "Limpiar credenciales especificas" -> showDeleteSpecificSmbDialog()
+                "Limpiar credenciales" -> showClearSmbDialog()
+                "Importar de SMB" -> runAutoImport()
+
                 // ✅ ARMADO DE REPRODUCCIÓN
                 "Generar playlist RANDOM" -> runRandomGenerate()
                 "Actualizar playlist RANDOM" -> runRandomUpdate()
                 "Borrar playlists RANDOM" -> runRandomDeleteSelected()
                 "Borrar TODAS las playlists RANDOM" -> runRandomDeleteAll()
 
-                // ✅ ACCIONES (tuyas)
+                // ✅ ACCIONES PRINCIPALES
                 getString(R.string.erase_json) -> showDeleteDialog()
                 "Borrar todos los JSON" -> showDeleteAllDialog()
-                "Credenciales SMB" -> openSmbConnectFlow()
-                "Limpiar credenciales" -> showClearSmbDialog()
-                "Importar de SMB" -> runAutoImport()
                 "Importar de DISPOSITIVO" -> requestLocalImportWithPermission()
                 else -> Toast.makeText(requireContext(), item, Toast.LENGTH_SHORT).show()
             }
         }
-
     }
 
     private fun runRandomGenerate() {
@@ -590,18 +599,61 @@ class MainFragment : BrowseSupportFragment() {
     }
 
 
-
     private fun showClearSmbDialog() {
         AlertDialog.Builder(requireContext())
             .setTitle("Reset SMB")
             .setMessage("Esto borra credenciales y shares guardados. Vas a tener que reconectar el SMB. ¿Continuar?")
             .setPositiveButton("Borrar") { _, _ ->
                 smbGateway.clearAllSmbData()
-                Toast.makeText(requireContext(), "SMB reseteado ✅", Toast.LENGTH_LONG).show()
+                Toast.makeText(requireContext(), "Credenciales eliminadas ✅", Toast.LENGTH_LONG).show()
             }
             .setNegativeButton("Cancelar", null)
             .show()
     }
+
+    private fun showDeleteSpecificSmbDialog() {
+        // 1. Obtener la lista de servidores cacheados
+        val servers = smbGateway.listCachedServers()
+
+        if (servers.isEmpty()) {
+            Toast.makeText(requireContext(), "No hay servidores guardados", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // 2. Preparar los nombres legibles evitando duplicados como "IP (IP)"
+        val labels = servers.map { server ->
+            if (server.name == server.host || server.name.isBlank()) {
+                server.host // Solo la IP si no hay nombre distinto
+            } else {
+                "${server.name} (${server.host})" // Nombre (IP) si son diferentes
+            }
+        }.toTypedArray()
+
+        // 3. Mostrar diálogo de SELECCIÓN
+        AlertDialog.Builder(requireContext())
+            .setTitle("Seleccionar SMB para eliminar")
+            .setItems(labels) { _, which ->
+                val selectedServer = servers[which]
+                val serverLabel = labels[which]
+
+                // 4. Diálogo de CONFIRMACIÓN (Anidado)
+                AlertDialog.Builder(requireContext())
+                    .setTitle("Confirmar eliminación")
+                    .setMessage("¿Estás seguro de borrar la credencial y configuración de:\n$serverLabel?")
+                    .setPositiveButton("Borrar") { _, _ ->
+                        smbGateway.deleteSpecificSmbData(selectedServer.id)
+                        refreshUI()
+                        Toast.makeText(requireContext(), "Credencial eliminada ✅", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("Cancelar") { dialog, _ ->
+                        dialog.dismiss()
+                    }
+                    .show()
+            }
+            .setNegativeButton("Cerrar", null)
+            .show()
+    }
+
 
     private fun ensureAllFilesAccessTv(): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
