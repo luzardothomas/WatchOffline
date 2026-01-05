@@ -116,7 +116,7 @@ class LocalAutoImporter(
                     val imgUrl = cover?.url?.trim().orEmpty().ifBlank { placeholder }
                     val displayTitle = buildDisplayTitleForItem(absPath, cover)
 
-                    // ✅ CORRECCIÓN: Quitamos el filtro isSeries para que skip/delay carguen siempre
+                    // ✅ Se eliminó la restricción 'isSeries'. Si la API devuelve skip, lo usamos.
                     val skipFinal = cover?.skipToSecond ?: 0
                     val delayFinal = cover?.delaySkip ?: 0
 
@@ -276,24 +276,32 @@ class LocalAutoImporter(
     private fun buildQueryForPathSmart(path: String): String {
         val clean = path.replace("\\", "/").trim('/')
         val parts = clean.split("/").filter { it.isNotBlank() }
-        val fileNoExt = parts.last().substringBeforeLast(".")
-        val se = parseSeasonEpisodeFromFilename(path)
+        if (parts.isEmpty()) return ""
 
-        // ✅ CORRECCIÓN: Normalización idéntica al AutoImporter (s01 e02)
+        val fileNoExt = parts.last().substringBeforeLast(".")
+        val se = parseSeasonEpisodeFromFilename(path) // Detecta 1x02, S01E02
+        val epOnly = parseEpisodeOnlyFromFilename(path) // Detecta "01" al final o "Cap 01"
+
+        // 1. REGLA DE ORO PARA ANIMES (Carpeta Abuela + Episodio)
+        // Si tenemos al menos 3 partes (Serie/Temporada/Archivo) y detectamos un episodio
+        if (parts.size >= 3) {
+            val seriesName = parts[parts.size - 3]
+            val ep = se?.second ?: epOnly
+
+            if (ep != null) {
+                val seriesKey = normalizeName(seriesName).replace(" ", "_")
+                // Retorna nombreserie_001
+                return "${seriesKey}_${pad3(ep)}"
+            }
+        }
+
+        // 2. REGLA PARA SERIES OCCIDENTALES (Si tiene Temporada explícita)
         if (se != null && parts.size >= 2) {
             val seriesName = if (parts.size >= 3) parts[parts.size - 3] else parts[0]
             return "${normalizeName(seriesName)} s${pad2(se.first)} ${pad2(se.second)}"
         }
 
-        if (parts.size >= 3) {
-            val seriesName = parts[parts.size - 3]
-            val seasonFolder = parts[parts.size - 2]
-            val season = parseSeasonFromFolderOrName(seasonFolder)
-            val ep = parseEpisodeOnlyFromFilename(path)
-            if (season != null && ep != null) {
-                return "${normalizeName(seriesName)} s${pad2(season)} ${pad2(ep)}"
-            }
-        }
+        // 3. FALLBACK: Nombre del archivo normalizado
         return normalizeName(fileNoExt)
     }
 

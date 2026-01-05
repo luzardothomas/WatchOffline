@@ -189,96 +189,91 @@ class AutoImporter(
     }
 
     private fun processServer(serverId: String, share: String, destList: CopyOnWriteArrayList<RawItem>) {
-        // 1. Listar archivos del SMB (Filtrado por extensiones de video)
         val smbFiles = listSmbVideos(serverId, share)
         if (smbFiles.isEmpty()) return
 
-        // 2. Preparar mapeo de rutas a queries de búsqueda
-        val jobs = HashMap<String, String>(smbFiles.size)
         val queriesToFetch = HashSet<String>()
+        val jobMap = HashMap<String, String>(smbFiles.size)
 
-        for (path in smbFiles) {
-            val query = buildQueryForPathSmart(path)
-            jobs[path] = query
-            queriesToFetch.add(query)
+        for (p in smbFiles) {
+            val q = buildQueryForPathSmart(p)
+            jobMap[p] = q
+            queriesToFetch.add(q)
         }
 
-        // 3. Consultar API de forma masiva/paralela (Nitros 96 threads)
         val coverResults = fetchCoversParallel(queriesToFetch.toList())
 
-        // 4. Construir lista final de ítems crudos
-        for (path in smbFiles) {
-            val query = jobs[path] ?: ""
-            val cover = coverResults[query]
+        for (p in smbFiles) {
+            val q = jobMap[p] ?: ""
+            val cover = coverResults[q]
+            val videoUrl = buildProxyUrl(serverId, share, p)
+            val img = resolveCoverUrl(cover?.url)
+            val title = buildDisplayTitleForItem(p, cover)
+            val isSeries = cover?.type.equals("series", ignoreCase = true)
 
-            // Generar URL del Proxy Local para el streaming
-            val videoUrl = buildProxyUrl(serverId, share, path)
-
-            // Resolver imagen (prioridad API, fallback vacío)
-            val imageUrl = resolveCoverUrl(cover?.url)
-
-            // Construir el título legible (T01 Cap05 - Título)
-            val displayTitle = buildDisplayTitleForItem(path, cover)
-
-            /* 🚀 LOGICA DE SKIP/DELAY:
-               Extraemos directamente de la API. Si la API no devuelve nada,
-               usamos 0 por defecto para evitar errores de nulos.
-            */
-            val apiSkip = cover?.skipToSecond ?: 0
-            val apiDelay = cover?.delaySkip ?: 0
-
-            // Log de depuración para confirmar que el dato entra al RawItem
-            if (apiSkip > 0 || apiDelay > 0) {
-                Log.d(tag, "DEBUG_DATA: $displayTitle | Skip: $apiSkip | Delay: $apiDelay")
+            // 🔍 LOG DE DEPURACIÓN CRÍTICO
+            if (cover != null) {
+                Log.d("DEBUG_DATA", "--- Analizando Cover ---")
+                Log.d("DEBUG_DATA", "Path: $p")
+                Log.d("DEBUG_DATA", "Query usada: $q")
+                Log.d("DEBUG_DATA", "API skipSeconds: ${cover.skipToSecond}")
+                Log.d("DEBUG_DATA", "API delaySeconds: ${cover.delaySkip}")
+                Log.d("DEBUG_DATA", "Tipo detectado por API: ${cover.type}")
+            } else {
+                Log.w("DEBUG_DATA", "⚠️ Sin respuesta de API para query: $q")
             }
 
-            // Crear el objeto RawItem que será procesado para generar el JSON final
-            val item = RawItem(
-                serverId = serverId,
-                share = share,
-                smbPath = path,
-                title = displayTitle,
-                img = imageUrl,
-                skip = apiSkip,
-                delay = apiDelay,
-                videoSrc = videoUrl
-            )
+            // Aquí es donde se asignan los valores a RawItem
+            // Verifica esta condición: si 'isSeries' es false, el skip/delay se fuerza a 0
+            val finalSkip = if (isSeries) (cover?.skipToSecond ?: 0) else 0
+            val finalDelay = if (isSeries) (cover?.delaySkip ?: 0) else 0
 
-            destList.add(item)
+            Log.d("DEBUG_DATA", "Valores Finales -> isSeries: $isSeries | Skip: $finalSkip | Delay: $finalDelay")
+
+            destList.add(RawItem(serverId, share, p, title, img,
+                finalSkip,
+                finalDelay,
+                videoUrl))
         }
     }
 
     private fun buildQueryForPathSmart(path: String): String {
-        val parts = splitPathParts(path)
+        val clean = path.replace("\\", "/").trim('/')
+        val parts = clean.split("/").filter { it.isNotBlank() }
         if (parts.isEmpty()) return ""
 
-        val fileNoExt = parts.last().substringBeforeLast(".")
-        val se = parseSeasonEpisodeFromFilename(path) // Detecta 4x09 o S04E09
+        val fileName = parts.last()
+        val fileNoExt = fileName.substringBeforeLast(".")
 
-        // CASO A: El archivo tiene temporada y episodio (ej: 4x09)
-        if (se != null && parts.size >= 2) {
-            // Buscamos el nombre de la serie (normalmente la carpeta abuela o padre)
+        // Intentamos extraer SxxExx o XxYY (ej: 4x06)
+        val se = parseSeasonEpisodeFromFilename(path)
+        // Intentamos extraer el número de episodio solo (ej: para animes 001.mp4)
+        val epOnly = parseEpisodeOnlyFromFilename(path)
+
+        // --- REGLA 1: ANIMES (nombreserie_n) ---
+        // Si estamos en una estructura de carpetas (Serie/Temporada/Archivo)
+        if (parts.size >= 3 && epOnly != null) {
+            val seriesFolderName = parts[parts.size - 3]
+            val seriesKey = normalizeName(seriesFolderName).replace(" ", "_")
+            // Resultado: malcolm_06 o dragon_ball_z_001
+            return "${seriesKey}_${epOnly}"
+        }
+
+        // --- REGLA 2: SERIES (Formatos TxxExx, XxYY, SxxExx) ---
+        if (se != null) {
+            // Obtenemos el nombre de la serie desde la carpeta abuela o el inicio del path
             val seriesName = if (parts.size >= 3) parts[parts.size - 3] else parts[0]
-            val s = pad2(se.first)
-            val e = pad2(se.second)
 
-            // Retornamos formato estándar: "serie s04 e09"
-            return "${normalizeName(seriesName)} s$s e$e"
+            // Aquí NO forzamos un formato inventado.
+            // Si el archivo ya es "4x06", intentamos reconstruir un query limpio para la API
+            val s = se.first
+            val e = se.second
+
+            // Retornamos "serie 4x06" que es un estándar que los scrapers entienden perfectamente
+            return "${normalizeName(seriesName)} ${s}x${pad2(e)}"
         }
 
-        // CASO B: Solo tenemos episodio y estamos dentro de una carpeta de temporada
-        if (parts.size >= 3) {
-            val seriesName = parts[parts.size - 3]
-            val seasonFolder = parts[parts.size - 2]
-            val season = parseSeasonFromFolderOrName(seasonFolder)
-            val epOnly = parseEpisodeOnlyFromFilename(path)
-
-            if (season != null && epOnly != null) {
-                return "${normalizeName(seriesName)} s${pad2(season)} e${pad2(epOnly)}"
-            }
-        }
-
-        // CASO C: Película o archivo suelto
+        // --- REGLA 3: PELÍCULAS O DESCARTE ---
         return normalizeName(fileNoExt)
     }
 
@@ -399,15 +394,46 @@ class AutoImporter(
         return Int.MAX_VALUE
     }
 
-    private fun buildDisplayTitleForItem(smbPath: String, cover: ApiCover?): String {
-        val fallback = fileBaseName(smbPath)
-        val se = parseSeasonEpisodeFromFilename(smbPath)
-        val ep = se?.second ?: parseEpisodeOnlyFromFilename(smbPath) ?: cover?.episode
-        val season = se?.first ?: cover?.season
-        if (season == null && ep == null) return cover?.id ?: fallback
-        val tempStr = if (season != null) "T${pad2(season)}" else ""
-        val capStr = if (ep != null) "Cap ${pad2(ep)}" else ""
-        return "$tempStr $capStr - ${cover?.id ?: fallback}".trim()
+    private fun prettyCap(ep: Int?): String? =
+        if (ep == null || ep <= 0) null else "Cap ${pad2(ep)}"
+
+    private fun prettyTemp(season: Int?): String? =
+        if (season == null || season <= 0) null else "T${pad2(season)}"
+
+    private fun buildDisplayTitleForItem(absPath: String, cover: ApiCover?): String {
+        // 1. Nombre base del archivo como último recurso
+        val fallbackName = fileBaseName(absPath)
+
+        // 2. Prioridad al ID de la API (si existe), sino el nombre del archivo
+        val seriesName = cover?.id ?: fallbackName
+
+        // 3. Extracción de metadatos del archivo
+        val seFile = parseSeasonEpisodeFromFilename(absPath)
+        val epFileOnly = parseEpisodeOnlyFromFilename(absPath)
+
+        // 4. Consolidación de datos (Archivo > API)
+        val seasonFromFile = seFile?.first
+        val epFromFile = seFile?.second ?: epFileOnly
+        val epFinal = epFromFile ?: cover?.episode
+
+        // 5. Verificación de si es una serie (Flag API o existencia de caps/temporadas)
+        val isSeries = cover?.type.equals("series", ignoreCase = true) ||
+                (seasonFromFile != null) || (epFromFile != null) ||
+                (cover?.season != null) || (cover?.episode != null)
+
+        // Si no es serie (es película o especial único), devolvemos solo el nombre
+        if (!isSeries) return seriesName
+
+        // 6. Formateo de las etiquetas
+        val cap = prettyCap(epFinal)
+        val temp = prettyTemp(seasonFromFile)
+
+        // 7. Construcción de la cadena final (Uso de StringBuilder interno por eficiencia)
+        return when {
+            temp != null && cap != null -> "$temp $cap - $seriesName"
+            cap != null -> "$cap - $seriesName"
+            else -> seriesName
+        }
     }
 
     private fun filterAlreadyImported(previews: List<PreviewJson>) =
