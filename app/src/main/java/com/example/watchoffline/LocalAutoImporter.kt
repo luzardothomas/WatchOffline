@@ -2,13 +2,18 @@ package com.example.watchoffline
 
 import android.content.Context
 import android.util.Log
+import androidx.annotation.Keep
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
+import java.io.BufferedReader
 import java.io.File
+import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
-import androidx.annotation.Keep
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 
 @Keep
 private data class ApiCover(
@@ -18,53 +23,68 @@ private data class ApiCover(
     @SerializedName("season") val season: Int? = null,
     @SerializedName("episode") val episode: Int? = null,
     @SerializedName("skipSeconds") val skipToSecond: Int? = null,
-
-    // ✅ NUEVO (para delay de intro)
     @SerializedName("delaySeconds") val delaySkip: Int? = null,
-
     @SerializedName("file") val file: String? = null,
     @SerializedName("url") val url: String? = null
 )
 
-/**
- * Auto-import desde el contenido LOCAL del dispositivo,
- * usando el BackgroundServer (http://127.0.0.1:<serverPort>) para reproducir.
- *
- * Reutiliza la misma lógica "series vs movies" + cover API.
- */
 class LocalAutoImporter(
     private val context: Context,
     private val jsonDataManager: JsonDataManager,
     private val serverPort: Int = 8080,
     rootDirs: List<File>? = null
 ) {
-
     private val tag = "LocalAutoImporter"
 
-    // ✅ Roots reales, dinámicos (celular + TV box)
+    // ✅ Roots reales, dinámicos
     private val rootDirs: List<File> = (rootDirs ?: pickReadableRoots()).distinctBy { it.path }
 
     // =========================
     // MODELOS INTERNOS
     // =========================
-
     private data class RawItem(
-        val path: String,     // path ABSOLUTO (ej /storage/emulated/0/Movies/a.mp4)
-        val title: String,
-        val img: String,
-        val skip: Int,
-        val delay: Int,       // ✅ NUEVO
-        val videoSrc: String  // URL a tu server local
+        val path: String, val title: String, val img: String,
+        val skip: Int, val delay: Int, val videoSrc: String
     )
 
-    private data class PreviewJson(
-        val fileName: String,
-        val videos: List<VideoItem>,
-        val debug: String
-    )
+    private data class PreviewJson(val fileName: String, val videos: List<VideoItem>, val debug: String)
 
     // =========================
-    // API
+    // CONFIG & POOLS
+    // =========================
+    private val gson = Gson()
+    private val coverCache = ConcurrentHashMap<String, ApiCover?>()
+
+    // 🚀 POOL MASIVO para API (Network IO)
+    private val apiPool = Executors.newFixedThreadPool(96)
+    // 🚀 POOL para Disco (Local IO - Menos hilos para no saturar I/O del disco)
+    private val diskPool = Executors.newFixedThreadPool(4)
+
+    private val COVER_TIMEOUT_MS = 3500
+    private val videoExt = hashSetOf("mp4", "mkv", "avi", "webm", "mov", "flv", "mpg", "mpeg", "m4v", "ts", "3gp", "wmv")
+
+    // REGEX Precompiladas
+    private val reSeason1 = Regex("""(?i)temporada\s*(\d{1,2})""")
+    private val reSeason2 = Regex("""(?i)\btemp\s*(\d{1,2})""")
+    private val reSeason3 = Regex("""(?i)\bseason\s*(\d{1,2})""")
+    private val reSeason4 = Regex("""(?i)\bs(\d{1,2})\b""")
+    private val reSE1 = Regex("""(?i)\bs(\d{1,2})\s*[._\- ]*\s*e(\d{1,3})\b""")
+    private val reSE2 = Regex("""(?i)\b(\d{1,2})\s*x\s*(\d{1,3})\b""")
+    private val reEpWords = Regex("""(?i)\b(?:ep|e|cap|c|episode)\s*0*(\d{1,3})\b""")
+    private val reEpTail = Regex("""(?i)(?:[_\-\s])0*(\d{1,3})\s*$""")
+    private val reSagaLooksLikePart = Regex(""".*\b(\d{1,2}|i{1,6}|iv|v|vi)\b.*""", RegexOption.IGNORE_CASE)
+    private val reMovieKey1 = Regex("""\[(\d{1,3})]""")
+    private val reMovieKey2 = Regex("""^(\d{1,3})\D""")
+    private val reMovieKey3 = Regex("""(?i)\b(part|parte)\s*(\d{1,3})\b""")
+
+    init {
+        // 🚀 CONNECTION POOLING
+        System.setProperty("http.keepAlive", "true")
+        System.setProperty("http.maxConnections", "100")
+    }
+
+    // =========================
+    // API PUBLIC
     // =========================
 
     fun run(
@@ -74,175 +94,138 @@ class LocalAutoImporter(
     ) {
         Thread {
             try {
-                toast("Importando desde DISPOSITIVO…")
+                val startTime = System.nanoTime()
+                toast("Importando de forma LOCAL")
 
-                // ✅ diagnóstico: roots usados
-                val rootsMsg = rootDirs.joinToString { r ->
-                    "${r.path}(read=${r.canRead()})"
-                }
-                Log.d(tag, "Roots: $rootsMsg")
+                Log.d(tag, "Roots: ${rootDirs.joinToString { "${it.path}(r=${it.canRead()})" }}")
 
-                // 1) Buscar videos (dedupe por path normalizado/canonical)
-                val filesSet = linkedSetOf<String>()
-                val perRootCounts = mutableListOf<String>()
+                // 1. ESCANEO DE DISCO PARALELO
+                // Usamos CopyOnWriteArrayList para seguridad en hilos
+                val foundFiles = CopyOnWriteArrayList<String>()
+                val scanFutures = ArrayList<java.util.concurrent.Future<*>>()
 
                 for (dir in rootDirs) {
-                    val found = listLocalVideos(dir)
-                    perRootCounts.add("${dir.path}: ${found.size}")
-                    found.forEach { filesSet.add(normalizeAbsPath(it)) }
+                    scanFutures.add(diskPool.submit {
+                        val files = listLocalVideos(dir)
+                        if (files.isNotEmpty()) foundFiles.addAll(files)
+                    })
                 }
+                // Esperar escaneo
+                for (f in scanFutures) try { f.get() } catch (_: Exception) {}
 
-                Log.d(tag, "Scan counts: ${perRootCounts.joinToString(" | ")}")
+                // Deduplicar paths
+                val uniquePaths = foundFiles.map { normalizeAbsPath(it) }.toHashSet().toList()
+                Log.d(tag, "Total unique videos found: ${uniquePaths.size}")
 
-                if (filesSet.isEmpty()) {
-                    onError("No se encontraron videos en el dispositivo (roots: ${rootDirs.joinToString { it.path }})")
+                if (uniquePaths.isEmpty()) {
+                    onError("No se encontraron videos.")
                     return@Thread
                 }
 
-                // ✅ placeholder local SIEMPRE (evita cards/Details bugueados si cover.url viene vacío)
-                val placeholder = fallbackImageUri()
+                // 2. PREPARAR QUERIES
+                val queriesToFetch = HashSet<String>()
+                val pathMap = HashMap<String, String>(uniquePaths.size)
 
-                // 2) Items crudos
-                val rawItems = mutableListOf<RawItem>()
-
-                for (absPath in filesSet) {
-                    val q = buildQueryForPathSmart(absPath)
-                    val cover = fetchCoverFromApiCached(q)
-
-                    val imgUrl = cover?.url?.trim().orEmpty().ifBlank { placeholder }
-
-                    // ✅ TÍTULO: para series el capítulo lo manda el NOMBRE DEL ARCHIVO (API solo fallback)
-                    val displayTitle = buildDisplayTitleForItem(absPath, cover)
-
-                    val isSeries = (cover?.type?.lowercase() == "series")
-
-                    // ✅ SKIP:
-                    // - Movies: siempre 0
-                    // - Series: usar lo que viene de la API (skipSeconds -> skipToSecond)
-                    val skipFinal = if (isSeries) (cover?.skipToSecond ?: 0) else 0
-
-                    // ✅ DELAY:
-                    // - Movies: siempre 0
-                    // - Series: usar lo que viene de la API (delaySeconds -> delaySkip)
-                    val delayFinal = if (isSeries) (cover?.delaySkip ?: 0) else 0
-
-                    rawItems.add(
-                        RawItem(
-                            path = absPath,
-                            title = displayTitle,
-                            img = imgUrl,
-                            skip = skipFinal,
-                            delay = delayFinal,
-                            // ✅ BackgroundServer actual decodifica session.uri y acepta paths absolutos
-                            videoSrc = "http://127.0.0.1:$serverPort${encodePathForUrl(absPath)}"
-                        )
-                    )
+                for (path in uniquePaths) {
+                    val q = buildQueryForPathSmart(path)
+                    pathMap[path] = q
+                    queriesToFetch.add(q)
                 }
 
-                // ✅ DEDUPE FINAL por videoSrc (evita duplicados en TV por mounts/aliases)
+                // 3. 🚀 FETCH API PARALELO
+                val coverResults = fetchCoversParallel(queriesToFetch.toList())
+
+                // 4. ENSAMBLAR RAW ITEMS
+                val placeholder = fallbackImageUri()
+                val rawItems = ArrayList<RawItem>(uniquePaths.size)
+
+                for (absPath in uniquePaths) {
+                    val q = pathMap[absPath] ?: ""
+                    val cover = coverResults[q]
+
+                    val imgUrl = cover?.url?.trim().orEmpty().ifBlank { placeholder }
+                    val displayTitle = buildDisplayTitleForItem(absPath, cover)
+                    val isSeries = (cover?.type?.lowercase() == "series")
+
+                    val skipFinal = if (isSeries) (cover?.skipToSecond ?: 0) else 0
+                    val delayFinal = if (isSeries) (cover?.delaySkip ?: 0) else 0
+
+                    rawItems.add(RawItem(
+                        path = absPath,
+                        title = displayTitle,
+                        img = imgUrl,
+                        skip = skipFinal,
+                        delay = delayFinal,
+                        videoSrc = "http://127.0.0.1:$serverPort${encodePathForUrl(absPath)}"
+                    ))
+                }
+
+                // 5. AGRUPACIÓN (In-Memory)
                 val uniqueBySrc = LinkedHashMap<String, RawItem>(rawItems.size)
                 for (ri in rawItems) uniqueBySrc.putIfAbsent(ri.videoSrc, ri)
                 val rawItemsUnique = uniqueBySrc.values.toList()
 
-                // ================= SERIES vs MOVIES =================
-                val seriesMap = linkedMapOf<Pair<String, Int>, MutableList<RawItem>>()
-                val movies = mutableListOf<RawItem>()
+                val seriesMap = HashMap<Pair<String, Int>, ArrayList<RawItem>>()
+                val movies = ArrayList<RawItem>()
 
                 for (ri in rawItemsUnique) {
-                    val parts = ri.path.replace("\\", "/")
-                        .split("/")
-                        .filter { it.isNotBlank() }
-
-                    // Esperado: .../<serie>/<temporada>/<archivo>
+                    val parts = ri.path.replace("\\", "/").split("/").filter { it.isNotBlank() }
+                    var addedToSeries = false
                     if (parts.size >= 3) {
                         val series = parts[parts.size - 3]
                         val season = parseSeasonFromFolderOrName(parts[parts.size - 2])
                         if (season != null) {
-                            seriesMap.getOrPut(series to season) { mutableListOf() }.add(ri)
-                            continue
+                            seriesMap.getOrPut(series to season) { ArrayList() }.add(ri)
+                            addedToSeries = true
                         }
                     }
-                    movies.add(ri)
+                    if (!addedToSeries) movies.add(ri)
                 }
 
-                val previews = mutableListOf<PreviewJson>()
+                val previews = ArrayList<PreviewJson>()
 
-                // Series → 1 JSON por temporada
-                for ((key, items) in seriesMap.toList()
-                    .sortedWith(compareBy({ normalizeName(it.first.first) }, { it.first.second }))) {
-
-                    val (series, season) = key
-
-                    val videos = items.sortedWith(
-                        compareBy<RawItem>(
-                            { parseEpisodeForSort(it.path) ?: Int.MAX_VALUE },
-                            { it.path.lowercase() }
-                        )
-                    ).map { r ->
-                        // ✅ delay incluido
-                        VideoItem(r.title, r.skip, r.delay, r.img, r.img, r.videoSrc)
-                    }
-
-                    previews.add(
-                        PreviewJson(
-                            fileName = "${normalizeName(series)}_s${pad2(season)}.json",
-                            videos = videos,
-                            debug = "LOCAL SERIES $series S$season"
-                        )
-                    )
+                // Series
+                val seriesEntries = seriesMap.entries.toList().sortedWith(compareBy({ normalizeName(it.key.first) }, { it.key.second }))
+                for ((key, items) in seriesEntries) {
+                    items.sortWith(compareBy({ parseEpisodeForSort(it.path) ?: Int.MAX_VALUE }, { it.path.lowercase() }))
+                    val videos = items.map { VideoItem(it.title, it.skip, it.delay, it.img, it.img, it.videoSrc) }
+                    previews.add(PreviewJson("${normalizeName(key.first)}_s${pad2(key.second)}.json", videos, "LOCAL SERIES"))
                 }
 
-                // Movies → agrupar por saga (carpeta padre)
-                val sagaMap = linkedMapOf<String, MutableList<RawItem>>()
-                for (m in movies) {
-                    sagaMap.getOrPut(inferSagaNameFromPath(m.path)) { mutableListOf() }.add(m)
+                // Movies
+                val sagaMap = HashMap<String, ArrayList<RawItem>>()
+                for (m in movies) sagaMap.getOrPut(inferSagaNameFromPath(m.path)) { ArrayList() }.add(m)
+
+                val sagaEntries = sagaMap.entries.toList().sortedWith(compareBy { normalizeName(it.key) })
+                for ((saga, items) in sagaEntries) {
+                    items.sortWith(compareBy({ extractMovieSortKey(it.path, it.title) }, { normalizeName(it.title) }))
+                    val videos = items.map { VideoItem(it.title, it.skip, it.delay, it.img, it.img, it.videoSrc) }
+                    val fName = if (items.size > 1) "saga_${normalizeName(saga).replace(" ", "_")}.json"
+                    else "${normalizeName(items.first().title).replace(" ", "_")}.json"
+                    previews.add(PreviewJson(fName, videos, "LOCAL MOVIES"))
                 }
 
-                for ((saga, items) in sagaMap.toList()
-                    .sortedWith(compareBy({ normalizeName(it.first) }))) {
-
-                    val videosSorted = items.sortedWith(
-                        compareBy<RawItem>(
-                            { extractMovieSortKey(it.path, it.title) },
-                            { normalizeName(it.title) },
-                            { it.path.lowercase() }
-                        )
-                    ).map { r ->
-                        // movies: delay=0 (r.delay ya viene 0 igual)
-                        VideoItem(r.title, r.skip, r.delay, r.img, r.img, r.videoSrc)
-                    }
-
-                    val fileName =
-                        if (items.size > 1) {
-                            "saga_${normalizeName(saga).replace(" ", "_")}.json"
-                        } else {
-                            "${normalizeName(items.first().title).replace(" ", "_")}.json"
-                        }
-
-                    previews.add(
-                        PreviewJson(
-                            fileName = fileName,
-                            videos = videosSorted,
-                            debug = "LOCAL MOVIES"
-                        )
-                    )
-                }
-
-                // 🚫 Evitar duplicados
+                // 6. GUARDADO
                 val toImport = filterAlreadyImported(previews)
                 if (toImport.isEmpty()) {
-                    toast("Todo ya estaba importado")
+                    val ms = (System.nanoTime() - startTime) / 1_000_000
                     onDone(0)
                     return@Thread
                 }
 
-                // Importar
+                val existingNames = jsonDataManager.getImportedJsons().map { it.fileName }.toHashSet()
+                var imported = 0
                 for (p in toImport) {
-                    val safeName = uniqueJsonName(p.fileName)
+                    val safeName = uniqueJsonName(p.fileName, existingNames)
                     jsonDataManager.addJson(context, safeName, p.videos)
+                    existingNames.add(safeName)
+                    imported++
                 }
 
-                onDone(toImport.size)
+                //val ms = (System.nanoTime() - startTime) / 1_000_000
+                toast("JSONs: $imported\nVIDEOS: ${uniquePaths.size}\n")
+                //toast("TIEMPO: ${ms / 1000.0}s")
+                onDone(imported)
 
             } catch (e: Exception) {
                 Log.e(tag, "FAILED", e)
@@ -251,284 +234,186 @@ class LocalAutoImporter(
         }.start()
     }
 
+    // =========================
+    // 🚀 PARALLEL NETWORK FETCH
+    // =========================
 
-    // =========================
-    // PLACEHOLDER local
-    // =========================
-    private fun fallbackImageUri(): String {
-        // ⚠️ Cambiá R.drawable.movie si tu recurso se llama distinto
-        return "android.resource://${context.packageName}/${R.drawable.movie}"
+    private fun fetchCoversParallel(queries: List<String>): Map<String, ApiCover?> {
+        if (queries.isEmpty()) return emptyMap()
+
+        val results = ConcurrentHashMap<String, ApiCover?>()
+        val futures = ArrayList<java.util.concurrent.Future<*>>()
+        val toAsk = ArrayList<String>()
+
+        for (q in queries) {
+            val cached = coverCache[q]
+            if (cached != null) results[q] = cached
+            else if (!coverCache.containsKey(q)) toAsk.add(q)
+        }
+
+        if (toAsk.isEmpty()) return results
+
+        for (q in toAsk) {
+            futures.add(apiPool.submit {
+                val cover = fetchCoverFromApi(q)
+                coverCache[q] = cover
+                results[q] = cover
+            })
+        }
+        for (f in futures) try { f.get() } catch (_: Exception) {}
+        return results
+    }
+
+    private fun fetchCoverFromApi(q: String): ApiCover? {
+        val encoded = URLEncoder.encode(q, "UTF-8").replace("+", "%20")
+        val full = "https://api-watchoffline.luzardo-thomas.workers.dev/cover?q=$encoded"
+
+        return try {
+            val conn = URL(full).openConnection() as HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.connectTimeout = COVER_TIMEOUT_MS
+            conn.readTimeout = COVER_TIMEOUT_MS
+            conn.setRequestProperty("Accept", "application/json")
+
+            if (conn.responseCode in 200..299) {
+                val reader = BufferedReader(InputStreamReader(conn.inputStream))
+                val sb = StringBuilder()
+                var line: String?
+                while (reader.readLine().also { line = it } != null) sb.append(line)
+                reader.close()
+                gson.fromJson(sb.toString(), ApiCover::class.java)
+            } else null
+        } catch (e: Exception) { null }
     }
 
     // =========================
-    // ROOTS (dinámico)
+    // DISK OPS
     // =========================
 
     private fun pickReadableRoots(): List<File> {
-        val baseCandidates = listOf(
-            File("/storage/self/primary"),
-            File("/storage/emulated/0"),
-            File("/sdcard")
-        )
-
-        val extra = mutableListOf<File>()
-
-        // Intentar descubrir montajes USB/SD
-        try {
-            File("/storage").listFiles()?.forEach { f ->
-                if (f.isDirectory) extra.add(f)
-            }
-        } catch (_: Exception) { /* ignore */ }
-
-        try {
-            File("/mnt/media_rw").listFiles()?.forEach { f ->
-                if (f.isDirectory) extra.add(f)
-            }
-        } catch (_: Exception) { /* ignore */ }
-
-        val all = (baseCandidates + extra).distinctBy { it.path }
-        val good = all.filter { it.exists() && it.isDirectory && it.canRead() }
-
-        return if (good.isNotEmpty()) good else listOf(File("/storage"))
+        val candidates = mutableListOf(File("/storage/self/primary"), File("/storage/emulated/0"), File("/sdcard"))
+        try { File("/storage").listFiles()?.filter { it.isDirectory }?.let { candidates.addAll(it) } } catch (_: Exception) {}
+        try { File("/mnt/media_rw").listFiles()?.filter { it.isDirectory }?.let { candidates.addAll(it) } } catch (_: Exception) {}
+        return candidates.distinctBy { it.path }.filter { it.exists() && it.canRead() }.ifEmpty { listOf(File("/storage")) }
     }
 
-    // =========================
-    // LISTAR VIDEOS LOCALES
-    // =========================
-
     private fun listLocalVideos(root: File): List<String> {
-        val out = mutableListOf<String>()
-        if (!root.exists() || !root.isDirectory || !root.canRead()) {
-            Log.w(tag, "ROOT SKIP: ${root.path} exists=${root.exists()} dir=${root.isDirectory} canRead=${root.canRead()}")
-            return out
-        }
+        val out = ArrayList<String>()
+        if (!root.exists() || !root.canRead()) return out
 
-        val videoExt = setOf("mp4", "mkv", "avi", "webm", "mov", "flv", "mpg", "mpeg", "m4v", "ts", "3gp", "wmv")
+        // Stack para iterativo (evita StackOverflow en carpetas muy profundas)
+        val stack = java.util.ArrayDeque<File>()
+        stack.push(root)
 
-        fun shouldSkipDir(dir: File): Boolean {
-            val p = dir.absolutePath.replace("\\", "/")
-            return p.contains("/Android/data/") || p.contains("/Android/obb/")
-        }
+        while (stack.isNotEmpty()) {
+            val dir = stack.pop()
+            val p = dir.path
+            // Filtros rápidos
+            if (p.contains("/Android/data") || p.contains("/Android/obb") || p.contains("/.") || p.contains("cache")) continue
 
-        fun walk(dir: File) {
-            if (shouldSkipDir(dir)) return
-
-            val children = try { dir.listFiles() } catch (_: Exception) { null }
-            if (children == null) {
-                Log.w(tag, "CANNOT LIST: ${dir.absolutePath}")
-                return
-            }
-
+            val children = try { dir.listFiles() } catch (_: Exception) { null } ?: continue
             for (f in children) {
                 if (f.isDirectory) {
-                    walk(f)
+                    stack.push(f)
                 } else {
-                    val ext = f.name.substringAfterLast(".", "").lowercase()
-                    if (ext in videoExt) {
-                        out.add(normalizeAbsPath(f.absolutePath))
+                    val name = f.name
+                    val dot = name.lastIndexOf('.')
+                    if (dot > 0 && videoExt.contains(name.substring(dot + 1).lowercase())) {
+                        out.add(f.absolutePath) // No normalizamos aquí para velocidad, lo hacemos en lote después
                     }
                 }
             }
         }
-
-        Log.d(tag, "SCAN ROOT: ${root.absolutePath}")
-        walk(root)
-        Log.d(tag, "FOUND IN ROOT ${root.path}: ${out.size}")
         return out
     }
 
-    /**
-     * Convierte "/storage/emulated/0/Movies/a b.mp4"
-     * -> "/storage/emulated/0/Movies/a%20b.mp4"
-     */
+    // =========================
+    // HELPERS & STRINGS
+    // =========================
+
     private fun encodePathForUrl(absPath: String): String {
-        val clean = absPath.replace("\\", "/")
-        val parts = clean.split("/").map { seg ->
-            if (seg.isBlank()) "" else URLEncoder.encode(seg, "UTF-8").replace("+", "%20")
+        // StringBuilder para menos alocación
+        val sb = StringBuilder()
+        val parts = absPath.replace("\\", "/").split("/")
+        for (i in parts.indices) {
+            val seg = parts[i]
+            if (seg.isNotBlank()) sb.append("/").append(URLEncoder.encode(seg, "UTF-8").replace("+", "%20"))
         }
-        val rebuilt = parts.joinToString("/")
-        return if (rebuilt.startsWith("/")) rebuilt else "/$rebuilt"
+        return sb.toString()
     }
 
-    // =========================
-    // Cover API + cache
-    // =========================
+    private fun fallbackImageUri() = "android.resource://${context.packageName}/${R.drawable.movie}"
 
-    private val coverCache = mutableMapOf<String, ApiCover?>()
+    private fun normalizeAbsPath(p: String): String = try { File(p).canonicalPath.replace("\\", "/") } catch (_: Exception) { p.replace("\\", "/") }
 
-    private fun fetchCoverFromApiCached(q: String): ApiCover? {
-        if (coverCache.containsKey(q)) return coverCache[q]
-        val cover = try { fetchCoverFromApi(q) } catch (_: Exception) { null }
-        coverCache[q] = cover
-        return cover
-    }
-
-    private fun fetchCoverFromApi(q: String): ApiCover? {
-        val base = "https://api-watchoffline.luzardo-thomas.workers.dev/cover?q="
-        val full = base + URLEncoder.encode(q.replace("+", " "), "UTF-8")
-
-        val conn = (URL(full).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 8000
-            readTimeout = 8000
-        }
-
-        return try {
-            val code = conn.responseCode
-            if (code != 200) return null
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
-            Gson().fromJson(body, ApiCover::class.java)
-        } finally {
-            conn.disconnect()
-        }
-    }
-
-    // =========================
-    // HELPERS
-    // =========================
-
-    private fun pad2(n: Int): String = n.toString().padStart(2, '0')
-    private fun pad3(n: Int): String = n.toString().padStart(3, '0')
-
-    private fun normalizeAbsPath(p: String): String {
-        return try {
-            File(p).canonicalPath.replace("\\", "/")
-        } catch (_: Exception) {
-            p.replace("\\", "/")
-        }
-    }
-
-
-    private fun normalizeName(s: String): String =
-        s.trim().replace('_', ' ')
-            .replace(Regex("""\s+"""), " ")
-            .lowercase()
+    private fun pad2(n: Int) = if(n<10) "0$n" else "$n"
+    private fun pad3(n: Int) = if(n<10) "00$n" else if(n<100) "0$n" else "$n"
+    private fun normalizeName(s: String) = s.trim().replace('_', ' ').replace(Regex("""\s+"""), " ").lowercase()
 
     private fun parseSeasonFromFolderOrName(name: String): Int? {
         val n = name.lowercase().replace("_", " ").trim()
-        Regex("""temporada\s*(\d{1,2})""").find(n)?.let { return it.groupValues[1].toInt() }
-        Regex("""temp\s*(\d{1,2})""").find(n)?.let { return it.groupValues[1].toInt() }
-        Regex("""season\s*(\d{1,2})""").find(n)?.let { return it.groupValues[1].toInt() }
-        Regex("""\bs(\d{1,2})\b""").find(n)?.let { return it.groupValues[1].toInt() }
-        if (n.matches(Regex("""\d{1,2}"""))) return n.toInt()
-        return null
+        return reSeason1.find(n)?.groupValues?.get(1)?.toInt()
+            ?: reSeason2.find(n)?.groupValues?.get(1)?.toInt()
+            ?: reSeason3.find(n)?.groupValues?.get(1)?.toInt()
+            ?: reSeason4.find(n)?.groupValues?.get(1)?.toInt()
+            ?: if (n.matches(Regex("""\d{1,2}"""))) n.toInt() else null
     }
 
-    // ✅ SOLO formatos fuertes de temporada/capítulo desde el NOMBRE DEL ARCHIVO
     private fun parseSeasonEpisodeFromFilename(path: String): Pair<Int, Int>? {
-        val clean = path.replace("\\", "/")
-        val file = clean.substringAfterLast("/")
-        val name = file.substringBeforeLast(".", file)
-
-        // S01E02 / S01.E02 / S01-E02 / S01 E02
-        Regex("""(?i)\bs(\d{1,2})\s*[._\- ]*\s*e(\d{1,3})\b""")
-            .find(name)?.let {
-                return it.groupValues[1].toInt() to it.groupValues[2].toInt()
-            }
-
-        // 1x02 / 01x02
-        Regex("""(?i)\b(\d{1,2})\s*x\s*(\d{1,3})\b""")
-            .find(name)?.let {
-                return it.groupValues[1].toInt() to it.groupValues[2].toInt()
-            }
-
-        return null
+        val name = fileBaseName(path)
+        return reSE1.find(name)?.let { it.groupValues[1].toInt() to it.groupValues[2].toInt() }
+            ?: reSE2.find(name)?.let { it.groupValues[1].toInt() to it.groupValues[2].toInt() }
     }
 
-    // ✅ Episodio “solo número” (DBZ_100, Cap 100, E100, etc.) -> el archivo manda
     private fun parseEpisodeOnlyFromFilename(path: String): Int? {
-        val clean = path.replace("\\", "/")
-        val file = clean.substringAfterLast("/")
-        val name = file.substringBeforeLast(".", file)
-
-        // ep/cap/e + numero (tomar el ÚLTIMO match)
-        Regex("""(?i)\b(?:ep|e|cap|c|episode)\s*0*(\d{1,3})\b""")
-            .findAll(name)
-            .toList()
-            .lastOrNull()
-            ?.let { return it.groupValues[1].toInt() }
-
-        // numero al final (DBZ_100, MALCOLM_02, etc.)
-        Regex("""(?i)(?:[_\-\s])0*(\d{1,3})\s*$""")
-            .find(name)
-            ?.let { return it.groupValues[1].toInt() }
-
-        return null
+        val name = fileBaseName(path)
+        return reEpWords.findAll(name).lastOrNull()?.groupValues?.get(1)?.toInt()
+            ?: reEpTail.find(name)?.groupValues?.get(1)?.toInt()
     }
 
-    // ✅ Para ordenar episodios en series (archivo manda, API no)
-    private fun parseEpisodeForSort(path: String): Int? {
-        val se = parseSeasonEpisodeFromFilename(path)
-        if (se != null) return se.second
-        return parseEpisodeOnlyFromFilename(path)
-    }
+    private fun parseEpisodeForSort(path: String) = parseSeasonEpisodeFromFilename(path)?.second ?: parseEpisodeOnlyFromFilename(path)
 
     private fun inferSagaNameFromPath(path: String): String {
         val clean = path.replace("\\", "/").trim('/')
         val parts = clean.split("/").filter { it.isNotBlank() }
         if (parts.size < 2) return "Películas"
-
         val parent = parts[parts.size - 2]
         val grand = parts.getOrNull(parts.size - 3)
-
-        val parentNorm = normalizeName(parent)
-        val looksLikePart =
-            parentNorm.matches(Regex(""".*\b(\d{1,2}|i{1,6}|iv|v|vi)\b.*""")) ||
-                    parentNorm.contains("part") ||
-                    parentNorm.contains("parte")
-
-        return if (looksLikePart && !grand.isNullOrBlank()) grand else parent
+        val pNorm = normalizeName(parent)
+        val isPart = reSagaLooksLikePart.matches(pNorm) || pNorm.contains("part") || pNorm.contains("parte")
+        return if (isPart && !grand.isNullOrBlank()) grand else parent
     }
 
     private fun extractMovieSortKey(path: String, title: String): Int {
-        val name = path.substringAfterLast("/").substringBeforeLast(".")
-        Regex("""\[(\d{1,3})]""").find(name)?.let { return it.groupValues[1].toInt() }
-        Regex("""^(\d{1,3})\D""").find(name)?.let { return it.groupValues[1].toInt() }
-        Regex("""(?i)\b(part|parte)\s*(\d{1,3})\b""").find(name)?.let { return it.groupValues[2].toInt() }
-        return Int.MAX_VALUE
+        val name = fileBaseName(path)
+        return reMovieKey1.find(name)?.groupValues?.get(1)?.toInt()
+            ?: reMovieKey2.find(name)?.groupValues?.get(1)?.toInt()
+            ?: reMovieKey3.find(name)?.groupValues?.get(2)?.toInt()
+            ?: Int.MAX_VALUE
     }
 
     private fun buildQueryForPathSmart(path: String): String {
         val clean = path.replace("\\", "/").trim('/')
         val parts = clean.split("/").filter { it.isNotBlank() }
         val fileNoExt = parts.last().substringBeforeLast(".")
-
-        // 1) Si el archivo trae temporada+capítulo -> query por serie + Sxx + ep (Malcolm, etc.)
         val se = parseSeasonEpisodeFromFilename(path)
-        if (se != null && parts.size >= 3) {
-            val seriesName = parts[parts.size - 3]
-            val (season, ep) = se
-            return "${normalizeName(seriesName)} s${pad2(season)} ${pad2(ep)}"
-        }
-
-        // 2) Si estamos en estructura de serie (.../<serie>/<temporada>/<archivo>)
-        //    y el filename trae "solo episodio" (DBZ_002),
-        //    armamos query estilo "<serie>_<NNN>" para pegarle a tu API (dbz_002).
+        if (se != null && parts.size >= 3) return "${normalizeName(parts[parts.size - 3])} s${pad2(se.first)} ${pad2(se.second)}"
         if (parts.size >= 3) {
-            val seriesName = parts[parts.size - 3]
-            val seasonFolder = parts[parts.size - 2]
-            val season = parseSeasonFromFolderOrName(seasonFolder)
-            val epOnly = parseEpisodeOnlyFromFilename(path)
-            if (season != null && epOnly != null) {
-                val seriesKey = normalizeName(seriesName).replace(" ", "_")
-                return "${seriesKey}_${pad3(epOnly)}"
-            }
+            val season = parseSeasonFromFolderOrName(parts[parts.size - 2])
+            val ep = parseEpisodeOnlyFromFilename(path)
+            if (season != null && ep != null) return "${normalizeName(parts[parts.size - 3]).replace(" ", "_")}_${pad3(ep)}"
         }
-
-        // 3) Fallback genérico
         return normalizeName(fileNoExt)
     }
 
-    private fun uniqueJsonName(base: String): String {
-        val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toSet()
+    private fun uniqueJsonName(base: String, existing: MutableSet<String>): String {
         if (!existing.contains(base)) return base
-
         val dot = base.lastIndexOf(".json")
         val prefix = if (dot >= 0) base.substring(0, dot) else base
         var i = 2
         while (true) {
-            val candidate = "${prefix}_$i.json"
-            if (!existing.contains(candidate)) return candidate
+            val cand = "${prefix}_$i.json"
+            if (!existing.contains(cand)) return cand
             i++
         }
     }
@@ -538,56 +423,22 @@ class LocalAutoImporter(
         return previews.filter { it.fileName !in existing }
     }
 
-    private fun fileBaseName(path: String): String =
-        path.replace("\\", "/").substringAfterLast("/").substringBeforeLast(".")
+    private fun fileBaseName(path: String) = path.replace("\\", "/").substringAfterLast("/").substringBeforeLast(".")
 
-    private fun prettyCap(ep: Int?): String? {
-        if (ep == null || ep <= 0) return null
-        return "Cap ${ep.toString().padStart(2, '0')}"
-    }
+    private fun prettyCap(ep: Int?) = if (ep == null || ep <= 0) null else "Cap ${pad2(ep)}"
+    private fun prettyTemp(season: Int?) = if (season == null || season <= 0) null else "T${pad2(season)}"
 
-    private fun prettyTemp(season: Int?): String? {
-        if (season == null || season <= 0) return null
-        return "T${season.toString().padStart(2, '0')}"
-    }
-
-    /**
-     * ✅ Reglas:
-     * - Si es movie -> cover.id o fallback filename
-     * - Si es serie:
-     *   - episodio SIEMPRE lo decide el ARCHIVO si se puede parsear
-     *   - API solo fallback si no se pudo parsear del archivo
-     *   - Si el archivo trae temporada (SxxEyy / xyy) => mostrar temporada + cap
-     *   - Si el archivo NO trae temporada (DBZ_100) => mostrar solo cap (aunque API tenga season)
-     */
     private fun buildDisplayTitleForItem(absPath: String, cover: ApiCover?): String {
         val fallbackName = fileBaseName(absPath)
         val seriesName = cover?.id ?: fallbackName
-
         val seFile = parseSeasonEpisodeFromFilename(absPath)
         val epFileOnly = parseEpisodeOnlyFromFilename(absPath)
-
-        val seasonFromFile = seFile?.first
-
-        val epFromFile = seFile?.second ?: epFileOnly
-        val epFinal = epFromFile ?: cover?.episode
-
-        val isSeries = (cover?.type?.lowercase() == "series") ||
-                (seasonFromFile != null) ||
-                (epFromFile != null) ||
-                (cover?.season != null) ||
-                (cover?.episode != null)
-
+        val season = seFile?.first
+        val ep = seFile?.second ?: epFileOnly ?: cover?.episode
+        val isSeries = (cover?.type?.lowercase() == "series") || season != null || ep != null || cover?.season != null || cover?.episode != null
         if (!isSeries) return seriesName
-
-        val cap = prettyCap(epFinal)
-        val temp = prettyTemp(seasonFromFile)
-
-        return when {
-            temp != null && cap != null -> "$temp $cap - $seriesName"
-            cap != null -> "$cap - $seriesName"
-            else -> seriesName
-        }
+        val cap = prettyCap(ep)
+        val temp = prettyTemp(season)
+        return if (temp != null && cap != null) "$temp $cap - $seriesName" else if (cap != null) "$cap - $seriesName" else seriesName
     }
 }
-
