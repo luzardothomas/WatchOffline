@@ -1,5 +1,5 @@
-package com.example.watchoffline.vid
 
+package com.example.watchoffline.vid
 import android.app.AlertDialog
 import android.content.Context
 import android.net.Uri
@@ -38,6 +38,11 @@ class PlaybackVideoFragment : Fragment() {
     private val PREF_GLOBAL_SUBS  = "GLOBAL_SUBS_PREF"
 
     private val TAG = "PlaybackVideoFragment"
+
+    private val END_EPSILON_MS = 1500L // 1.5s antes del final
+
+
+    private var vlcPlayer: VlcMediaPlayer? = null
 
     private lateinit var root: View
     private lateinit var videoLayout: VLCVideoLayout
@@ -78,6 +83,9 @@ class PlaybackVideoFragment : Fragment() {
     private val MIN_RETRY_INTERVAL_MS = 2000L
 
     private var isUserSeeking = false
+
+    private var lastSeekTime = 0L
+    private val SEEK_THROTTLE_MS = 250L
     private var controlsVisible = true
 
     private val SEEK_STEP_MS = 10_000L
@@ -93,6 +101,13 @@ class PlaybackVideoFragment : Fragment() {
     private val clearPreviewRunnable = Runnable {
         isUserSeeking = false
         previewSeekMs = null
+    }
+
+    // Runnable encargado de decirle a VLC que salte de verdad
+    private val performSeekRunnable = Runnable {
+        previewSeekMs?.let { target ->
+            VideoPlayerHolder.mediaPlayer?.time = target
+        }
     }
 
     // Tracks
@@ -569,8 +584,10 @@ class PlaybackVideoFragment : Fragment() {
             "--file-caching=600",
             "--clock-jitter=0",
             "--clock-synchro=0",
-            "--input-fast-seek",
-            "--no-audio-time-stretch"
+            "--no-audio-time-stretch",
+            "--codec=mediacodec_ndk,all",
+            "--avcodec-hw=any", // Deja que VLC elija el método más rápido
+            "--deinterlace=0",   // Desactivar post-procesado ahorra tiempo de renderizado en saltos
         ))
         VideoPlayerHolder.libVlc = libVlc
 
@@ -582,11 +599,18 @@ class PlaybackVideoFragment : Fragment() {
         // Aquí sí hacemos attach inicial porque estamos creando de cero
         mp.attachViews(videoLayout, null, false, false)
         setupVlcListeners(mp)
-
+        /*
         val media = Media(libVlc, Uri.parse(fixedUrl)).apply {
             setHWDecoderEnabled(true, false)
             addOption(":http-reconnect=true")
             addOption(":http-user-agent=WatchOffline")
+        }
+         */
+        val media = Media(libVlc, Uri.parse(fixedUrl)).apply {
+            // Cambiá true, false por false, false solo para probar.
+            // Si así funciona, el problema es cómo tu TV maneja el HW Acceleration en pausa.
+            setHWDecoderEnabled(true, false)
+            addOption(":http-reconnect=true")
         }
         mp.media = media
         media.release()
@@ -633,7 +657,8 @@ class PlaybackVideoFragment : Fragment() {
             override fun run() {
                 val p = VideoPlayerHolder.mediaPlayer
                 if (p != null) {
-                    val dur = p.length; val pos = previewSeekMs ?: p.time
+                    val dur = p.length
+                    val pos = if (isUserSeeking) (previewSeekMs ?: p.time) else p.time
                     txtPos.text = formatMs(pos); txtDur.text = if(dur>0) formatMs(dur) else "0:00"
                     if (dur > 0 && !isUserSeeking && root.findFocus() !== seekBar) {
                         seekBar.progress = ((pos.toDouble()/dur.toDouble())*1000.0).toInt().coerceIn(0,1000)
@@ -748,48 +773,157 @@ class PlaybackVideoFragment : Fragment() {
         }
     }
 
+
     private fun setupRemoteHandlers() {
         if (!isTvDevice()) {
-            root.setOnKeyListener(null); videoLayout.setOnKeyListener(null); return
+            root.setOnKeyListener(null)
+            videoLayout.setOnKeyListener(null)
+            skipIntroButton.setOnKeyListener(null)
+            seekBar.setOnKeyListener(null)
+
+            root.isFocusable = false
+            root.isFocusableInTouchMode = false
+
+            videoLayout.isFocusable = false
+            videoLayout.isFocusableInTouchMode = false
+
+            seekBar.isFocusable = false
+            seekBar.isFocusableInTouchMode = false
+
+            skipIntroButton.isFocusable = false
+            skipIntroButton.isFocusableInTouchMode = false
+
+            btnPrevVideo.isFocusable = false
+            btnPrevVideo.isFocusableInTouchMode = false
+            btnSeekBack.isFocusable = false
+            btnSeekBack.isFocusableInTouchMode = false
+            btnPlayPause.isFocusable = false
+            btnPlayPause.isFocusableInTouchMode = false
+            btnSeekFwd.isFocusable = false
+            btnSeekFwd.isFocusableInTouchMode = false
+            btnNextVideo.isFocusable = false
+            btnNextVideo.isFocusableInTouchMode = false
+            btnSubtitles.isFocusable = false
+            btnSubtitles.isFocusableInTouchMode = false
+
+            return
         }
-        root.isFocusable = true; root.requestFocus()
+
+        root.isFocusable = true
+        root.isFocusableInTouchMode = true
+        root.requestFocus()
+
         val keyListener = View.OnKeyListener { _, keyCode, event ->
             if (event.action != KeyEvent.ACTION_DOWN) return@OnKeyListener false
             if (controlsVisible) bumpControlsTimeout()
 
             when (keyCode) {
-                KeyEvent.KEYCODE_MEDIA_NEXT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                    nextIndex()?.let { playIndex(it); bumpControlsTimeout(); showExitTemporarily() }
+                KeyEvent.KEYCODE_MEDIA_NEXT,
+                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                    val next = nextIndex()
+                    if (next != null) {
+                        playIndex(next)
+                        bumpControlsTimeout()
+                        showExitTemporarily()
+                    }
                     return@OnKeyListener true
                 }
-                KeyEvent.KEYCODE_MEDIA_PREVIOUS, KeyEvent.KEYCODE_MEDIA_REWIND -> {
-                    prevIndex()?.let { playIndex(it); bumpControlsTimeout(); showExitTemporarily() }
+
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+                KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                    val prev = prevIndex()
+                    if (prev != null) {
+                        playIndex(prev)
+                        bumpControlsTimeout()
+                        showExitTemporarily()
+                    }
                     return@OnKeyListener true
+                }
+            }
+
+            val focused = root.findFocus()
+
+            if (focused === seekBar) {
+                return@OnKeyListener when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_LEFT -> { seekBarStep(-1); true }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> { seekBarStep(+1); true }
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> true
+                    KeyEvent.KEYCODE_DPAD_DOWN -> { hideOverlayOnly(); true }
+                    else -> false
                 }
             }
 
             if (!controlsVisible) {
                 return@OnKeyListener when (keyCode) {
-                    KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                        showOverlayAndFocusPlay(); true
+                    KeyEvent.KEYCODE_DPAD_UP -> { showOverlayAndFocusPlay(); true }
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                        if (skipIntroButton.visibility == View.VISIBLE) {
+                            performSkipIntro()
+                            hideOverlayOnly()
+                            true
+                        } else {
+                            val p = vlcPlayer
+                            if (p != null && p.isPlaying) {
+                                p.pause()
+                                btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
+                            }
+                            showOverlayAndFocusPlay()
+                            true
+                        }
                     }
                     KeyEvent.KEYCODE_DPAD_LEFT -> { seekByMs(-SEEK_STEP_MS); true }
                     KeyEvent.KEYCODE_DPAD_RIGHT -> { seekByMs(SEEK_STEP_MS); true }
                     else -> false
                 }
             }
+
             when (keyCode) {
                 KeyEvent.KEYCODE_DPAD_DOWN -> { hideOverlayOnly(); true }
                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                    root.findFocus()?.let { if(it.isClickable) it.performClick() else togglePlayPause() } ?: togglePlayPause()
-                    true
+                    val f = root.findFocus()
+                    if (f != null && f.isClickable) { f.performClick(); true }
+                    else { togglePlayPause(); true }
                 }
-                KeyEvent.KEYCODE_BACK -> { persistLastPlayed(); false }
+                KeyEvent.KEYCODE_BACK -> {
+                    persistLastPlayed()
+                    false
+                }
                 else -> false
             }
         }
-        root.setOnKeyListener(keyListener); videoLayout.setOnKeyListener(keyListener); skipIntroButton.setOnKeyListener(keyListener)
+
+        root.setOnKeyListener(keyListener)
+
+        videoLayout.isFocusable = true
+        videoLayout.isFocusableInTouchMode = true
+        videoLayout.setOnKeyListener(keyListener)
+
+        skipIntroButton.isFocusable = true
+        skipIntroButton.isFocusableInTouchMode = true
+        skipIntroButton.setOnKeyListener(keyListener)
+
+        seekBar.isFocusable = true
+        seekBar.isFocusableInTouchMode = true
+        seekBar.setOnKeyListener { _, keyCode, event ->
+            if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+            if (controlsVisible) bumpControlsTimeout()
+
+            when (keyCode) {
+                KeyEvent.KEYCODE_BACK -> {
+                    persistLastPlayed()
+                    false
+                }
+                KeyEvent.KEYCODE_DPAD_LEFT -> { seekBarStep(-1); true }
+                KeyEvent.KEYCODE_DPAD_RIGHT -> { seekBarStep(+1); true }
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> true
+                KeyEvent.KEYCODE_DPAD_DOWN -> { hideOverlayOnly(); true }
+                else -> false
+            }
+        }
     }
+
+
+
 
     private fun toggleControls() { if (controlsVisible) hideOverlayOnly() else showOverlayAndFocusPlay() }
 
@@ -828,19 +962,81 @@ class PlaybackVideoFragment : Fragment() {
         if (p.isPlaying) { p.pause(); btnPlayPause.setImageResource(android.R.drawable.ic_media_play) }
         else { p.play(); btnPlayPause.setImageResource(android.R.drawable.ic_media_pause) }
     }
-
+/*
     private fun seekByMs(delta: Long) {
         val p = VideoPlayerHolder.mediaPlayer ?: return
         if (p.length > 0) p.time = (p.time + delta).coerceIn(0L, p.length)
     }
+*/
+
+    private fun seekByMs(delta: Long) {
+        val p = VideoPlayerHolder.mediaPlayer ?: return
+        val dur = p.length
+        if (dur <= 0) return
+
+        val target = p.time + delta
+
+        // 🔴 OVERFLOW → FINAL REAL
+        if (target >= dur - END_EPSILON_MS) {
+            p.time = dur
+            handleVideoEnded()
+            return
+        }
+
+        p.time = target.coerceIn(0L, dur)
+    }
+
 
     private fun seekBarStep(dir: Int) {
         val p = VideoPlayerHolder.mediaPlayer ?: return
-        val dur = p.length; if (dur <= 0) return
-        val newProg = (seekBar.progress + dir * SEEK_STEP_BAR).coerceIn(0, 1000)
+        val dur = p.length
+        if (dur <= 0) return
+
+        // 1. Matemáticas de la barra
+        val stepSize = 40
+        val newProg = (seekBar.progress + dir * stepSize).coerceIn(0, 1000)
+        val target = (dur * (newProg / 1000.0)).toLong()
+
+        // 🔴 OVERFLOW → FINAL REAL
+        if (target >= dur - END_EPSILON_MS) {
+            seekBar.progress = 1000
+            txtPos.text = formatMs(dur)
+            previewSeekMs = dur
+            isUserSeeking = false
+
+            p.time = dur
+            handleVideoEnded()
+            return
+        }
+
+
+        // 2. ACTUALIZACIÓN UI (Siempre instantánea)
         seekBar.progress = newProg
-        val target = (dur * (newProg/1000.0)).toLong()
-        p.time = target; previewSeekMs = target; txtPos.text = formatMs(target)
-        isUserSeeking = true; ui.removeCallbacks(clearPreviewRunnable); ui.postDelayed(clearPreviewRunnable, CLEAR_PREVIEW_DELAY)
+        txtPos.text = formatMs(target)
+        previewSeekMs = target
+        isUserSeeking = true
+
+        // 3. CONTROL DE TRÁFICO (Throttling)
+        val now = System.currentTimeMillis()
+        if (now - lastSeekTime > SEEK_THROTTLE_MS) {
+            lastSeekTime = now
+
+            // Aplicamos el salto al motor de VLC
+            p.time = target
+
+            // Si está pausado, le damos el "toque" para refrescar
+            if (!p.isPlaying) {
+                p.play()
+                // Un delay muy corto para que no llegue a sonar pero sí a pintar
+                ui.postDelayed({
+                    if (isUserSeeking) p.pause()
+                }, 20)
+            }
+        }
+
+        // 4. Limpieza final
+        ui.removeCallbacks(clearPreviewRunnable)
+        ui.postDelayed(clearPreviewRunnable, 1200)
     }
+
 }
