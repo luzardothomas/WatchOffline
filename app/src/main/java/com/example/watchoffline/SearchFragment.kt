@@ -139,6 +139,9 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
         rowsAdapter.clear()
         if (q.isBlank()) return
 
+        // ✅ mapa videoUrl -> cover REAL (solo JSONs no RANDOM)
+        val coverByUrl = buildNonRandomCoverByUrl()
+
         val out = LinkedHashMap<String, Movie>()
 
         for (json in allImported) {
@@ -149,7 +152,8 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
                 val titleMatch = normalize(v.title).contains(q)
 
                 if (titleMatch || jsonMatch) {
-                    val movie = Movie(
+
+                    var movie = Movie(
                         title = v.title,
                         videoUrl = v.videoUrl,
                         cardImageUrl = v.cardImageUrl,
@@ -159,12 +163,20 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
                         description = jsonTitle
                     )
 
+                    // ✅ FIX CLAVE:
+                    // si viene de RANDOM con cover dados → usar cover real
+                    if (isDadosCover(movie.cardImageUrl)) {
+                        val realCover = coverByUrl[movie.videoUrl?.trim().orEmpty()]
+                        if (!realCover.isNullOrBlank()) {
+                            movie = movie.copy(cardImageUrl = realCover)
+                        }
+                    }
+
                     val key = movie.videoUrl?.takeIf { it.isNotBlank() }
                         ?: "${jsonTitle}:${movie.title}"
 
                     out[key] = movie
                 }
-
             }
         }
 
@@ -177,12 +189,12 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
             rowsAdapter.add(ListRow(null, rowAdapter))
         }
 
-        // ✅ IMPORTANTÍSIMO: después de renderizar resultados, reintentar foco
+        // ✅ reintentar foco al último reproducido
         handler.post {
-            Log.e(TAG, "FOCUSDBG_SEARCH performSearch() -> try focusLastPlayedIfAny rows=${rowsAdapter.size()}")
             focusLastPlayedIfAny()
         }
     }
+
 
     // =========================
     // ✅ MISMA LÓGICA QUE MAINFRAGMENT (pero usando rowsSupportFragment)
@@ -267,6 +279,32 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
     }
 
     // =========================
+
+    private fun isRandomJsonName(name: String): Boolean =
+        name.trim().uppercase(Locale.ROOT).startsWith("RANDOM")
+
+    private fun isDadosCover(url: String?): Boolean {
+        val u = url?.trim().orEmpty()
+        return u.contains("/drawable/dados")
+    }
+
+    private fun buildNonRandomCoverByUrl(): Map<String, String> {
+        val nonRandom = allImported.filterNot { isRandomJsonName(it.fileName) }
+
+        val map = HashMap<String, String>(nonRandom.size * 20)
+
+        nonRandom.forEach { ij ->
+            ij.videos.forEach { v ->
+                val url = v.videoUrl?.trim().orEmpty()
+                val cover = v.cardImageUrl?.trim().orEmpty()
+                if (url.isNotEmpty() && cover.isNotEmpty()) {
+                    map.putIfAbsent(url, cover)
+                }
+            }
+        }
+        return map
+    }
+
 
     private fun normalize(s: String): String =
         s.trim()

@@ -102,21 +102,23 @@ class MobileSectionsAdapter(
                 val isSelected = (urlKey.isNotEmpty() && urlKey == selectedVideoUrl)
 
                 // =========================================================
-                // ✅ RESET DURO (SIEMPRE) para evitar reciclado "pegajoso"
+                // ✅ RESET DURO (SIEMPRE) — evita reciclado pegajoso
                 // =========================================================
 
-                // 1) Root: volver a outline/clip SIEMPRE
-                cardRoot.background = cardRoot.context.getDrawable(R.drawable.bg_action_card)
+                // 1) ROOT: fondo + outline SIEMPRE
+                cardRoot.background =
+                    cardRoot.context.getDrawable(R.drawable.bg_action_card)
                 cardRoot.clipToOutline = true
                 cardRoot.outlineProvider = ViewOutlineProvider.BACKGROUND
 
-                // 2) Cover: volver a outline/clip SIEMPRE
-                cover.background = cover.context.getDrawable(R.drawable.bg_action_card)
+                // 2) COVER: fondo + outline + scale SIEMPRE
+                cover.background =
+                    cover.context.getDrawable(R.drawable.bg_action_card)
                 cover.clipToOutline = true
                 cover.outlineProvider = ViewOutlineProvider.BACKGROUND
                 cover.scaleType = ImageView.ScaleType.CENTER_CROP
 
-                // 3) Title: volver a “estado normal” SIEMPRE (porque en action lo tocás)
+                // 3) TITLE: estado NORMAL por defecto
                 title.apply {
                     maxLines = 2
                     ellipsize = TextUtils.TruncateAt.END
@@ -128,7 +130,7 @@ class MobileSectionsAdapter(
                     height = ViewGroup.LayoutParams.WRAP_CONTENT
                 }
 
-                // Limpiar glide SIEMPRE antes de reusar
+                // 4) LIMPIAR GLIDE SIEMPRE
                 Glide.with(cover).clear(cover)
                 cover.setImageDrawable(null)
 
@@ -136,7 +138,7 @@ class MobileSectionsAdapter(
                 // ✅ ACTION vs VIDEO
                 // =========================================================
                 if (action) {
-                    // ✅ ACCIONES: sin cover + texto centrado y ocupando toda la card
+                    // ✅ ACCIONES: sin cover, texto ocupa toda la card
                     cover.visibility = View.GONE
 
                     title.updateLayoutParams<ViewGroup.LayoutParams> {
@@ -144,7 +146,7 @@ class MobileSectionsAdapter(
                     }
 
                 } else {
-                    // ✅ VIDEO / PLAYLIST (incluye playlist://RANDOM)
+                    // ✅ VIDEO / PLAYLIST (incluye RANDOM)
                     cover.visibility = View.VISIBLE
 
                     val url = movie.cardImageUrl?.trim().orEmpty()
@@ -154,12 +156,12 @@ class MobileSectionsAdapter(
                             .centerCrop()
                             .transition(DrawableTransitionOptions.withCrossFade())
                             .into(cover)
-                    } else {
-                        // ya está limpio
                     }
                 }
 
-                // ✅ highlight del último clickeado/reproducido
+                // =========================================================
+                // ✅ Highlight último reproducido / clickeado
+                // =========================================================
                 cardRoot.alpha = if (isSelected) 1f else 0.90f
                 cardRoot.scaleX = if (isSelected) 1.04f else 1f
                 cardRoot.scaleY = if (isSelected) 1.04f else 1f
@@ -167,6 +169,7 @@ class MobileSectionsAdapter(
 
                 itemView.setOnClickListener { onMovieClick(movie) }
             }
+
 
         }
     }
