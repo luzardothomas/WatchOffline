@@ -444,8 +444,9 @@ class PlaybackVideoFragment : Fragment() {
         btnPrevVideo = root.findViewById(R.id.btn_prev_video)
         btnNextVideo = root.findViewById(R.id.btn_next_video)
 
-        btnPrevVideo.setImageResource(android.R.drawable.ic_media_rew)
-        btnNextVideo.setImageResource(android.R.drawable.ic_media_ff)
+        btnPrevVideo.setImageResource(android.R.drawable.ic_media_previous)
+        btnNextVideo.setImageResource(android.R.drawable.ic_media_next)
+
 
         btnPrevVideo.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         btnNextVideo.setBackgroundColor(android.graphics.Color.TRANSPARENT)

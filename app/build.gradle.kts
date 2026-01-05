@@ -68,4 +68,5 @@ dependencies {
 
     implementation("org.videolan.android:libvlc-all:3.6.0")
     implementation(libs.androidx.cardview)
+    implementation(libs.androidx.constraintlayout)
 }
