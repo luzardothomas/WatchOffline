@@ -1,11 +1,13 @@
 package com.example.watchoffline
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.speech.RecognizerIntent
+import android.util.Log
 import androidx.core.app.ActivityOptionsCompat
 import androidx.leanback.app.SearchSupportFragment
 import androidx.leanback.widget.*
@@ -23,32 +25,24 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
 
     private var allImported: List<ImportedJson> = emptyList()
 
-    // ✅ DEDUPE: evita ejecutar dos veces la misma query
+    // ✅ DEDUPE
     private var lastScheduledQuery: String = ""
     private var lastExecutedQuery: String = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // ✅ HABILITAR VOZ: callback para que el mic no quede “muerto”
         setSpeechRecognitionCallback(object : SpeechRecognitionCallback {
             override fun recognizeSpeech() {
                 val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                    putExtra(
-                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-                    )
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
                     putExtra(RecognizerIntent.EXTRA_PROMPT, "Decí qué querés buscar")
                 }
-
                 try {
-                    // Leanback maneja el result y llama onActivityResult del fragment
                     startActivityForResult(intent, REQUEST_SPEECH)
-                } catch (_: Exception) {
-                    // Si el dispositivo no tiene recognizer/assistant, simplemente no hará nada
-                }
+                } catch (_: Exception) {}
             }
         })
 
@@ -56,28 +50,6 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
         allImported = jsonDataManager.getImportedJsons()
 
         setSearchResultProvider(this)
-
-        setOnItemViewClickedListener { itemViewHolder, item, _, _ ->
-            val movie = item as? Movie ?: return@setOnItemViewClickedListener
-
-            val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
-                putExtra(DetailsActivity.MOVIE, movie)
-            }
-
-            val cardView = itemViewHolder.view as? ImageCardView
-            val shared = cardView?.mainImageView
-
-            if (shared != null) {
-                val options = ActivityOptionsCompat.makeSceneTransitionAnimation(
-                    requireActivity(),
-                    shared,
-                    DetailsActivity.SHARED_ELEMENT_NAME
-                )
-                startActivity(intent, options.toBundle())
-            } else {
-                startActivity(intent)
-            }
-        }
     }
 
     override fun onViewCreated(view: android.view.View, savedInstanceState: Bundle?) {
@@ -86,7 +58,7 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
         setOnItemViewClickedListener { itemViewHolder, item, _, row ->
             val movie = item as? Movie ?: return@setOnItemViewClickedListener
 
-            // ✅ playlist desde la fila (ListRow)
+            // ✅ playlist desde la fila
             val listRow = row as? ListRow
             val adapter = listRow?.adapter
 
@@ -103,7 +75,6 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
 
             val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
                 putExtra(DetailsActivity.MOVIE, movie)
-
                 if (playlist.size > 1) {
                     putExtra(DetailsActivity.EXTRA_PLAYLIST, playlist)
                     putExtra(DetailsActivity.EXTRA_INDEX, index)
@@ -126,6 +97,16 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+
+        // ✅ igual que en MainFragment: al volver del video, forzar foco al último reproducido
+        handler.post {
+            Log.e(TAG, "FOCUSDBG_SEARCH onResume() -> try focusLastPlayedIfAny")
+            focusLastPlayedIfAny()
+        }
+    }
+
     override fun getResultsAdapter(): ObjectAdapter = rowsAdapter
 
     override fun onQueryTextChange(newQuery: String?): Boolean {
@@ -134,7 +115,6 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
     }
 
     override fun onQueryTextSubmit(query: String?): Boolean {
-        // ✅ Dejalo activo por voz/enter; el dedupe evita repetir
         scheduleSearch(query.orEmpty())
         return true
     }
@@ -159,7 +139,7 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
         rowsAdapter.clear()
         if (q.isBlank()) return
 
-        val out = LinkedHashMap<String, Movie>() // dedupe por key (videoUrl)
+        val out = LinkedHashMap<String, Movie>()
 
         for (json in allImported) {
             val jsonTitle = safePrettyTitle(json.fileName)
@@ -178,10 +158,7 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
                         description = jsonTitle
                     )
 
-                    val key = movie.videoUrl
-                        ?.takeIf { it.isNotBlank() }
-                        ?: "${jsonTitle}:${movie.title}"
-
+                    val key = movie.videoUrl?.takeIf { it.isNotBlank() } ?: "${jsonTitle}:${movie.title}"
                     out[key] = movie
                 }
             }
@@ -195,7 +172,97 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
             chunk.forEach { rowAdapter.add(it) }
             rowsAdapter.add(ListRow(null, rowAdapter))
         }
+
+        // ✅ IMPORTANTÍSIMO: después de renderizar resultados, reintentar foco
+        handler.post {
+            Log.e(TAG, "FOCUSDBG_SEARCH performSearch() -> try focusLastPlayedIfAny rows=${rowsAdapter.size()}")
+            focusLastPlayedIfAny()
+        }
     }
+
+    // =========================
+    // ✅ MISMA LÓGICA QUE MAINFRAGMENT (pero usando rowsSupportFragment)
+    // =========================
+
+    private fun readLastPlayedUrl(): String? {
+        val u = requireContext()
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_LAST_PLAYED, null)
+            ?.trim()
+
+        Log.e(TAG, "FOCUSDBG_SEARCH readLastPlayedUrl=$u")
+        return u?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun focusLastPlayedIfAny(): Boolean {
+        Log.e(TAG, "FOCUSDBG_SEARCH ENTER focusLastPlayedIfAny()")
+
+        val lastUrl = readLastPlayedUrl() ?: return false
+
+        var targetRowIndex = -1
+        var targetColIndex = -1
+
+        for (r in 0 until rowsAdapter.size()) {
+            val row = rowsAdapter.get(r) as? ListRow ?: continue
+            val rowAdapter = row.adapter ?: continue
+
+            for (c in 0 until rowAdapter.size()) {
+                val m = rowAdapter.get(c) as? Movie ?: continue
+                if (m.videoUrl == lastUrl) {
+                    targetRowIndex = r
+                    targetColIndex = c
+                    break
+                }
+            }
+            if (targetRowIndex >= 0) break
+        }
+
+        if (targetRowIndex < 0 || targetColIndex < 0) {
+            Log.e(TAG, "FOCUSDBG_SEARCH NOT FOUND in results url=$lastUrl")
+            return false
+        }
+
+        Log.e(TAG, "FOCUSDBG_SEARCH FOUND row=$targetRowIndex col=$targetColIndex url=$lastUrl")
+
+        val rowsFrag = rowsSupportFragment
+        if (rowsFrag == null) {
+            Log.e(TAG, "FOCUSDBG_SEARCH rowsSupportFragment == null (aun no creado)")
+            return false
+        }
+
+        // ✅ EXACTO como MainFragment: setSelectedPosition con ViewHolderTask
+        rowsFrag.setSelectedPosition(targetRowIndex, false, object : Presenter.ViewHolderTask() {
+            override fun run(holder: Presenter.ViewHolder?) {
+                val rowView = holder?.view
+                if (rowView == null) {
+                    Log.e(TAG, "FOCUSDBG_SEARCH holder==null en task")
+                    return
+                }
+
+                val rowContent = rowView.findViewById<HorizontalGridView>(androidx.leanback.R.id.row_content)
+                if (rowContent == null) {
+                    Log.e(TAG, "FOCUSDBG_SEARCH row_content==null en task")
+                    return
+                }
+
+                rowContent.scrollToPosition(targetColIndex)
+
+                rowContent.post {
+                    rowContent.setSelectedPosition(targetColIndex)
+                    rowContent.requestFocus()
+
+                    Log.e(
+                        TAG,
+                        "FOCUSDBG_SEARCH APPLIED row=$targetRowIndex col=$targetColIndex selected=${rowContent.selectedPosition}"
+                    )
+                }
+            }
+        })
+
+        return true
+    }
+
+    // =========================
 
     private fun normalize(s: String): String =
         s.trim()
@@ -221,20 +288,21 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
         if (requestCode != REQUEST_SPEECH) return
         if (resultCode != Activity.RESULT_OK) return
 
-        val results = data
-            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-            .orEmpty()
-
+        val results = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS).orEmpty()
         val spoken = results.firstOrNull().orEmpty().trim()
         if (spoken.isBlank()) return
 
-        // ✅ Pone el texto reconocido en la barra y busca
         setSearchQuery(spoken, true)
         scheduleSearch(spoken)
     }
 
     companion object {
         private const val REQUEST_SPEECH = 9001
+
+        private const val TAG = "SearchFragment"
+        private const val PREFS_NAME = "watchoffline_prefs"
+        private const val KEY_LAST_PLAYED = "LAST_PLAYED_VIDEO_URL"
     }
 }
+
 

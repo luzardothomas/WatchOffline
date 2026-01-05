@@ -22,6 +22,6 @@
         android:id="@+id/sectionRowRecycler"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:scrollbars="horizontal"
-        android:overScrollMode="always" />
+        android:scrollbars="none"
+        android:overScrollMode="never" />
 </LinearLayout>

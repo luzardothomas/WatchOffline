@@ -1,5 +1,6 @@
 package com.example.watchoffline.vid
 
+import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -24,6 +25,15 @@ import org.videolan.libvlc.util.VLCVideoLayout
 import org.videolan.libvlc.MediaPlayer as VlcMediaPlayer
 
 class PlaybackVideoFragment : Fragment() {
+
+    companion object {
+        // Para que la Home pueda enfocar el último reproducido (opcional)
+        const val EXTRA_LAST_PLAYED_VIDEO_URL = "LAST_PLAYED_VIDEO_URL"
+
+        // SharedPreferences
+        private const val PREFS_NAME = "watchoffline_prefs"
+        private const val PREF_LAST_URL = "LAST_PLAYED_VIDEO_URL"
+    }
 
     private val TAG = "PlaybackVideoFragment"
 
@@ -67,6 +77,9 @@ class PlaybackVideoFragment : Fragment() {
     private var previewSeekMs: Long? = null
     private val CLEAR_PREVIEW_DELAY = 650L
 
+    // Evita doble ejecución de EndReached / finish en algunos dispositivos
+    private var endHandled = false
+
     private val clearPreviewRunnable = Runnable {
         isUserSeeking = false
         previewSeekMs = null
@@ -90,9 +103,6 @@ class PlaybackVideoFragment : Fragment() {
         ui.postDelayed(hideExitRunnable, timeoutMs)
     }
 
-    private fun dp(v: Int): Int =
-        (v * resources.displayMetrics.density).toInt()
-
     private fun enterImmersiveMode() {
         requireActivity().window.decorView.systemUiVisibility =
             (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
@@ -113,6 +123,24 @@ class PlaybackVideoFragment : Fragment() {
         controlsOverlay.visibility = View.GONE
         root.requestFocus()
     }
+
+    // =========================
+    // ✅ Persistencia “último reproducido”
+    // =========================
+    private fun persistLastPlayed(reason: String = "") {
+        val url = currentMovie?.videoUrl?.trim().orEmpty()
+        if (url.isEmpty()) return
+
+        requireContext()
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(PREF_LAST_URL, url)
+            .apply()
+
+        Log.e(TAG, "PERSIST lastUrl=$url reason=$reason idx=$currentIndex size=${playlist.size}")
+    }
+
+    // =========================
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         root = inflater.inflate(R.layout.fragment_playback_video, container, false)
@@ -183,13 +211,11 @@ class PlaybackVideoFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
-        // 🔥 DEBUG DURO: ver qué llega realmente
         val dbgMovie = arguments?.getSerializable("movie") as? Movie
         val dbgList = arguments?.getSerializable("playlist") as? ArrayList<Movie>
         val dbgIndex = arguments?.getInt("index", -1)
         Log.e(TAG, "ARGS movie=${dbgMovie?.videoUrl} playlistSize=${dbgList?.size} index=$dbgIndex")
 
-        // 🔥 Resolver playlist real (la del JSON) + índice (solo desde arguments)
         resolvePlaylistAndIndex()
 
         Log.e(TAG, "RESOLVED playlistSize=${playlist.size} currentIndex=$currentIndex movie=${currentMovie?.videoUrl}")
@@ -201,6 +227,10 @@ class PlaybackVideoFragment : Fragment() {
             return
         }
 
+        // ✅ al entrar: este es el video actual
+        persistLastPlayed("enter")
+
+        endHandled = false
         updatePrevNextState()
         initVlc(url)
         startTicker()
@@ -211,8 +241,6 @@ class PlaybackVideoFragment : Fragment() {
 
     /**
      * ✅ ÚNICA FUENTE DE VERDAD: arguments
-     * - "movie" siempre debe venir.
-     * - "playlist" + "index" vienen cuando hay más de un video en el JSON.
      */
     private fun resolvePlaylistAndIndex() {
         val argMovie = arguments?.getSerializable("movie") as? Movie ?: run {
@@ -250,18 +278,31 @@ class PlaybackVideoFragment : Fragment() {
         val hasPrev = playlist.size > 1 && currentIndex > 0
         val hasNext = playlist.size > 1 && currentIndex < playlist.lastIndex
 
-        // ✅ enable/alpha
         btnPrevVideo.isEnabled = hasPrev
         btnNextVideo.isEnabled = hasNext
         btnPrevVideo.alpha = if (hasPrev) 1f else 0.35f
         btnNextVideo.alpha = if (hasNext) 1f else 0.35f
 
-        // ✅ en TV: si está deshabilitado que ni pueda enfocarse
         if (isTvDevice()) {
             btnPrevVideo.isFocusable = hasPrev
             btnPrevVideo.isFocusableInTouchMode = hasPrev
             btnNextVideo.isFocusable = hasNext
             btnNextVideo.isFocusableInTouchMode = hasNext
+        }
+    }
+
+    private fun hasNext(): Boolean = playlist.size > 1 && currentIndex < playlist.lastIndex
+    private fun hasPrev(): Boolean = playlist.size > 1 && currentIndex > 0
+
+    private fun handleVideoEnded() {
+        if (endHandled) return
+        endHandled = true
+
+        if (hasNext()) {
+            endHandled = false
+            playIndex(currentIndex + 1) // playIndex persiste el nuevo
+        } else {
+            requireActivity().finish()
         }
     }
 
@@ -277,24 +318,25 @@ class PlaybackVideoFragment : Fragment() {
             return
         }
 
-        // limpia UI
         previewSeekMs = null
         isUserSeeking = false
         seekBar.progress = 0
         txtPos.text = "0:00"
         txtDur.text = "0:00"
 
-        // parar VLC actual (sin destruir fragment)
         try { vlcPlayer?.stop() } catch (_: Exception) {}
         try { vlcPlayer?.detachViews() } catch (_: Exception) {}
         try { vlcPlayer?.release() } catch (_: Exception) {}
         vlcPlayer = null
 
-        // set nuevo
         currentIndex = idx
         currentMovie = newMovie
         updatePrevNextState()
 
+        // ✅ ESTE es el “último visto” al volver
+        persistLastPlayed("playIndex")
+
+        endHandled = false
         initVlc(url)
         btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
 
@@ -387,6 +429,7 @@ class PlaybackVideoFragment : Fragment() {
         btn.alpha = 0f
 
         btn.setOnClickListener {
+            persistLastPlayed()
             requireActivity().onBackPressedDispatcher.onBackPressed()
         }
 
@@ -398,17 +441,9 @@ class PlaybackVideoFragment : Fragment() {
             }
             false
         }
-
-        btn.post {
-            try {
-                val lp = btn.layoutParams as ViewGroup.MarginLayoutParams
-                btn.layoutParams = lp
-            } catch (_: Exception) {}
-        }
     }
 
     private fun setupRemoteHandlers() {
-        // ✅ En celular: no forzar foco / no capturar DPAD
         if (!isTvDevice()) {
             root.setOnKeyListener(null)
             videoLayout.setOnKeyListener(null)
@@ -426,11 +461,9 @@ class PlaybackVideoFragment : Fragment() {
 
             seekBar.isFocusable = false
             seekBar.isFocusableInTouchMode = false
-
             return
         }
 
-        // ✅ Android TV: comportamiento actual
         root.isFocusable = true
         root.isFocusableInTouchMode = true
         root.requestFocus()
@@ -438,6 +471,29 @@ class PlaybackVideoFragment : Fragment() {
         val keyListener = View.OnKeyListener { _, keyCode, event ->
             if (event.action != KeyEvent.ACTION_DOWN) return@OnKeyListener false
             if (controlsVisible) bumpControlsTimeout()
+
+            // ✅ Capturar TODOS los típicos del control
+            when (keyCode) {
+                KeyEvent.KEYCODE_MEDIA_NEXT,
+                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                    if (hasNext()) {
+                        playIndex(currentIndex + 1)
+                        bumpControlsTimeout()
+                        showExitTemporarily()
+                    }
+                    return@OnKeyListener true
+                }
+
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+                KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                    if (hasPrev()) {
+                        playIndex(currentIndex - 1)
+                        bumpControlsTimeout()
+                        showExitTemporarily()
+                    }
+                    return@OnKeyListener true
+                }
+            }
 
             val focused = root.findFocus()
 
@@ -485,6 +541,10 @@ class PlaybackVideoFragment : Fragment() {
                         togglePlayPause(); true
                     }
                 }
+                KeyEvent.KEYCODE_BACK -> {
+                    persistLastPlayed()
+                    false
+                }
                 else -> false
             }
         }
@@ -504,7 +564,12 @@ class PlaybackVideoFragment : Fragment() {
         seekBar.setOnKeyListener { _, keyCode, event ->
             if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
             if (controlsVisible) bumpControlsTimeout()
+
             when (keyCode) {
+                KeyEvent.KEYCODE_BACK -> {
+                    persistLastPlayed()
+                    false
+                }
                 KeyEvent.KEYCODE_DPAD_LEFT -> { seekBarStep(-1); true }
                 KeyEvent.KEYCODE_DPAD_RIGHT -> { seekBarStep(+1); true }
                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> true
@@ -562,8 +627,7 @@ class PlaybackVideoFragment : Fragment() {
     }
 
     private fun performSkipIntro() {
-        val movie = currentMovie
-        val skip = movie?.skipToSecond ?: 0
+        val skip = currentMovie?.skipToSecond ?: 0
         if (skip <= 0) return
 
         val p = vlcPlayer ?: return
@@ -640,10 +704,16 @@ class PlaybackVideoFragment : Fragment() {
                     VlcMediaPlayer.Event.Playing -> ui.post {
                         btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
                     }
-                    VlcMediaPlayer.Event.Paused,
-                    VlcMediaPlayer.Event.EndReached -> ui.post {
+
+                    VlcMediaPlayer.Event.Paused -> ui.post {
                         btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
                     }
+
+                    VlcMediaPlayer.Event.EndReached -> ui.post {
+                        btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
+                        handleVideoEnded()
+                    }
+
                     VlcMediaPlayer.Event.EncounteredError -> ui.post {
                         Toast.makeText(requireContext(), "VLC no pudo reproducir este video.", Toast.LENGTH_LONG).show()
                         btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
@@ -697,8 +767,7 @@ class PlaybackVideoFragment : Fragment() {
                         }
                     }
 
-                    val movie = currentMovie
-                    val hasSkip = (movie?.skipToSecond ?: 0) > 0
+                    val hasSkip = (currentMovie?.skipToSecond ?: 0) > 0
                     skipIntroButton.visibility =
                         if (hasSkip && posToShow < 15_000) View.VISIBLE else View.GONE
 
@@ -722,12 +791,15 @@ class PlaybackVideoFragment : Fragment() {
 
     override fun onPause() {
         super.onPause()
+        persistLastPlayed("OnPause")
         try { vlcPlayer?.pause() } catch (_: Exception) {}
         btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
     }
 
     override fun onDestroyView() {
         super.onDestroyView()
+
+        persistLastPlayed()
 
         ui.removeCallbacks(hideExitRunnable)
         if (mobileExitEnabled) root.setOnTouchListener(null)

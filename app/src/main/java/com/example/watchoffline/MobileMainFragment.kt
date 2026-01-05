@@ -22,8 +22,15 @@ import java.io.File
 import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.UUID
+import android.content.Context
+
+
 
 class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
+
+    private lateinit var btnToggleSearchRef: ImageButton
+    private lateinit var searchInputRef: EditText
+
 
     companion object {
         private const val TAG = "MobileMainFragment"
@@ -44,6 +51,139 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     private lateinit var rootViewRef: View
     private lateinit var sectionsRecyclerRef: RecyclerView
     private var backVisible = false
+
+    // ✅ LAST PLAYED (SharedPreferences)
+    private val PREFS_NAME = "watchoffline_prefs"
+    private val KEY_LAST_PLAYED = "LAST_PLAYED_VIDEO_URL"
+
+    private fun readLastPlayedUrl(): String? {
+        val u = requireContext()
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_LAST_PLAYED, null)
+            ?.trim()
+
+        Log.d(TAG, "FOCUSDBG_M readLastPlayedUrl=$u")
+        return u?.takeIf { it.isNotEmpty() }
+    }
+
+    private data class FocusTarget(
+        val sectionIndex: Int,  // índice en el RecyclerView vertical (secciones)
+        val itemIndex: Int      // índice dentro de la sección (horizontal)
+    )
+
+    private var lastRenderedSections: List<MobileSection> = emptyList()
+    private var pendingFocusUrl: String? = null
+
+    private fun findLastPlayedTarget(sections: List<MobileSection>, lastUrl: String): FocusTarget? {
+        // sections[0] suele ser "ACCIONES", así que va a quedar naturalmente salteada
+        for (sIndex in sections.indices) {
+            val section = sections[sIndex]
+            if (section.title == "ACCIONES") continue
+
+            for (i in section.items.indices) {
+                val m = section.items[i]
+                if (m.videoUrl == lastUrl) {
+                    return FocusTarget(sectionIndex = sIndex, itemIndex = i)
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * ✅ En Mobile: scrollea hasta la sección del último reproducido
+     * y le pide al adapter que lo “marque” visualmente.
+     */
+    private fun focusLastPlayedIfAnyMobile() {
+        val lastUrl = readLastPlayedUrl()?.trim().orEmpty()
+        if (lastUrl.isBlank()) return
+
+        val rv = if (this::sectionsRecyclerRef.isInitialized) sectionsRecyclerRef
+        else view?.findViewById(R.id.sectionsRecycler) ?: return
+
+        val sections = lastRenderedSections
+        if (sections.isEmpty()) return
+
+        val target = findLastPlayedTarget(sections, lastUrl) ?: run {
+            Log.d(TAG, "FOCUSDBG_M lastUrl not found (quizá filtro/search) url=$lastUrl")
+            return
+        }
+
+        Log.d(TAG, "FOCUSDBG_M TARGET section=${target.sectionIndex} item=${target.itemIndex} url=$lastUrl")
+
+        // ✅ si la lupa tenía foco, se lo sacamos
+        try {
+            if (this::btnToggleSearchRef.isInitialized) btnToggleSearchRef.clearFocus()
+            if (this::searchInputRef.isInitialized) searchInputRef.clearFocus()
+        } catch (_: Throwable) {}
+
+        // 1) scroll vertical a la sección
+        rv.post {
+            rv.scrollToPosition(target.sectionIndex)
+
+            // 2) marcar visual en adapter (si está)
+            (rv.adapter as? MobileSectionsAdapter)?.setSelectedVideoUrl(lastUrl)
+
+            // 3) retry hasta que exista el VH de esa sección y el recycler horizontal
+            var tries = 0
+            fun tryFocus() {
+                tries++
+
+                val sectionVH = rv.findViewHolderForAdapterPosition(target.sectionIndex)
+                val sectionView = sectionVH?.itemView
+                val rowRv = sectionView?.findViewById<RecyclerView>(R.id.sectionRowRecycler)
+
+                if (rowRv == null) {
+                    if (tries < 25) rv.postDelayed({ tryFocus() }, 16)
+                    else Log.e(TAG, "FOCUSDBG_M GIVEUP sectionVH/rowRv")
+                    return
+                }
+
+                // scrollear horizontal al item
+                rowRv.scrollToPosition(target.itemIndex)
+
+                rowRv.postDelayed({
+                    // ahora intentar obtener el VH del item dentro del horizontal
+                    val itemVH = rowRv.findViewHolderForAdapterPosition(target.itemIndex)
+                    val itemView = itemVH?.itemView
+
+                    if (itemView != null) {
+                        // ✅ ESTE es el foco real (hover real en TV/DPAD)
+                        itemView.isFocusable = true
+                        itemView.isFocusableInTouchMode = true
+                        itemView.requestFocus()
+
+                        Log.d(TAG, "FOCUSDBG_M FOCUS_OK section=${target.sectionIndex} item=${target.itemIndex}")
+                    } else {
+                        // si todavía no existe, reintentar un poquito
+                        if (tries < 25) {
+                            rv.postDelayed({ tryFocus() }, 16)
+                        } else {
+                            Log.e(TAG, "FOCUSDBG_M GIVEUP itemVH")
+                        }
+                    }
+                }, 60)
+            }
+
+            rv.postDelayed({ tryFocus() }, 120)
+        }
+    }
+
+
+    override fun onResume() {
+        super.onResume()
+
+        // ✅ al volver del player, intentá apuntar al último reproducido
+        view?.post {
+            // si por layout el foco cae arriba, lo corregimos
+            if (this::sectionsRecyclerRef.isInitialized) {
+                sectionsRecyclerRef.requestFocus()
+            }
+            focusLastPlayedIfAnyMobile()
+        }
+    }
+
+
 
     // =========================
     // ✅ Next/Prev context
@@ -112,8 +252,12 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     // =========================
 
     private fun setupSearchUi(root: View) {
-        val btn = root.findViewById<ImageButton>(R.id.btnToggleSearch)
-        val input = root.findViewById<EditText>(R.id.searchInput)
+        btnToggleSearchRef = root.findViewById(R.id.btnToggleSearch)
+        searchInputRef = root.findViewById(R.id.searchInput)
+
+        val btn = btnToggleSearchRef
+        val input = searchInputRef
+
 
         fun dp(v: Int): Int =
             (v * root.resources.displayMetrics.density).toInt()
@@ -199,6 +343,8 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         rv.layoutManager = LinearLayoutManager(requireContext(), RecyclerView.VERTICAL, false)
 
         val sections = buildSectionsFiltered(currentQuery)
+        lastRenderedSections = sections
+
 
         // ✅ Arma contexto playlist+index para cada item real (no acciones)
         playlistCtxByKey = HashMap()
@@ -249,6 +395,12 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                 }
             }
         )
+
+        // ✅ si hay pendiente (vuelvo del player) intentar enfocar
+        rootView.post {
+            focusLastPlayedIfAnyMobile()
+        }
+
     }
 
     private fun refreshUI() {

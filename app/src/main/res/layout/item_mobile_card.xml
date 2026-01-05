@@ -1,38 +1,53 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/cardRoot"
     android:layout_width="200dp"
     android:layout_height="170dp"
     android:orientation="vertical"
     android:background="@drawable/bg_action_card"
-    android:layout_marginEnd="12dp">
+    android:layout_marginEnd="12dp"
+    android:clipToOutline="true"
+    android:outlineProvider="background">
 
-    <!-- COVER: se mantiene espectacular -->
+    <!-- COVER -->
     <ImageView
         android:id="@+id/cardCover"
         android:layout_width="match_parent"
-        android:layout_height="110dp"
+        android:layout_height="0dp"
+        android:layout_weight="3"
         android:scaleType="centerCrop"
-        android:background="@drawable/bg_action_card" />
+        android:background="@drawable/bg_action_card"
+        android:clipToOutline="true"
+        android:outlineProvider="background" />
 
-    <!-- TÍTULO: hasta 2 líneas reales -->
-    <TextView
-        android:id="@+id/cardTitle"
+    <!-- CONTENEDOR DEL TÍTULO -->
+    <FrameLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:minHeight="46dp"
-        android:paddingStart="10dp"
-        android:paddingEnd="10dp"
-        android:paddingTop="6dp"
-        android:paddingBottom="6dp"
-        android:textColor="@android:color/white"
-        android:textSize="13sp"
-        android:maxLines="2"
-        android:ellipsize="end"
-        android:lineSpacingExtra="1dp"
-        android:gravity="top"
-        android:includeFontPadding="false" />
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <TextView
+            android:id="@+id/cardTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
+
+            android:textColor="@android:color/white"
+            android:textSize="13sp"
+            android:maxLines="2"
+            android:ellipsize="end"
+            android:includeFontPadding="false"
+
+            android:gravity="center"
+            android:textAlignment="center" />
+    </FrameLayout>
 
 </LinearLayout>
+
+
 
 
 

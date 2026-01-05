@@ -1,6 +1,7 @@
 package com.example.watchoffline
 
 import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
@@ -43,6 +44,8 @@ class MainFragment : BrowseSupportFragment() {
     // ✅ Preload cache
     private val preloadedPosterUrls = HashSet<String>()
 
+    private var pendingFocusLastPlayed = false
+
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
@@ -63,13 +66,14 @@ class MainFragment : BrowseSupportFragment() {
 
         preloadPostersForImportedJsons()
 
-        // ❌ BackgroundManager eliminado (no más fondo gigante)
         setupUIElements()
         loadRows()
         setupEventListeners()
 
-        focusFirstItemReal()
+        // ✅ AL INICIAR HOME: como antes, arrancar en ACCIONES
+        mHandler.post { focusFirstItemReal() }
     }
+
 
     override fun onDestroy() {
         super.onDestroy()
@@ -77,10 +81,20 @@ class MainFragment : BrowseSupportFragment() {
         try { smbGateway.stopProxy() } catch (_: Exception) {}
     }
 
+    override fun onResume() {
+        super.onResume()
+        Log.e(TAG, "FOCUSDBG onResume() CALLED adapter=${adapter?.javaClass?.simpleName}")
+
+        mHandler.post {
+            focusLastPlayedIfAny()
+        }
+    }
+
+
     private fun setupUIElements() {
         title = getString(R.string.browse_title)
 
-        // ✅ la clave (tu fix)
+        // ✅ tu fix
         headersState = HEADERS_HIDDEN
         isHeadersTransitionOnBackEnabled = false
 
@@ -148,6 +162,122 @@ class MainFragment : BrowseSupportFragment() {
         }
     }
 
+    // =========================
+    // ✅ FOCUS ÚLTIMO REPRODUCIDO (ESTABLE, sin ViewHolderTask)
+    // =========================
+
+    private fun prefs() =
+        requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    private fun readLastPlayedUrl(): String? {
+        val prefs = requireContext().getSharedPreferences("watchoffline_prefs", Context.MODE_PRIVATE)
+        val u = prefs.getString("LAST_PLAYED_VIDEO_URL", null)?.trim()
+        Log.e(TAG, "READ lastPlayedUrl=$u")
+        return u?.takeIf { it.isNotEmpty() }
+    }
+
+
+    /**
+     * ✅ Enfoca la card del último video reproducido si existe.
+     * Devuelve true si pudo (o dejó el intento en marcha), false si no encontró.
+     *
+     * Implementación estable:
+     * - setSelectedPosition(row)
+     * - buscar VerticalGridView y el ViewHolder real
+     * - luego enfocar HorizontalGridView y el item
+     */
+    private fun focusLastPlayedIfAny(): Boolean {
+        Log.e(TAG, "FOCUSDBG ENTER focusLastPlayedIfAny")
+
+        val lastUrl = readLastPlayedUrl()?.trim()
+        if (lastUrl.isNullOrEmpty()) {
+            Log.e(TAG, "FOCUSDBG no lastUrl")
+            return false
+        }
+
+        val rows = adapter as? ArrayObjectAdapter ?: run {
+            Log.e(TAG, "FOCUSDBG adapter not ArrayObjectAdapter")
+            return false
+        }
+
+        var targetRowIndex = -1
+        var targetColIndex = -1
+
+        for (r in 0 until rows.size()) {
+            val row = rows.get(r) as? ListRow ?: continue
+            val rowAdapter = row.adapter ?: continue
+
+            for (c in 0 until rowAdapter.size()) {
+                val m = rowAdapter.get(c) as? Movie ?: continue
+                if (m.videoUrl == lastUrl) {
+                    targetRowIndex = r
+                    targetColIndex = c
+                    break
+                }
+            }
+            if (targetRowIndex >= 0) break
+        }
+
+        if (targetRowIndex < 0 || targetColIndex < 0) {
+            Log.e(TAG, "FOCUSDBG NOT FOUND url=$lastUrl")
+            return false
+        }
+
+        Log.e(TAG, "FOCUSDBG FOUND row=$targetRowIndex col=$targetColIndex url=$lastUrl")
+
+        // ✅ Esto es lo único que Leanback “garantiza”: te da el holder cuando exista
+        setSelectedPosition(targetRowIndex, false, object : Presenter.ViewHolderTask() {
+
+            private var tries = 0
+
+            override fun run(holder: Presenter.ViewHolder?) {
+                tries++
+
+                if (holder == null) {
+                    Log.e(TAG, "FOCUSDBG holder==null tries=$tries")
+                    if (tries < 30) {
+                        mHandler.postDelayed({ setSelectedPosition(targetRowIndex, false, this) }, 16)
+                    }
+                    return
+                }
+
+                val rowView = holder.view
+                val rowContent = rowView.findViewById<HorizontalGridView>(androidx.leanback.R.id.row_content)
+
+                if (rowContent == null) {
+                    Log.e(TAG, "FOCUSDBG row_content==null tries=$tries")
+                    if (tries < 30) {
+                        mHandler.postDelayed({ setSelectedPosition(targetRowIndex, false, this) }, 16)
+                    }
+                    return
+                }
+
+                // ✅ Scroll + selección horizontal REAL
+                rowContent.scrollToPosition(targetColIndex)
+
+                rowContent.post {
+                    rowContent.setSelectedPosition(targetColIndex)
+                    rowContent.requestFocus()
+
+                    Log.e(
+                        TAG,
+                        "FOCUSDBG APPLIED row=$targetRowIndex col=$targetColIndex selected=${rowContent.selectedPosition}"
+                    )
+                }
+            }
+        })
+
+        return true
+    }
+
+
+
+
+
+
+
+    // =========================
+
     private fun preloadPostersForImportedJsons() {
         val ctx = requireContext()
         val sizePx = (POSTER_PRELOAD_SIZE_DP * ctx.resources.displayMetrics.density).toInt()
@@ -186,17 +316,12 @@ class MainFragment : BrowseSupportFragment() {
 
         jsonDataManager.getImportedJsons().forEach { imported ->
             val rowAdapter = ArrayObjectAdapter(cardPresenter).apply {
-                imported.videos.forEach { v ->
-                    add(v.toMovie())
-                }
+                imported.videos.forEach { v -> add(v.toMovie()) }
             }
 
             rowsAdapter.add(
                 ListRow(
-                    HeaderItem(
-                        imported.fileName.hashCode().toLong(),
-                        prettyTitle(imported.fileName)
-                    ),
+                    HeaderItem(imported.fileName.hashCode().toLong(), prettyTitle(imported.fileName)),
                     rowAdapter
                 )
             )
@@ -205,12 +330,43 @@ class MainFragment : BrowseSupportFragment() {
         adapter = rowsAdapter
     }
 
+    private fun debugDumpRows(limitRows: Int = 6, limitCols: Int = 8) {
+        val rows = adapter as? ArrayObjectAdapter ?: run {
+            Log.e(TAG, "DUMP adapter is not ArrayObjectAdapter, adapter=${adapter?.javaClass?.name}")
+            return
+        }
+
+        Log.e(TAG, "DUMP rowsCount=${rows.size()}")
+
+        for (r in 0 until minOf(rows.size(), limitRows)) {
+            val row = rows.get(r)
+            when (row) {
+                is ListRow -> {
+                    val header = row.headerItem?.name
+                    val ra = row.adapter
+                    Log.e(TAG, "DUMP row[$r] header=$header items=${ra?.size() ?: -1}")
+                    if (ra != null) {
+                        for (c in 0 until minOf(ra.size(), limitCols)) {
+                            val it = ra.get(c)
+                            if (it is Movie) {
+                                Log.e(TAG, "  - col[$c] Movie url=${it.videoUrl}")
+                            } else {
+                                Log.e(TAG, "  - col[$c] type=${it?.javaClass?.name}")
+                            }
+                        }
+                    }
+                }
+                else -> Log.e(TAG, "DUMP row[$r] type=${row?.javaClass?.name}")
+            }
+        }
+    }
+
 
     private fun VideoItem.toMovie() = Movie(
         title = title,
         videoUrl = videoSrc,
         cardImageUrl = imgSml,
-        backgroundImageUrl = imgBig, // queda, pero NO se usa para fondo
+        backgroundImageUrl = imgBig,
         skipToSecond = skipToSecond,
         description = "Importado desde un JSON"
     )
@@ -221,9 +377,18 @@ class MainFragment : BrowseSupportFragment() {
         }
         onItemViewClickedListener = ItemViewClickedListener()
 
-        // ✅ NO cargar fondo grande nunca: dejamos selected listener como no-op
-        onItemViewSelectedListener = OnItemViewSelectedListener { _, _, _, _ -> }
+        // ✅ DEBUG: ver qué card queda realmente seleccionada (esto te dice la verdad)
+        onItemViewSelectedListener = OnItemViewSelectedListener { _, item, _, row ->
+            val rowTitle = (row as? ListRow)?.headerItem?.name
+            val m = item as? Movie
+
+            Log.d(
+                TAG,
+                "FOCUSDBG SELECTED rowTitle=$rowTitle item=${item?.javaClass?.simpleName} url=${m?.videoUrl}"
+            )
+        }
     }
+
 
     private inner class ItemViewClickedListener : OnItemViewClickedListener {
         override fun onItemClicked(
@@ -235,17 +400,9 @@ class MainFragment : BrowseSupportFragment() {
             Log.d(TAG, "CLICK Search/TV item=${item::class.java.name} row=${row::class.java.name} view=${itemViewHolder.view::class.java.name}")
 
             when (item) {
-                is Movie -> {
-                    Log.d(TAG, "CLICK Movie title='${item.title}' url='${item.videoUrl}'")
-                    navigateToDetails(itemViewHolder, item, row)
-                }
-                is String -> {
-                    Log.d(TAG, "CLICK String='$item'")
-                    handleStringAction(item)
-                }
-                else -> {
-                    Log.w(TAG, "CLICK unhandled type=${item::class.java.name} item=$item")
-                }
+                is Movie -> navigateToDetails(itemViewHolder, item, row)
+                is String -> handleStringAction(item)
+                else -> Log.w(TAG, "CLICK unhandled type=${item::class.java.name} item=$item")
             }
         }
 
@@ -254,7 +411,6 @@ class MainFragment : BrowseSupportFragment() {
             movie: Movie,
             row: Row
         ) {
-            // ✅ playlist real = fila actual
             val listRow = row as? ListRow
             val adapter = listRow?.adapter
 
@@ -269,15 +425,10 @@ class MainFragment : BrowseSupportFragment() {
             val index = playlist.indexOfFirst { it.videoUrl == movie.videoUrl }
                 .let { if (it >= 0) it else 0 }
 
-            Log.e(
-                "MainFragment",
-                "NAV movie=${movie.videoUrl} playlistSize=${playlist.size} index=$index"
-            )
+            Log.e(TAG, "NAV movie=${movie.videoUrl} playlistSize=${playlist.size} index=$index")
 
             val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
                 putExtra(DetailsActivity.MOVIE, movie)
-
-                // ✅ solo si es playlist real
                 if (playlist.size > 1) {
                     putExtra(DetailsActivity.EXTRA_PLAYLIST, playlist)
                     putExtra(DetailsActivity.EXTRA_INDEX, index)
@@ -286,6 +437,8 @@ class MainFragment : BrowseSupportFragment() {
 
             val cardView = itemViewHolder.view as? ImageCardView
             val shared = cardView?.mainImageView
+
+            pendingFocusLastPlayed = true
 
             if (shared != null) {
                 val options = ActivityOptionsCompat.makeSceneTransitionAnimation(
@@ -298,7 +451,6 @@ class MainFragment : BrowseSupportFragment() {
                 startActivity(intent)
             }
         }
-
 
         private fun handleStringAction(item: String) {
             when (item) {
@@ -553,8 +705,11 @@ class MainFragment : BrowseSupportFragment() {
         jsonDataManager.loadData(requireContext())
         preloadPostersForImportedJsons()
         loadRows()
-        // ✅ sin background timer
+
+        // ✅ en refresh normal, volver a acciones
+        mHandler.post { focusFirstItemReal() }
     }
+
 
     private inner class GridItemPresenter : Presenter() {
 
@@ -633,5 +788,8 @@ class MainFragment : BrowseSupportFragment() {
         private const val TAG = "MainFragment"
         private const val POSTER_PRELOAD_SIZE_DP = 180
         private const val DEBUG_LOGS = false
+
+        private const val PREFS_NAME = "watchoffline_prefs"
+        private const val EXTRA_LAST_PLAYED_URL = "LAST_PLAYED_VIDEO_URL"
     }
 }
