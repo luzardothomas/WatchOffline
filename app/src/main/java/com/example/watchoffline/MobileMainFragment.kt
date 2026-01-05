@@ -350,7 +350,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                     "__action_random_delete_all__" -> { runRandomDeleteAll(); return@MobileSectionsAdapter }
                     "__action_language_settings__" -> {
                         writeLastPlayed("__action_language_settings__")
-                        startActivity(Intent(requireContext(), LanguageSettings::class.java))
+                        startActivity(Intent(requireContext(), LanguageSettingsMobileActivity::class.java))
                         return@MobileSectionsAdapter
                     }
 

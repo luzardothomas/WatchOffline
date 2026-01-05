@@ -67,7 +67,11 @@
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
         <activity
-            android:name=".LanguageSettings"
+            android:name=".LanguageSettingsTvActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".LanguageSettingsMobileActivity"
             android:exported="false" />
 
 

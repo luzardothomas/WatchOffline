@@ -1,11 +1,12 @@
 package com.example.watchoffline
 
 import android.content.Context
+import android.net.Uri
 import android.os.Bundle
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.widget.HorizontalScrollView
-import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -13,7 +14,7 @@ import android.widget.Toast
 import androidx.fragment.app.FragmentActivity
 import java.util.Locale
 
-class LanguageSettings : FragmentActivity() {
+class LanguageSettingsMobileActivity : FragmentActivity() {
 
     companion object {
         private const val PREFS_NAME = "watchoffline_prefs"
@@ -22,23 +23,23 @@ class LanguageSettings : FragmentActivity() {
 
     data class Opt(val key: String, val label: String)
 
-    // Opciones (podés sumar más)
+    // ✅ Labels completos
     private val audioOptions = listOf(
-        Opt("es_lat", "ESPAÑOL LATINO"),
+        Opt("es_lat", "ESPAÑOL"),
         Opt("en", "INGLÉS"),
         Opt("ja", "JAPONÉS"),
     )
 
+    // ✅ Forzamos "DESHABILITADO" a 2 líneas para que ENTRE
     private val subsOptions = listOf(
-        Opt("disable", "DISABLE"),
-        Opt("es_lat", "ESPAÑOL LATINO"),
+        Opt("disable", "DESHABILITADO"),
+        Opt("es_lat", "ESPAÑOL"),
         Opt("en", "INGLÉS"),
     )
 
-
     data class Row(
-        val displayTitle: String, // lo que se ve (pretty)
-        val scopeKey: String      // lo que se guarda (estable)
+        val displayTitle: String,
+        val scopeKey: String
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -51,13 +52,9 @@ class LanguageSettings : FragmentActivity() {
         }
         scroll.addView(root)
 
-        // ===== Top bar: Volver + título =====
         root.addView(buildTopBar())
-
-        // ===== Header (tabla) =====
         root.addView(buildHeaderRow())
 
-        // ===== Contenido =====
         val rows = buildRowsFromImportedJsons()
         rows.forEach { r ->
             root.addView(buildDataRow(r))
@@ -71,6 +68,47 @@ class LanguageSettings : FragmentActivity() {
     // UI
     // -------------------------
 
+    private fun vDivider(): View {
+        return View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(1), dp(44)).apply {
+                marginStart = dp(8)
+                marginEnd = dp(8)
+            }
+            alpha = 0.25f
+            setBackgroundColor(0xFF888888.toInt())
+        }
+    }
+
+
+    /** Contenedor centrado para headers (centra REAL dentro del ancho asignado) */
+    private fun headerCell(textStr: String): View {
+        val box = android.widget.FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val tv = TextView(this).apply {
+            text = textStr
+            textSize = 13f
+            alpha = 0.9f
+            gravity = Gravity.CENTER
+            textAlignment = View.TEXT_ALIGNMENT_CENTER
+        }
+
+        box.addView(
+            tv,
+            android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply { gravity = Gravity.CENTER }
+        )
+
+        return box
+    }
+
+
     private fun buildTopBar(): View {
         val bar = android.widget.FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(
@@ -80,7 +118,6 @@ class LanguageSettings : FragmentActivity() {
             setPadding(0, 0, 0, dp(14))
         }
 
-        // SALIR (izquierda)
         val btnExit = TextView(this).apply {
             text = "SALIR"
             textSize = 14f
@@ -92,24 +129,19 @@ class LanguageSettings : FragmentActivity() {
             setOnClickListener { finish() }
         }
 
-
         bar.addView(
             btnExit,
             android.widget.FrameLayout.LayoutParams(
                 android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
                 android.widget.FrameLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                gravity = Gravity.START or Gravity.CENTER_VERTICAL
-            }
+            ).apply { gravity = Gravity.START or Gravity.CENTER_VERTICAL }
         )
 
-        // Título (centro real)
         val title = TextView(this).apply {
             text = "CONFIGURACIÓN DE IDIOMAS"
             textSize = 20f
             gravity = Gravity.CENTER
             textAlignment = View.TEXT_ALIGNMENT_CENTER
-            // Evita que el botón “SALIR” lo tape visualmente si el título es largo
             setPadding(dp(70), 0, dp(70), 0)
         }
 
@@ -118,54 +150,36 @@ class LanguageSettings : FragmentActivity() {
             android.widget.FrameLayout.LayoutParams(
                 android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
                 android.widget.FrameLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                gravity = Gravity.CENTER
-            }
+            ).apply { gravity = Gravity.CENTER }
         )
 
         return bar
     }
 
-
-
     private fun buildHeaderRow(): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(8))
+            setPadding(0, 0, 0, dp(10))
         }
 
-        // TÍTULO
-        row.addView(TextView(this).apply {
-            text = "TÍTULO"
-            textSize = 13f
-            alpha = 0.9f
-            gravity = Gravity.CENTER
-        }, LinearLayout.LayoutParams(dp(160), LinearLayout.LayoutParams.WRAP_CONTENT))
+        fun header(text: String, weight: Float) =
+            TextView(this).apply {
+                this.text = text
+                textSize = 13f
+                alpha = 0.9f
+                gravity = Gravity.CENTER
+                textAlignment = View.TEXT_ALIGNMENT_CENTER
+            }.also {
+                it.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, weight)
+            }
 
-        // AUDIO
-        row.addView(TextView(this).apply {
-            text = "AUDIO"
-            textSize = 13f
-            alpha = 0.9f
-            gravity = Gravity.CENTER
-        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-
-        // SUBTÍTULOS
-        row.addView(TextView(this).apply {
-            text = "SUBTÍTULOS"
-            textSize = 13f
-            alpha = 0.9f
-            gravity = Gravity.CENTER
-        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-
-        row.addView(TextView(this).apply {
-            text = "CAMBIOS"
-            textSize = 13f
-            alpha = 0.9f
-            gravity = Gravity.CENTER
-        }, LinearLayout.LayoutParams(dp(92), LinearLayout.LayoutParams.WRAP_CONTENT))
-
+        row.addView(header("TÍTULO", 1.15f))
+        row.addView(header("AUDIO", 1.15f))
+        row.addView(header("SUBTÍTULOS", 1.45f))
+        row.addView(header("CAMBIOS", 0f).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(110), LinearLayout.LayoutParams.WRAP_CONTENT)
+        })
 
         return row
     }
@@ -178,43 +192,35 @@ class LanguageSettings : FragmentActivity() {
             setPadding(0, dp(10), 0, dp(10))
         }
 
-        // TÍTULO
+        // ===== TÍTULO =====
         row.addView(TextView(this).apply {
             text = r.displayTitle
             textSize = 14f
-            gravity = Gravity.CENTER                // ✅ centro dentro de su celda
+            gravity = Gravity.CENTER
             textAlignment = View.TEXT_ALIGNMENT_CENTER
-        }, LinearLayout.LayoutParams(dp(160), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-            gravity = Gravity.CENTER_VERTICAL        // ✅ centro vertical respecto a la fila
-        })
+            maxLines = 2
+            ellipsize = null
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.15f))
 
+        row.addView(vDivider())
 
-        // AUDIO
+        // ===== AUDIO =====
         row.addView(
-            buildRadioGrid(scopeKey = r.scopeKey, kind = "audio", options = audioOptions)
-                .apply {
-                    layoutParams = LinearLayout.LayoutParams(
-                        0,
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                        1f
-                    )
-                }
+            buildRadioGrid(r.scopeKey, "audio", audioOptions),
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.15f)
         )
 
-        // SUBTÍTULOS
+        row.addView(vDivider()) // 🔹 separador AUDIO | SUBTÍTULOS
+
+        // ===== SUBTÍTULOS =====
         row.addView(
-            buildRadioGrid(scopeKey = r.scopeKey, kind = "subs", options = subsOptions)
-                .apply {
-                    layoutParams = LinearLayout.LayoutParams(
-                        0,
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                        1f
-                    )
-                }
+            buildRadioGrid(r.scopeKey, "subs", subsOptions),
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.45f)
         )
 
-        // ✅ BOTÓN VALIDAR (AL FINAL)
+        row.addView(vDivider())
 
+        // ===== BOTÓN VALIDAR / VALIDADO =====
         val validated = isValidated(r.scopeKey)
 
         val btnScan = TextView(this).apply {
@@ -222,11 +228,15 @@ class LanguageSettings : FragmentActivity() {
             textSize = 12f
             gravity = Gravity.CENTER
             textAlignment = View.TEXT_ALIGNMENT_CENTER
-            setPadding(dp(14), dp(6), dp(14), dp(6))
+            setPadding(dp(16), dp(8), dp(16), dp(8))
             background = getDrawable(R.drawable.bg_action_button)
+
             isClickable = !validated
             isFocusable = !validated
             alpha = if (validated) 0.45f else 1f
+
+            setSingleLine(true)
+            ellipsize = TextUtils.TruncateAt.END
 
             setOnClickListener {
                 if (!validated) runScanForRow(r)
@@ -235,7 +245,7 @@ class LanguageSettings : FragmentActivity() {
 
         row.addView(
             btnScan,
-            LinearLayout.LayoutParams(dp(92), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            LinearLayout.LayoutParams(dp(110), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 marginStart = dp(8)
             }
@@ -243,6 +253,7 @@ class LanguageSettings : FragmentActivity() {
 
         return row
     }
+
 
     private fun runScanForRow(r: Row) {
         val videoUrl = pickRepresentativeUrlForScope(r.scopeKey)
@@ -259,15 +270,13 @@ class LanguageSettings : FragmentActivity() {
                 saveAvailablePrefs(r.scopeKey, "audio", audioPrefs)
                 saveAvailablePrefs(r.scopeKey, "subs", subsPrefs)
 
-                // ✅ si lo guardado ya no es válido (ej JAPONES), vuelve a ES_LAT / DISABLE
                 enforceCurrentSelection(r.scopeKey, "audio")
                 enforceCurrentSelection(r.scopeKey, "subs")
 
-                recreate() // refresca la pantalla completa (simple)
+                recreate()
             },
-            onError = { _ ->
-                // opcional: toast
-                // Toast.makeText(this, it, Toast.LENGTH_LONG).show()
+            onError = {
+                // opcional: Toast.makeText(this, it, Toast.LENGTH_LONG).show()
             }
         )
     }
@@ -277,9 +286,6 @@ class LanguageSettings : FragmentActivity() {
         dm.loadData(this)
         val imported = dm.getImportedJsons()
 
-        // scopeKey ejemplo:
-        // GROUP::<rawFileName>
-        // SEASON::<rawFileName>::S01
         if (scopeKey.startsWith("GROUP::")) {
             val raw = scopeKey.removePrefix("GROUP::")
             val pack = imported.firstOrNull { it.fileName.trim() == raw.trim() } ?: return null
@@ -305,7 +311,6 @@ class LanguageSettings : FragmentActivity() {
         return null
     }
 
-    /** Devuelve "S01", "S02"... o null */
     private fun detectSeasonFromTitle(title: String): String? {
         val t = title.trim()
         val reSxx = Regex("""\bS(\d{1,2})\b""", RegexOption.IGNORE_CASE)
@@ -313,10 +318,14 @@ class LanguageSettings : FragmentActivity() {
         val reX = Regex("""\b(\d{1,2})x(\d{1,2})\b""", RegexOption.IGNORE_CASE)
         val reTemporada = Regex("""\b(temporada|season)\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE)
 
-        reSxxExx.find(t)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return "S" + it.toString().padStart(2, '0') }
-        reX.find(t)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return "S" + it.toString().padStart(2, '0') }
-        reTemporada.find(t)?.groupValues?.getOrNull(2)?.toIntOrNull()?.let { return "S" + it.toString().padStart(2, '0') }
-        reSxx.find(t)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return "S" + it.toString().padStart(2, '0') }
+        reSxxExx.find(t)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?.let { return "S" + it.toString().padStart(2, '0') }
+        reX.find(t)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?.let { return "S" + it.toString().padStart(2, '0') }
+        reTemporada.find(t)?.groupValues?.getOrNull(2)?.toIntOrNull()
+            ?.let { return "S" + it.toString().padStart(2, '0') }
+        reSxx.find(t)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?.let { return "S" + it.toString().padStart(2, '0') }
 
         return null
     }
@@ -337,15 +346,8 @@ class LanguageSettings : FragmentActivity() {
         if (finalKey != current) savePref(k, finalKey)
     }
 
-    /**
-     * “Grid” horizontal: cada opción es una celda vertical:
-     *  LABEL
-     *  (radio)
-     *
-     * Alinea perfecto radio debajo del label.
-     * Selección única implementada manualmente (simple y confiable).
-     */
     private fun buildRadioGrid(scopeKey: String, kind: String, options: List<Opt>): View {
+
         val hsv = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             isFillViewport = true
@@ -359,16 +361,16 @@ class LanguageSettings : FragmentActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
+            setPadding(0, 0, 0, 0)
         }
         hsv.addView(wrap)
 
         fun prefKey() = "$LANG_PREFIX$scopeKey::$kind"
         val k = prefKey()
 
-        // ✅ si no existe pref guardado, guardamos el default una sola vez
         if (loadPref(k) == null) {
             savePref(k, defaultValueFor(kind)) // audio=es_lat, subs=disable
         }
@@ -376,21 +378,30 @@ class LanguageSettings : FragmentActivity() {
         var selected = loadPref(k)?.trim().orEmpty()
         if (selected.isBlank()) selected = defaultValueFor(kind)
 
-        // ✅ disponibles reales (si null => todavía no se validó, no bloqueamos nada)
         val available: Set<String>? = loadAvailablePrefs(scopeKey, kind)
+
         fun isAllowed(key: String): Boolean {
             if (available == null) return true
             if (kind == "subs" && key == "disable") return true
             return available.contains(key)
         }
 
-        // Si ya hay available y lo seleccionado no está permitido → fallback inmediato
         if (available != null && !isAllowed(selected)) {
             selected = defaultValueFor(kind)
             savePref(k, selected)
         }
 
-        // Dots (radio visual)
+        // -------------------------
+        // ✅ Calcular ancho de celda según el texto más largo
+        // -------------------------
+        val measureTv = TextView(this).apply { textSize = 11f }
+        val maxTextPx = options.maxOfOrNull { opt ->
+            measureTv.paint.measureText(opt.label)
+        } ?: 0f
+
+        // padding lateral + un mínimo razonable
+        val cellWidthPx = (maxTextPx + dp(18)).toInt().coerceAtLeast(dp(78))
+
         val dots = ArrayList<android.widget.ImageView>(options.size)
         val labels = ArrayList<TextView>(options.size)
 
@@ -399,18 +410,15 @@ class LanguageSettings : FragmentActivity() {
                 val allowed = isAllowed(opt.key)
                 val on = (opt.key == selected)
 
-                // icono on/off
                 dots[idx].setImageResource(
                     if (on) android.R.drawable.radiobutton_on_background
                     else android.R.drawable.radiobutton_off_background
                 )
 
-                // look "apagado" si está bloqueado
                 val a = if (allowed) 1.0f else 0.25f
                 dots[idx].alpha = a
                 labels[idx].alpha = a
 
-                // bloquear click si no está permitido
                 dots[idx].isEnabled = allowed
                 dots[idx].isClickable = allowed
                 labels[idx].isEnabled = allowed
@@ -422,10 +430,10 @@ class LanguageSettings : FragmentActivity() {
             val fallback = defaultValueFor(kind)
 
             val finalKey = when {
-                available == null -> requestedKey                // no validado todavía, dejalo elegir
+                available == null -> requestedKey
                 kind == "subs" && requestedKey == "disable" -> "disable"
                 isAllowed(requestedKey) -> requestedKey
-                else -> fallback                                 // ✅ si no existe, vuelve al default
+                else -> fallback
             }
 
             if (selected == finalKey) {
@@ -442,19 +450,38 @@ class LanguageSettings : FragmentActivity() {
             val cell = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
-                setPadding(dp(10), dp(4), dp(10), dp(4))
+                setPadding(dp(6), dp(4), dp(6), dp(4))
+                layoutParams = LinearLayout.LayoutParams(
+                    cellWidthPx,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
             }
 
             val lbl = TextView(this).apply {
                 text = opt.label
-                textSize = 12f
+                textSize = 11f
                 gravity = Gravity.CENTER
                 textAlignment = View.TEXT_ALIGNMENT_CENTER
+
+                // ✅ NO truncar a "ESP..."
+                ellipsize = null
+                setSingleLine(false)
+                maxLines = 2
+                setHorizontallyScrolling(false)
+
+                // ✅ evita cortes raros
+                breakStrategy = android.text.Layout.BREAK_STRATEGY_SIMPLE
+                hyphenationFrequency = android.text.Layout.HYPHENATION_FREQUENCY_NONE
+
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
             }
 
             val dot = android.widget.ImageView(this).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(24), dp(24)).apply {
-                    topMargin = dp(6)
+                layoutParams = LinearLayout.LayoutParams(dp(22), dp(22)).apply {
+                    topMargin = dp(3)
                     gravity = Gravity.CENTER_HORIZONTAL
                 }
                 setImageResource(android.R.drawable.radiobutton_off_background)
@@ -470,20 +497,18 @@ class LanguageSettings : FragmentActivity() {
 
             cell.addView(lbl)
             cell.addView(dot)
+
             wrap.addView(cell)
         }
 
-        // ✅ asegurar estado inicial (incluye bloqueo visual)
         applyState()
-
         return hsv
     }
+
 
     private fun isValidated(scopeKey: String): Boolean {
         return loadAvailablePrefs(scopeKey, "audio") != null
     }
-
-
 
     private fun divider(): View {
         return View(this).apply {
@@ -505,7 +530,6 @@ class LanguageSettings : FragmentActivity() {
     private fun defaultValueFor(kind: String): String {
         return if (kind == "audio") "es_lat" else "disable"
     }
-
 
     private fun loadPref(k: String): String? {
         val p = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -534,10 +558,8 @@ class LanguageSettings : FragmentActivity() {
             val rawFileName = pack.fileName.trim()
             val displayBase = prettyTitle(rawFileName)
 
-            // GROUP (todo el JSON)
             rows.add(Row(displayBase, "GROUP::$rawFileName"))
 
-            // SEASONS detectadas por títulos
             val seasons = detectSeasons(pack.videos.map { it.title })
             seasons.sorted().forEach { s ->
                 val ss = s.toString().padStart(2, '0')
@@ -562,7 +584,6 @@ class LanguageSettings : FragmentActivity() {
         }.trim()
     }
 
-
     private fun detectSeasons(titles: List<String>): Set<Int> {
         val out = linkedSetOf<Int>()
 
@@ -571,9 +592,9 @@ class LanguageSettings : FragmentActivity() {
         val reTemporada = Regex("""\b(temporada|season)\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE)
 
         for (t in titles) {
-            reSxxExx.find(t)?.let { m -> out.add(m.groupValues[1].toIntOrNull() ?: return@let) }
-            reX.find(t)?.let { m -> out.add(m.groupValues[1].toIntOrNull() ?: return@let) }
-            reTemporada.find(t)?.let { m -> out.add(m.groupValues[2].toIntOrNull() ?: return@let) }
+            reSxxExx.find(t)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { out.add(it) }
+            reX.find(t)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { out.add(it) }
+            reTemporada.find(t)?.groupValues?.getOrNull(2)?.toIntOrNull()?.let { out.add(it) }
         }
 
         return out
@@ -581,10 +602,6 @@ class LanguageSettings : FragmentActivity() {
 
     private fun trackListKey(scopeKey: String, kind: String) = "TRACKLIST::$scopeKey::$kind"
 
-    /**
-     * Guarda qué prefs están realmente disponibles para este scope.
-     * Ej: audio: ["es_lat","en"]  subs: ["disable","es_lat"]
-     */
     private fun saveAvailablePrefs(scopeKey: String, kind: String, prefs: Set<String>) {
         val k = trackListKey(scopeKey, kind)
         val joined = prefs.joinToString("|")
@@ -602,10 +619,13 @@ class LanguageSettings : FragmentActivity() {
         return out.ifEmpty { null }
     }
 
-
     data class TrackOpt(val id: Int, val name: String)
 
-    private fun scanTracksWithVlc(videoUrl: String, onDone: (List<TrackOpt>, List<TrackOpt>) -> Unit, onError: (String) -> Unit) {
+    private fun scanTracksWithVlc(
+        videoUrl: String,
+        onDone: (List<TrackOpt>, List<TrackOpt>) -> Unit,
+        onError: (String) -> Unit
+    ) {
         Thread {
             try {
                 val fixedUrl = when {
@@ -628,7 +648,7 @@ class LanguageSettings : FragmentActivity() {
 
                 val player = org.videolan.libvlc.MediaPlayer(lib)
 
-                val media = org.videolan.libvlc.Media(lib, android.net.Uri.parse(fixedUrl)).apply {
+                val media = org.videolan.libvlc.Media(lib, Uri.parse(fixedUrl)).apply {
                     setHWDecoderEnabled(false, false)
                     addOption(":http-reconnect=true")
                     addOption(":http-user-agent=WatchOffline")
@@ -638,7 +658,6 @@ class LanguageSettings : FragmentActivity() {
 
                 player.play()
 
-                // esperar tracks con reintentos (máx ~5s)
                 var tries = 0
                 var audio = emptyArray<org.videolan.libvlc.MediaPlayer.TrackDescription>()
                 var subs = emptyArray<org.videolan.libvlc.MediaPlayer.TrackDescription>()
@@ -650,8 +669,8 @@ class LanguageSettings : FragmentActivity() {
 
                     val hasAudio = audio.any { it.id != -1 }
                     val hasSubs = subs.isNotEmpty()
-
                     if (hasAudio || hasSubs) break
+
                     Thread.sleep(500)
                 }
 
@@ -670,9 +689,7 @@ class LanguageSettings : FragmentActivity() {
                 try { player.release() } catch (_: Exception) {}
                 try { lib.release() } catch (_: Exception) {}
 
-                runOnUiThread {
-                    onDone(audioOpts, subsOpts)
-                }
+                runOnUiThread { onDone(audioOpts, subsOpts) }
             } catch (e: Exception) {
                 runOnUiThread { onError(e.message ?: "Error escaneando tracks") }
             }
@@ -694,10 +711,9 @@ class LanguageSettings : FragmentActivity() {
 
     private fun inferSubsPrefsFromTrackNames(names: List<String>): Set<String> {
         val out = linkedSetOf<String>()
-        out.add("disable") // siempre existe la opción disable
+        out.add("disable")
 
         val n = names.map { it.lowercase(Locale.ROOT) }
-
         fun anyContains(vararg keys: String) = n.any { s -> keys.any { k -> s.contains(k) } }
 
         if (anyContains("español", "espanol", "spanish", "castellano", "spa")) out.add("es_lat")
