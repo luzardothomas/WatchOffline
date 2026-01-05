@@ -25,7 +25,6 @@ import java.util.UUID
 import android.content.Context
 
 
-
 class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
     private lateinit var btnToggleSearchRef: ImageButton
@@ -72,7 +71,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     )
 
     private var lastRenderedSections: List<MobileSection> = emptyList()
-    private var pendingFocusUrl: String? = null
 
     private fun findLastPlayedTarget(sections: List<MobileSection>, lastUrl: String): FocusTarget? {
         // sections[0] suele ser "ACCIONES", así que va a quedar naturalmente salteada
@@ -89,6 +87,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         }
         return null
     }
+
 
     /**
      * ✅ En Mobile: scrollea hasta la sección del último reproducido

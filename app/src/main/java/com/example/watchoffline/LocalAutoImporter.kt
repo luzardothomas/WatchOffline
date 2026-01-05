@@ -10,7 +10,6 @@ import java.net.URL
 import java.net.URLEncoder
 import androidx.annotation.Keep
 
-
 @Keep
 private data class ApiCover(
     @SerializedName("type") val type: String? = null,
@@ -19,10 +18,13 @@ private data class ApiCover(
     @SerializedName("season") val season: Int? = null,
     @SerializedName("episode") val episode: Int? = null,
     @SerializedName("skipSeconds") val skipToSecond: Int? = null,
+
+    // ✅ NUEVO (para delay de intro)
+    @SerializedName("delaySeconds") val delaySkip: Int? = null,
+
     @SerializedName("file") val file: String? = null,
     @SerializedName("url") val url: String? = null
 )
-
 
 /**
  * Auto-import desde el contenido LOCAL del dispositivo,
@@ -51,6 +53,7 @@ class LocalAutoImporter(
         val title: String,
         val img: String,
         val skip: Int,
+        val delay: Int,       // ✅ NUEVO
         val videoSrc: String  // URL a tu server local
     )
 
@@ -79,14 +82,14 @@ class LocalAutoImporter(
                 }
                 Log.d(tag, "Roots: $rootsMsg")
 
-                // 1) Buscar videos (dedupe por path)
+                // 1) Buscar videos (dedupe por path normalizado/canonical)
                 val filesSet = linkedSetOf<String>()
                 val perRootCounts = mutableListOf<String>()
 
                 for (dir in rootDirs) {
                     val found = listLocalVideos(dir)
                     perRootCounts.add("${dir.path}: ${found.size}")
-                    found.forEach { filesSet.add(it) }
+                    found.forEach { filesSet.add(normalizeAbsPath(it)) }
                 }
 
                 Log.d(tag, "Scan counts: ${perRootCounts.joinToString(" | ")}")
@@ -101,6 +104,7 @@ class LocalAutoImporter(
 
                 // 2) Items crudos
                 val rawItems = mutableListOf<RawItem>()
+
                 for (absPath in filesSet) {
                     val q = buildQueryForPathSmart(absPath)
                     val cover = fetchCoverFromApiCached(q)
@@ -110,11 +114,17 @@ class LocalAutoImporter(
                     // ✅ TÍTULO: para series el capítulo lo manda el NOMBRE DEL ARCHIVO (API solo fallback)
                     val displayTitle = buildDisplayTitleForItem(absPath, cover)
 
+                    val isSeries = (cover?.type?.lowercase() == "series")
+
                     // ✅ SKIP:
                     // - Movies: siempre 0
                     // - Series: usar lo que viene de la API (skipSeconds -> skipToSecond)
-                    val skipFinal =
-                        if (cover?.type?.lowercase() == "series") (cover.skipToSecond ?: 0) else 0
+                    val skipFinal = if (isSeries) (cover?.skipToSecond ?: 0) else 0
+
+                    // ✅ DELAY:
+                    // - Movies: siempre 0
+                    // - Series: usar lo que viene de la API (delaySeconds -> delaySkip)
+                    val delayFinal = if (isSeries) (cover?.delaySkip ?: 0) else 0
 
                     rawItems.add(
                         RawItem(
@@ -122,17 +132,23 @@ class LocalAutoImporter(
                             title = displayTitle,
                             img = imgUrl,
                             skip = skipFinal,
+                            delay = delayFinal,
                             // ✅ BackgroundServer actual decodifica session.uri y acepta paths absolutos
                             videoSrc = "http://127.0.0.1:$serverPort${encodePathForUrl(absPath)}"
                         )
                     )
                 }
 
+                // ✅ DEDUPE FINAL por videoSrc (evita duplicados en TV por mounts/aliases)
+                val uniqueBySrc = LinkedHashMap<String, RawItem>(rawItems.size)
+                for (ri in rawItems) uniqueBySrc.putIfAbsent(ri.videoSrc, ri)
+                val rawItemsUnique = uniqueBySrc.values.toList()
+
                 // ================= SERIES vs MOVIES =================
                 val seriesMap = linkedMapOf<Pair<String, Int>, MutableList<RawItem>>()
                 val movies = mutableListOf<RawItem>()
 
-                for (ri in rawItems) {
+                for (ri in rawItemsUnique) {
                     val parts = ri.path.replace("\\", "/")
                         .split("/")
                         .filter { it.isNotBlank() }
@@ -163,9 +179,8 @@ class LocalAutoImporter(
                             { it.path.lowercase() }
                         )
                     ).map { r ->
-                        // ✅ imgBig/imgSml NO vacíos (siempre placeholder si falta)
-                        VideoItem(r.title, r.skip, 0, r.img, r.img, r.videoSrc)
-
+                        // ✅ delay incluido
+                        VideoItem(r.title, r.skip, r.delay, r.img, r.img, r.videoSrc)
                     }
 
                     previews.add(
@@ -193,7 +208,8 @@ class LocalAutoImporter(
                             { it.path.lowercase() }
                         )
                     ).map { r ->
-                        VideoItem(r.title, r.skip, 0, r.img, r.img, r.videoSrc)
+                        // movies: delay=0 (r.delay ya viene 0 igual)
+                        VideoItem(r.title, r.skip, r.delay, r.img, r.img, r.videoSrc)
                     }
 
                     val fileName =
@@ -234,6 +250,7 @@ class LocalAutoImporter(
             }
         }.start()
     }
+
 
     // =========================
     // PLACEHOLDER local
@@ -308,7 +325,7 @@ class LocalAutoImporter(
                 } else {
                     val ext = f.name.substringAfterLast(".", "").lowercase()
                     if (ext in videoExt) {
-                        out.add(f.absolutePath.replace("\\", "/"))
+                        out.add(normalizeAbsPath(f.absolutePath))
                     }
                 }
             }
@@ -372,6 +389,15 @@ class LocalAutoImporter(
 
     private fun pad2(n: Int): String = n.toString().padStart(2, '0')
     private fun pad3(n: Int): String = n.toString().padStart(3, '0')
+
+    private fun normalizeAbsPath(p: String): String {
+        return try {
+            File(p).canonicalPath.replace("\\", "/")
+        } catch (_: Exception) {
+            p.replace("\\", "/")
+        }
+    }
+
 
     private fun normalizeName(s: String): String =
         s.trim().replace('_', ' ')
@@ -512,6 +538,9 @@ class LocalAutoImporter(
         return previews.filter { it.fileName !in existing }
     }
 
+    private fun fileBaseName(path: String): String =
+        path.replace("\\", "/").substringAfterLast("/").substringBeforeLast(".")
+
     private fun prettyCap(ep: Int?): String? {
         if (ep == null || ep <= 0) return null
         return "Cap ${ep.toString().padStart(2, '0')}"
@@ -521,9 +550,6 @@ class LocalAutoImporter(
         if (season == null || season <= 0) return null
         return "T${season.toString().padStart(2, '0')}"
     }
-
-    private fun fileBaseName(path: String): String =
-        path.replace("\\", "/").substringAfterLast("/").substringBeforeLast(".")
 
     /**
      * ✅ Reglas:

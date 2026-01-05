@@ -166,8 +166,6 @@ class MainFragment : BrowseSupportFragment() {
     // ✅ FOCUS ÚLTIMO REPRODUCIDO (ESTABLE, sin ViewHolderTask)
     // =========================
 
-    private fun prefs() =
-        requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     private fun readLastPlayedUrl(): String? {
         val prefs = requireContext().getSharedPreferences("watchoffline_prefs", Context.MODE_PRIVATE)
@@ -288,9 +286,6 @@ class MainFragment : BrowseSupportFragment() {
             }
         }
 
-        if (DEBUG_LOGS) {
-            Log.i(TAG, "preload posters: added=${preloadedPosterUrls.size}")
-        }
     }
 
     private fun loadRows() {
@@ -323,38 +318,6 @@ class MainFragment : BrowseSupportFragment() {
 
         adapter = rowsAdapter
     }
-
-    private fun debugDumpRows(limitRows: Int = 6, limitCols: Int = 8) {
-        val rows = adapter as? ArrayObjectAdapter ?: run {
-            Log.e(TAG, "DUMP adapter is not ArrayObjectAdapter, adapter=${adapter?.javaClass?.name}")
-            return
-        }
-
-        Log.e(TAG, "DUMP rowsCount=${rows.size()}")
-
-        for (r in 0 until minOf(rows.size(), limitRows)) {
-            val row = rows.get(r)
-            when (row) {
-                is ListRow -> {
-                    val header = row.headerItem?.name
-                    val ra = row.adapter
-                    Log.e(TAG, "DUMP row[$r] header=$header items=${ra?.size() ?: -1}")
-                    if (ra != null) {
-                        for (c in 0 until minOf(ra.size(), limitCols)) {
-                            val it = ra.get(c)
-                            if (it is Movie) {
-                                Log.e(TAG, "  - col[$c] Movie url=${it.videoUrl}")
-                            } else {
-                                Log.e(TAG, "  - col[$c] type=${it?.javaClass?.name}")
-                            }
-                        }
-                    }
-                }
-                else -> Log.e(TAG, "DUMP row[$r] type=${row?.javaClass?.name}")
-            }
-        }
-    }
-
 
     private fun VideoItem.toMovie() = Movie(
         title = title,

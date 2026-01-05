@@ -65,6 +65,7 @@ class PlaybackVideoFragment : Fragment() {
 
     // ✅ MOBILE ONLY: botón salir arriba-izquierda
     private var btnExitMobile: View? = null
+
     private var mobileExitEnabled = false
 
     private val ui = Handler(Looper.getMainLooper())
@@ -78,9 +79,9 @@ class PlaybackVideoFragment : Fragment() {
 
     private val SEEK_STEP_MS = 10_000L
     private val SEEK_STEP_BAR = 25
-    private val AUTO_HIDE_MS = 10000L
+    private val AUTO_HIDE_MS = 5000L
 
-    private val SKIP_WINDOW_MS = 90_000L
+    private val SKIP_WINDOW_MS = 5_000L
 
     private var previewSeekMs: Long? = null
     private val CLEAR_PREVIEW_DELAY = 650L
@@ -95,11 +96,14 @@ class PlaybackVideoFragment : Fragment() {
 
     // ===== Mobile exit: show/hide por alpha =====
     private val hideExitRunnable = Runnable {
-        val b = btnExitMobile ?: return@Runnable
-        b.animate().alpha(0f).setDuration(150).start()
+        btnExitMobile?.animate()
+            ?.alpha(0f)
+            ?.setDuration(150)
+            ?.start()
     }
 
-    private fun showExitTemporarily(timeoutMs: Long = 2500L) {
+
+    private fun showExitTemporarily(timeoutMs: Long = AUTO_HIDE_MS) {
         if (!mobileExitEnabled) return
         val b = btnExitMobile ?: return
 
@@ -110,6 +114,7 @@ class PlaybackVideoFragment : Fragment() {
 
         ui.postDelayed(hideExitRunnable, timeoutMs)
     }
+
 
     private fun enterImmersiveMode() {
         requireActivity().window.decorView.systemUiVisibility =
@@ -214,7 +219,7 @@ class PlaybackVideoFragment : Fragment() {
 
         // ✅ MOBILE: mostrar el botón al entrar por primera vez
         if (mobileExitEnabled) {
-            ui.post { showExitTemporarily(2200L) }
+            ui.post { showExitTemporarily() }
         }
 
         if (isTvDevice()) btnPlayPause.requestFocus()
@@ -226,6 +231,8 @@ class PlaybackVideoFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        root = view
+
         val dbgMovie = arguments?.getSerializable("movie") as? Movie
         val dbgList = arguments?.getSerializable("playlist") as? ArrayList<Movie>
         val dbgIndex = arguments?.getInt("index", -1)
@@ -235,8 +242,10 @@ class PlaybackVideoFragment : Fragment() {
         introSkipDoneForCurrent = false
         lastSkipVisible = false
 
-
-        Log.e(TAG, "RESOLVED playlistSize=${playlist.size} currentIndex=$currentIndex movie=${currentMovie?.videoUrl}")
+        Log.e(
+            TAG,
+            "RESOLVED playlistSize=${playlist.size} currentIndex=$currentIndex movie=${currentMovie?.videoUrl}"
+        )
 
         val url = currentMovie?.videoUrl
         if (url.isNullOrBlank()) {
@@ -245,17 +254,18 @@ class PlaybackVideoFragment : Fragment() {
             return
         }
 
-        // ✅ al entrar: este es el video actual
         persistLastPlayed("enter")
-
         endHandled = false
         updatePrevNextState()
+
         initVlc(url)
         startTicker()
 
-        // Mantener pantalla encendida mientras este fragment esté visible
+        // Mantener pantalla encendida
         view.keepScreenOn = true
     }
+
+
 
     /**
      * ✅ ÚNICA FUENTE DE VERDAD: arguments
