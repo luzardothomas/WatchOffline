@@ -9,6 +9,7 @@ import android.os.Looper
 import android.speech.RecognizerIntent
 import android.util.Log
 import android.view.View
+import android.widget.Toast
 import androidx.core.app.ActivityOptionsCompat
 import androidx.leanback.app.SearchSupportFragment
 import androidx.leanback.widget.*
@@ -16,13 +17,12 @@ import java.util.Locale
 import java.util.LinkedHashMap
 
 class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResultProvider {
-    private var voiceArmed = false
 
+    private var voiceArmed = false
     private val handler = Handler(Looper.getMainLooper())
 
     private val jsonDataManager = JsonDataManager()
     private val cardPresenter = CardPresenter()
-
     private val rowsAdapter = ArrayObjectAdapter(ListRowPresenter())
 
     private var allImported: List<ImportedJson> = emptyList()
@@ -36,13 +36,10 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
 
         setSpeechRecognitionCallback(object : SpeechRecognitionCallback {
             override fun recognizeSpeech() {
-                // ✅ Evita el auto-start al entrar al SearchFragment
                 if (!voiceArmed) {
                     Log.d(TAG, "VOICE: ignore auto-start")
                     return
                 }
-
-                // ✅ Se armó por click del usuario: consumir “un uso”
                 voiceArmed = false
 
                 val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -57,30 +54,71 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
             }
         })
 
-
         jsonDataManager.loadData(requireContext())
         allImported = jsonDataManager.getImportedJsons()
 
         setSearchResultProvider(this)
+
+        // ✅ CLICK HANDLER (ACÁ estaba el “no hace nada”)
+        setOnItemViewClickedListener { itemViewHolder, item, _, _ ->
+            when (item) {
+                is Movie -> {
+                    Log.e(TAG, "SEARCH_CLICK movie='${item.title}' url='${item.videoUrl}'")
+
+                    // playlist mínima: solo este item
+                    val list = arrayListOf(item)
+                    val ok = startPlaybackActivity(
+                        movie = item,
+                        playlist = list,
+                        index = 0,
+                        sharedView = itemViewHolder?.view
+                    )
+
+                    if (!ok) {
+                        Toast.makeText(requireContext(), "No se encontró Activity de reproducción", Toast.LENGTH_SHORT).show()
+                    }
+                }
+
+                else -> {
+                    Log.e(TAG, "SEARCH_CLICK unsupported item=${item?.javaClass?.name}")
+                }
+            }
+        }
     }
 
-    override fun onViewCreated(view: android.view.View, savedInstanceState: Bundle?) {
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
-        // ✅ No arrancar con el foco en el mic
         view.post {
-            // intenta enfocar el editor de texto para que no “pida voz” solo
             view.findViewById<View>(androidx.leanback.R.id.lb_search_text_editor)?.requestFocus()
 
-            // ✅ Cuando el usuario toca el mic, ahí sí habilitamos y arrancamos
             view.findViewById<View>(androidx.leanback.R.id.lb_search_bar_speech_orb)?.setOnClickListener {
                 voiceArmed = true
-                startRecognition() // esto termina llamando a recognizeSpeech()
+                startRecognition()
             }
         }
 
-        setOnItemViewClickedListener { itemViewHolder, item, _, row ->
-            // ... tu código actual
+        setOnItemViewClickedListener { _, item, _, _ ->
+            val movie = item as? Movie ?: run {
+                Log.e(TAG, "SEARCH_CLICK ignored: item is not Movie -> ${item?.javaClass?.name}")
+                return@setOnItemViewClickedListener
+            }
+
+            try {
+                val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
+                    putExtra(DetailsActivity.MOVIE, movie)
+
+                    // Si querés que desde Search quede "solo este video":
+                    // (evita pasar playlist gigante y simplifica)
+                    putExtra(DetailsActivity.EXTRA_PLAYLIST, arrayListOf(movie))
+                    putExtra(DetailsActivity.EXTRA_INDEX, 0)
+                }
+
+                startActivity(intent) // ✅ SIN ActivityOptions (evita bind failed)
+                Log.e(TAG, "SEARCH_CLICK started DetailsActivity url=${movie.videoUrl}")
+            } catch (t: Throwable) {
+                Log.e(TAG, "SEARCH_CLICK failed: ${t.message}", t)
+            }
         }
     }
 
@@ -98,7 +136,6 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
         }
     }
 
-
     override fun getResultsAdapter(): ObjectAdapter = rowsAdapter
 
     override fun onQueryTextChange(newQuery: String?): Boolean {
@@ -114,7 +151,6 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
     // ✅ DEDUPE + debounce
     private fun scheduleSearch(raw: String) {
         val q = normalize(raw)
-
         if (q == lastScheduledQuery) return
         lastScheduledQuery = q
 
@@ -124,16 +160,13 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
 
     private fun performSearch(raw: String) {
         val q = normalize(raw)
-
         if (q == lastExecutedQuery) return
         lastExecutedQuery = q
 
         rowsAdapter.clear()
         if (q.isBlank()) return
 
-        // ✅ mapa videoUrl -> cover REAL (solo JSONs no RANDOM)
         val coverByUrl = buildNonRandomCoverByUrl()
-
         val out = LinkedHashMap<String, Movie>()
 
         for (json in allImported) {
@@ -144,7 +177,6 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
                 val titleMatch = normalize(v.title).contains(q)
 
                 if (titleMatch || jsonMatch) {
-
                     var movie = Movie(
                         title = v.title,
                         videoUrl = v.videoUrl,
@@ -155,8 +187,6 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
                         description = jsonTitle
                     )
 
-                    // ✅ FIX CLAVE:
-                    // si viene de RANDOM con cover dados → usar cover real
                     if (isDadosCover(movie.cardImageUrl)) {
                         val realCover = coverByUrl[movie.videoUrl?.trim().orEmpty()]
                         if (!realCover.isNullOrBlank()) {
@@ -164,9 +194,7 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
                         }
                     }
 
-                    val key = movie.videoUrl?.takeIf { it.isNotBlank() }
-                        ?: "${jsonTitle}:${movie.title}"
-
+                    val key = movie.videoUrl?.takeIf { it.isNotBlank() } ?: "${jsonTitle}:${movie.title}"
                     out[key] = movie
                 }
             }
@@ -181,23 +209,77 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
             rowsAdapter.add(ListRow(null, rowAdapter))
         }
 
-        // ✅ reintentar foco al último reproducido
-        handler.post {
-            focusLastPlayedIfAny()
+        handler.post { focusLastPlayedIfAny() }
+    }
+
+    // =========================
+    // ✅ Lanzar Activity de playback (sin depender del nombre exacto)
+    // =========================
+    private fun startPlaybackActivity(
+        movie: Movie,
+        playlist: ArrayList<Movie>,
+        index: Int,
+        sharedView: View?
+    ): Boolean {
+        val ctx = requireContext()
+
+        // probamos varios nombres típicos (no rompe compile)
+        val candidates = listOf(
+            "com.example.watchoffline.DetailsActivity",
+            "com.example.watchoffline.PlaybackActivity",
+            "com.example.watchoffline.PlaybackVideoActivity",
+            "com.example.watchoffline.vid.PlaybackActivity",
+            "com.example.watchoffline.vid.PlaybackVideoActivity",
+            "com.example.watchoffline.DetailsVideoActivity"
+        )
+
+        val cls = candidates.firstNotNullOfOrNull { name ->
+            try {
+                Class.forName(name)
+            } catch (_: Throwable) {
+                null
+            }
+        } ?: run {
+            Log.e(TAG, "SEARCH_CLICK no playback activity found. Tried=$candidates")
+            return false
+        }
+
+        Log.e(TAG, "SEARCH_CLICK opening activity=${cls.name}")
+
+        val intent = Intent(ctx, cls).apply {
+            // ✅ los mismos keys que ya usás en PlaybackVideoFragment
+            putExtra("movie", movie)
+            putExtra("playlist", playlist)
+            putExtra("index", index)
+
+            // opcionales
+            putExtra("EXTRA_LOOP_PLAYLIST", false)
+            putExtra("EXTRA_DISABLE_LAST_PLAYED", false)
+        }
+
+        try {
+            val opts = if (sharedView != null) {
+                ActivityOptionsCompat.makeSceneTransitionAnimation(requireActivity(), sharedView, "shared_element")
+            } else null
+
+            if (opts != null) startActivity(intent, opts.toBundle())
+            else startActivity(intent)
+
+            return true
+        } catch (t: Throwable) {
+            Log.e(TAG, "SEARCH_CLICK failed to start activity=${cls.name}: ${t.message}", t)
+            return false
         }
     }
 
-
     // =========================
-    // ✅ MISMA LÓGICA QUE MAINFRAGMENT (pero usando rowsSupportFragment)
+    // ✅ Foco al último reproducido
     // =========================
-
     private fun readLastPlayedUrl(): String? {
         val u = requireContext()
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getString(KEY_LAST_PLAYED, null)
             ?.trim()
-
         Log.e(TAG, "FOCUSDBG_SEARCH readLastPlayedUrl=$u")
         return u?.takeIf { it.isNotEmpty() }
     }
@@ -232,37 +314,30 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
 
         Log.e(TAG, "FOCUSDBG_SEARCH FOUND row=$targetRowIndex col=$targetColIndex url=$lastUrl")
 
-        val rowsFrag = rowsSupportFragment
-        if (rowsFrag == null) {
+        val rowsFrag = rowsSupportFragment ?: run {
             Log.e(TAG, "FOCUSDBG_SEARCH rowsSupportFragment == null (aun no creado)")
             return false
         }
 
-        // ✅ EXACTO como MainFragment: setSelectedPosition con ViewHolderTask
         rowsFrag.setSelectedPosition(targetRowIndex, false, object : Presenter.ViewHolderTask() {
             override fun run(holder: Presenter.ViewHolder?) {
-                val rowView = holder?.view
-                if (rowView == null) {
+                val rowView = holder?.view ?: run {
                     Log.e(TAG, "FOCUSDBG_SEARCH holder==null en task")
                     return
                 }
 
                 val rowContent = rowView.findViewById<HorizontalGridView>(androidx.leanback.R.id.row_content)
-                if (rowContent == null) {
-                    Log.e(TAG, "FOCUSDBG_SEARCH row_content==null en task")
-                    return
-                }
+                    ?: run {
+                        Log.e(TAG, "FOCUSDBG_SEARCH row_content==null en task")
+                        return
+                    }
 
                 rowContent.scrollToPosition(targetColIndex)
 
                 rowContent.post {
                     rowContent.setSelectedPosition(targetColIndex)
                     rowContent.requestFocus()
-
-                    Log.e(
-                        TAG,
-                        "FOCUSDBG_SEARCH APPLIED row=$targetRowIndex col=$targetColIndex selected=${rowContent.selectedPosition}"
-                    )
+                    Log.e(TAG, "FOCUSDBG_SEARCH APPLIED row=$targetRowIndex col=$targetColIndex selected=${rowContent.selectedPosition}")
                 }
             }
         })
@@ -282,7 +357,6 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
 
     private fun buildNonRandomCoverByUrl(): Map<String, String> {
         val nonRandom = allImported.filterNot { isRandomJsonName(it.fileName) }
-
         val map = HashMap<String, String>(nonRandom.size * 20)
 
         nonRandom.forEach { ij ->
@@ -296,7 +370,6 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
         }
         return map
     }
-
 
     private fun normalize(s: String): String =
         s.trim()
