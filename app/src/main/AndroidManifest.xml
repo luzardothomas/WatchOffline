@@ -19,7 +19,8 @@
         android:required="true" />
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
         android:requestLegacyExternalStorage="true"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true"
@@ -65,16 +66,6 @@
             android:exported="false"
             android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|keyboardHidden" />
-
-        <activity
-            android:name=".LanguageSettingsTvActivity"
-            android:exported="false" />
-
-        <activity
-            android:name=".LanguageSettingsMobileActivity"
-            android:exported="false" />
-
-
 
     </application>
 
