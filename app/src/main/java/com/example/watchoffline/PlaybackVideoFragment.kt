@@ -683,11 +683,38 @@ class PlaybackVideoFragment : Fragment() {
                 isUserSeeking = true; ui.removeCallbacks(hideControlsRunnable); showExitTemporarily()
             }
             override fun onStopTrackingTouch(seekBar: SeekBar) {
-                val p = VideoPlayerHolder.mediaPlayer ?: run { isUserSeeking = false; return }
+                val p = VideoPlayerHolder.mediaPlayer ?: run {
+                    isUserSeeking = false
+                    return
+                }
+
                 val dur = p.length
-                if (dur > 0) p.time = (dur * (seekBar.progress / 1000.0)).toLong()
-                isUserSeeking = false; scheduleAutoHide(); showExitTemporarily()
+                if (dur <= 0) {
+                    isUserSeeking = false
+                    return
+                }
+
+                val target = (dur * (seekBar.progress / 1000.0)).toLong()
+
+                // 🔴 OVERFLOW → FINAL REAL
+                if (target >= dur - END_EPSILON_MS) {
+                    seekBar.progress = 1000
+                    txtPos.text = formatMs(dur)
+                    previewSeekMs = null
+                    isUserSeeking = false
+
+                    p.time = dur
+                    handleVideoEnded()
+                    return
+                }
+
+                // Seek normal
+                p.time = target
+                isUserSeeking = false
+                scheduleAutoHide()
+                showExitTemporarily()
             }
+
             override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {}
         })
 
