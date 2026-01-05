@@ -42,6 +42,8 @@ class PlaybackVideoFragment : Fragment() {
     private val END_EPSILON_MS = 1500L // 1.5s antes del final
 
 
+
+
     private var vlcPlayer: VlcMediaPlayer? = null
 
     private lateinit var root: View
@@ -94,7 +96,7 @@ class PlaybackVideoFragment : Fragment() {
     private val SKIP_WINDOW_MS = 15_000L
 
     private var previewSeekMs: Long? = null
-    private val CLEAR_PREVIEW_DELAY = 650L
+    private val CLEAR_PREVIEW_DELAY = 1000L
 
     private var endHandled = false
 
@@ -599,19 +601,12 @@ class PlaybackVideoFragment : Fragment() {
         // Aquí sí hacemos attach inicial porque estamos creando de cero
         mp.attachViews(videoLayout, null, false, false)
         setupVlcListeners(mp)
-        /*
         val media = Media(libVlc, Uri.parse(fixedUrl)).apply {
             setHWDecoderEnabled(true, false)
             addOption(":http-reconnect=true")
             addOption(":http-user-agent=WatchOffline")
         }
-         */
-        val media = Media(libVlc, Uri.parse(fixedUrl)).apply {
-            // Cambiá true, false por false, false solo para probar.
-            // Si así funciona, el problema es cómo tu TV maneja el HW Acceleration en pausa.
-            setHWDecoderEnabled(true, false)
-            addOption(":http-reconnect=true")
-        }
+
         mp.media = media
         media.release()
 
@@ -673,6 +668,7 @@ class PlaybackVideoFragment : Fragment() {
         }
         ticker = r; ui.post(r)
     }
+
 
     private fun stopTicker() { ticker?.let { ui.removeCallbacks(it) }; ticker = null }
 

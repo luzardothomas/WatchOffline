@@ -36,12 +36,8 @@ class LocalAutoImporter(
 ) {
     private val tag = "LocalAutoImporter"
 
-    // ✅ Roots reales, dinámicos
     private val rootDirs: List<File> = (rootDirs ?: pickReadableRoots()).distinctBy { it.path }
 
-    // =========================
-    // MODELOS INTERNOS
-    // =========================
     private data class RawItem(
         val path: String, val title: String, val img: String,
         val skip: Int, val delay: Int, val videoSrc: String
@@ -49,21 +45,15 @@ class LocalAutoImporter(
 
     private data class PreviewJson(val fileName: String, val videos: List<VideoItem>, val debug: String)
 
-    // =========================
-    // CONFIG & POOLS
-    // =========================
     private val gson = Gson()
     private val coverCache = ConcurrentHashMap<String, ApiCover?>()
 
-    // 🚀 POOL MASIVO para API (Network IO)
     private val apiPool = Executors.newFixedThreadPool(96)
-    // 🚀 POOL para Disco (Local IO - Menos hilos para no saturar I/O del disco)
     private val diskPool = Executors.newFixedThreadPool(4)
 
     private val COVER_TIMEOUT_MS = 3500
     private val videoExt = hashSetOf("mp4", "mkv", "avi", "webm", "mov", "flv", "mpg", "mpeg", "m4v", "ts", "3gp", "wmv")
 
-    // REGEX Precompiladas
     private val reSeason1 = Regex("""(?i)temporada\s*(\d{1,2})""")
     private val reSeason2 = Regex("""(?i)\btemp\s*(\d{1,2})""")
     private val reSeason3 = Regex("""(?i)\bseason\s*(\d{1,2})""")
@@ -78,29 +68,16 @@ class LocalAutoImporter(
     private val reMovieKey3 = Regex("""(?i)\b(part|parte)\s*(\d{1,3})\b""")
 
     init {
-        // 🚀 CONNECTION POOLING
         System.setProperty("http.keepAlive", "true")
         System.setProperty("http.maxConnections", "100")
     }
 
-    // =========================
-    // API PUBLIC
-    // =========================
-
-    fun run(
-        toast: (String) -> Unit,
-        onDone: (Int) -> Unit,
-        onError: (String) -> Unit
-    ) {
+    fun run(toast: (String) -> Unit, onDone: (Int) -> Unit, onError: (String) -> Unit) {
         Thread {
             try {
                 val startTime = System.nanoTime()
                 toast("Importando de forma LOCAL")
 
-                Log.d(tag, "Roots: ${rootDirs.joinToString { "${it.path}(r=${it.canRead()})" }}")
-
-                // 1. ESCANEO DE DISCO PARALELO
-                // Usamos CopyOnWriteArrayList para seguridad en hilos
                 val foundFiles = CopyOnWriteArrayList<String>()
                 val scanFutures = ArrayList<java.util.concurrent.Future<*>>()
 
@@ -110,19 +87,15 @@ class LocalAutoImporter(
                         if (files.isNotEmpty()) foundFiles.addAll(files)
                     })
                 }
-                // Esperar escaneo
                 for (f in scanFutures) try { f.get() } catch (_: Exception) {}
 
-                // Deduplicar paths
                 val uniquePaths = foundFiles.map { normalizeAbsPath(it) }.toHashSet().toList()
-                Log.d(tag, "Total unique videos found: ${uniquePaths.size}")
 
                 if (uniquePaths.isEmpty()) {
                     onError("No se encontraron videos.")
                     return@Thread
                 }
 
-                // 2. PREPARAR QUERIES
                 val queriesToFetch = HashSet<String>()
                 val pathMap = HashMap<String, String>(uniquePaths.size)
 
@@ -132,10 +105,7 @@ class LocalAutoImporter(
                     queriesToFetch.add(q)
                 }
 
-                // 3. 🚀 FETCH API PARALELO
                 val coverResults = fetchCoversParallel(queriesToFetch.toList())
-
-                // 4. ENSAMBLAR RAW ITEMS
                 val placeholder = fallbackImageUri()
                 val rawItems = ArrayList<RawItem>(uniquePaths.size)
 
@@ -145,10 +115,10 @@ class LocalAutoImporter(
 
                     val imgUrl = cover?.url?.trim().orEmpty().ifBlank { placeholder }
                     val displayTitle = buildDisplayTitleForItem(absPath, cover)
-                    val isSeries = (cover?.type?.lowercase() == "series")
 
-                    val skipFinal = if (isSeries) (cover?.skipToSecond ?: 0) else 0
-                    val delayFinal = if (isSeries) (cover?.delaySkip ?: 0) else 0
+                    // ✅ CORRECCIÓN: Quitamos el filtro isSeries para que skip/delay carguen siempre
+                    val skipFinal = cover?.skipToSecond ?: 0
+                    val delayFinal = cover?.delaySkip ?: 0
 
                     rawItems.add(RawItem(
                         path = absPath,
@@ -160,7 +130,6 @@ class LocalAutoImporter(
                     ))
                 }
 
-                // 5. AGRUPACIÓN (In-Memory)
                 val uniqueBySrc = LinkedHashMap<String, RawItem>(rawItems.size)
                 for (ri in rawItems) uniqueBySrc.putIfAbsent(ri.videoSrc, ri)
                 val rawItemsUnique = uniqueBySrc.values.toList()
@@ -183,8 +152,6 @@ class LocalAutoImporter(
                 }
 
                 val previews = ArrayList<PreviewJson>()
-
-                // Series
                 val seriesEntries = seriesMap.entries.toList().sortedWith(compareBy({ normalizeName(it.key.first) }, { it.key.second }))
                 for ((key, items) in seriesEntries) {
                     items.sortWith(compareBy({ parseEpisodeForSort(it.path) ?: Int.MAX_VALUE }, { it.path.lowercase() }))
@@ -192,7 +159,6 @@ class LocalAutoImporter(
                     previews.add(PreviewJson("${normalizeName(key.first)}_s${pad2(key.second)}.json", videos, "LOCAL SERIES"))
                 }
 
-                // Movies
                 val sagaMap = HashMap<String, ArrayList<RawItem>>()
                 for (m in movies) sagaMap.getOrPut(inferSagaNameFromPath(m.path)) { ArrayList() }.add(m)
 
@@ -205,14 +171,7 @@ class LocalAutoImporter(
                     previews.add(PreviewJson(fName, videos, "LOCAL MOVIES"))
                 }
 
-                // 6. GUARDADO
                 val toImport = filterAlreadyImported(previews)
-                if (toImport.isEmpty()) {
-                    val ms = (System.nanoTime() - startTime) / 1_000_000
-                    onDone(0)
-                    return@Thread
-                }
-
                 val existingNames = jsonDataManager.getImportedJsons().map { it.fileName }.toHashSet()
                 var imported = 0
                 for (p in toImport) {
@@ -222,37 +181,27 @@ class LocalAutoImporter(
                     imported++
                 }
 
-                //val ms = (System.nanoTime() - startTime) / 1_000_000
-                toast("JSONs: $imported\nVIDEOS: ${uniquePaths.size}\n")
-                //toast("TIEMPO: ${ms / 1000.0}s")
+                val ms = (System.nanoTime() - startTime) / 1_000_000
+                toast("JSONs: $imported\nVIDEOS: ${uniquePaths.size}")
                 onDone(imported)
 
             } catch (e: Exception) {
-                Log.e(tag, "FAILED", e)
                 onError("Error: ${e.message}")
             }
         }.start()
     }
 
-    // =========================
-    // 🚀 PARALLEL NETWORK FETCH
-    // =========================
-
     private fun fetchCoversParallel(queries: List<String>): Map<String, ApiCover?> {
         if (queries.isEmpty()) return emptyMap()
-
         val results = ConcurrentHashMap<String, ApiCover?>()
         val futures = ArrayList<java.util.concurrent.Future<*>>()
         val toAsk = ArrayList<String>()
-
         for (q in queries) {
             val cached = coverCache[q]
             if (cached != null) results[q] = cached
             else if (!coverCache.containsKey(q)) toAsk.add(q)
         }
-
         if (toAsk.isEmpty()) return results
-
         for (q in toAsk) {
             futures.add(apiPool.submit {
                 val cover = fetchCoverFromApi(q)
@@ -267,14 +216,10 @@ class LocalAutoImporter(
     private fun fetchCoverFromApi(q: String): ApiCover? {
         val encoded = URLEncoder.encode(q, "UTF-8").replace("+", "%20")
         val full = "https://api-watchoffline.luzardo-thomas.workers.dev/cover?q=$encoded"
-
         return try {
             val conn = URL(full).openConnection() as HttpURLConnection
-            conn.requestMethod = "GET"
             conn.connectTimeout = COVER_TIMEOUT_MS
             conn.readTimeout = COVER_TIMEOUT_MS
-            conn.setRequestProperty("Accept", "application/json")
-
             if (conn.responseCode in 200..299) {
                 val reader = BufferedReader(InputStreamReader(conn.inputStream))
                 val sb = StringBuilder()
@@ -286,89 +231,93 @@ class LocalAutoImporter(
         } catch (e: Exception) { null }
     }
 
-    // =========================
-    // DISK OPS
-    // =========================
-
     private fun pickReadableRoots(): List<File> {
         val candidates = mutableListOf(File("/storage/self/primary"), File("/storage/emulated/0"), File("/sdcard"))
         try { File("/storage").listFiles()?.filter { it.isDirectory }?.let { candidates.addAll(it) } } catch (_: Exception) {}
-        try { File("/mnt/media_rw").listFiles()?.filter { it.isDirectory }?.let { candidates.addAll(it) } } catch (_: Exception) {}
         return candidates.distinctBy { it.path }.filter { it.exists() && it.canRead() }.ifEmpty { listOf(File("/storage")) }
     }
 
     private fun listLocalVideos(root: File): List<String> {
         val out = ArrayList<String>()
         if (!root.exists() || !root.canRead()) return out
-
-        // Stack para iterativo (evita StackOverflow en carpetas muy profundas)
         val stack = java.util.ArrayDeque<File>()
         stack.push(root)
-
         while (stack.isNotEmpty()) {
             val dir = stack.pop()
             val p = dir.path
-            // Filtros rápidos
             if (p.contains("/Android/data") || p.contains("/Android/obb") || p.contains("/.") || p.contains("cache")) continue
-
             val children = try { dir.listFiles() } catch (_: Exception) { null } ?: continue
             for (f in children) {
-                if (f.isDirectory) {
-                    stack.push(f)
-                } else {
-                    val name = f.name
-                    val dot = name.lastIndexOf('.')
-                    if (dot > 0 && videoExt.contains(name.substring(dot + 1).lowercase())) {
-                        out.add(f.absolutePath) // No normalizamos aquí para velocidad, lo hacemos en lote después
-                    }
+                if (f.isDirectory) stack.push(f)
+                else {
+                    val dot = f.name.lastIndexOf('.')
+                    if (dot > 0 && videoExt.contains(f.name.substring(dot + 1).lowercase())) out.add(f.absolutePath)
                 }
             }
         }
         return out
     }
 
-    // =========================
-    // HELPERS & STRINGS
-    // =========================
-
     private fun encodePathForUrl(absPath: String): String {
-        // StringBuilder para menos alocación
         val sb = StringBuilder()
         val parts = absPath.replace("\\", "/").split("/")
-        for (i in parts.indices) {
-            val seg = parts[i]
+        for (seg in parts) {
             if (seg.isNotBlank()) sb.append("/").append(URLEncoder.encode(seg, "UTF-8").replace("+", "%20"))
         }
         return sb.toString()
     }
 
     private fun fallbackImageUri() = "android.resource://${context.packageName}/${R.drawable.movie}"
-
     private fun normalizeAbsPath(p: String): String = try { File(p).canonicalPath.replace("\\", "/") } catch (_: Exception) { p.replace("\\", "/") }
-
-    private fun pad2(n: Int) = if(n<10) "0$n" else "$n"
-    private fun pad3(n: Int) = if(n<10) "00$n" else if(n<100) "0$n" else "$n"
+    private fun pad2(n: Int) = n.toString().padStart(2, '0')
+    private fun pad3(n: Int) = n.toString().padStart(3, '0')
     private fun normalizeName(s: String) = s.trim().replace('_', ' ').replace(Regex("""\s+"""), " ").lowercase()
+
+    private fun buildQueryForPathSmart(path: String): String {
+        val clean = path.replace("\\", "/").trim('/')
+        val parts = clean.split("/").filter { it.isNotBlank() }
+        val fileNoExt = parts.last().substringBeforeLast(".")
+        val se = parseSeasonEpisodeFromFilename(path)
+
+        // ✅ CORRECCIÓN: Normalización idéntica al AutoImporter (s01 e02)
+        if (se != null && parts.size >= 2) {
+            val seriesName = if (parts.size >= 3) parts[parts.size - 3] else parts[0]
+            return "${normalizeName(seriesName)} s${pad2(se.first)} ${pad2(se.second)}"
+        }
+
+        if (parts.size >= 3) {
+            val seriesName = parts[parts.size - 3]
+            val seasonFolder = parts[parts.size - 2]
+            val season = parseSeasonFromFolderOrName(seasonFolder)
+            val ep = parseEpisodeOnlyFromFilename(path)
+            if (season != null && ep != null) {
+                return "${normalizeName(seriesName)} s${pad2(season)} ${pad2(ep)}"
+            }
+        }
+        return normalizeName(fileNoExt)
+    }
 
     private fun parseSeasonFromFolderOrName(name: String): Int? {
         val n = name.lowercase().replace("_", " ").trim()
-        return reSeason1.find(n)?.groupValues?.get(1)?.toInt()
-            ?: reSeason2.find(n)?.groupValues?.get(1)?.toInt()
-            ?: reSeason3.find(n)?.groupValues?.get(1)?.toInt()
-            ?: reSeason4.find(n)?.groupValues?.get(1)?.toInt()
-            ?: if (n.matches(Regex("""\d{1,2}"""))) n.toInt() else null
+        reSeason1.find(n)?.let { return it.groupValues[1].toInt() }
+        reSeason2.find(n)?.let { return it.groupValues[1].toInt() }
+        reSeason3.find(n)?.let { return it.groupValues[1].toInt() }
+        reSeason4.find(n)?.let { return it.groupValues[1].toInt() }
+        return if (n.matches(Regex("""\d{1,2}"""))) n.toInt() else null
     }
 
     private fun parseSeasonEpisodeFromFilename(path: String): Pair<Int, Int>? {
         val name = fileBaseName(path)
-        return reSE1.find(name)?.let { it.groupValues[1].toInt() to it.groupValues[2].toInt() }
-            ?: reSE2.find(name)?.let { it.groupValues[1].toInt() to it.groupValues[2].toInt() }
+        reSE1.find(name)?.let { return it.groupValues[1].toInt() to it.groupValues[2].toInt() }
+        reSE2.find(name)?.let { return it.groupValues[1].toInt() to it.groupValues[2].toInt() }
+        return null
     }
 
     private fun parseEpisodeOnlyFromFilename(path: String): Int? {
         val name = fileBaseName(path)
-        return reEpWords.findAll(name).lastOrNull()?.groupValues?.get(1)?.toInt()
-            ?: reEpTail.find(name)?.groupValues?.get(1)?.toInt()
+        reEpWords.findAll(name).lastOrNull()?.let { return it.groupValues[1].toInt() }
+        reEpTail.find(name)?.let { return it.groupValues[1].toInt() }
+        return null
     }
 
     private fun parseEpisodeForSort(path: String) = parseSeasonEpisodeFromFilename(path)?.second ?: parseEpisodeOnlyFromFilename(path)
@@ -378,38 +327,21 @@ class LocalAutoImporter(
         val parts = clean.split("/").filter { it.isNotBlank() }
         if (parts.size < 2) return "Películas"
         val parent = parts[parts.size - 2]
-        val grand = parts.getOrNull(parts.size - 3)
-        val pNorm = normalizeName(parent)
-        val isPart = reSagaLooksLikePart.matches(pNorm) || pNorm.contains("part") || pNorm.contains("parte")
-        return if (isPart && !grand.isNullOrBlank()) grand else parent
+        val looksLikePart = reSagaLooksLikePart.matches(normalizeName(parent)) || parent.lowercase().contains("part")
+        return if (looksLikePart && parts.size >= 3) parts[parts.size - 3] else parent
     }
 
     private fun extractMovieSortKey(path: String, title: String): Int {
         val name = fileBaseName(path)
-        return reMovieKey1.find(name)?.groupValues?.get(1)?.toInt()
-            ?: reMovieKey2.find(name)?.groupValues?.get(1)?.toInt()
-            ?: reMovieKey3.find(name)?.groupValues?.get(2)?.toInt()
-            ?: Int.MAX_VALUE
-    }
-
-    private fun buildQueryForPathSmart(path: String): String {
-        val clean = path.replace("\\", "/").trim('/')
-        val parts = clean.split("/").filter { it.isNotBlank() }
-        val fileNoExt = parts.last().substringBeforeLast(".")
-        val se = parseSeasonEpisodeFromFilename(path)
-        if (se != null && parts.size >= 3) return "${normalizeName(parts[parts.size - 3])} s${pad2(se.first)} ${pad2(se.second)}"
-        if (parts.size >= 3) {
-            val season = parseSeasonFromFolderOrName(parts[parts.size - 2])
-            val ep = parseEpisodeOnlyFromFilename(path)
-            if (season != null && ep != null) return "${normalizeName(parts[parts.size - 3]).replace(" ", "_")}_${pad3(ep)}"
-        }
-        return normalizeName(fileNoExt)
+        reMovieKey1.find(name)?.let { return it.groupValues[1].toInt() }
+        reMovieKey2.find(name)?.let { return it.groupValues[1].toInt() }
+        reMovieKey3.find(name)?.let { return it.groupValues[2].toInt() }
+        return Int.MAX_VALUE
     }
 
     private fun uniqueJsonName(base: String, existing: MutableSet<String>): String {
         if (!existing.contains(base)) return base
-        val dot = base.lastIndexOf(".json")
-        val prefix = if (dot >= 0) base.substring(0, dot) else base
+        val prefix = base.removeSuffix(".json")
         var i = 2
         while (true) {
             val cand = "${prefix}_$i.json"
@@ -418,27 +350,20 @@ class LocalAutoImporter(
         }
     }
 
-    private fun filterAlreadyImported(previews: List<PreviewJson>): List<PreviewJson> {
-        val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toSet()
-        return previews.filter { it.fileName !in existing }
-    }
+    private fun filterAlreadyImported(previews: List<PreviewJson>) =
+        previews.filter { it.fileName !in jsonDataManager.getImportedJsons().map { it.fileName }.toSet() }
 
-    private fun fileBaseName(path: String) = path.replace("\\", "/").substringAfterLast("/").substringBeforeLast(".")
-
-    private fun prettyCap(ep: Int?) = if (ep == null || ep <= 0) null else "Cap ${pad2(ep)}"
-    private fun prettyTemp(season: Int?) = if (season == null || season <= 0) null else "T${pad2(season)}"
+    private fun fileBaseName(path: String) = path.substringAfterLast("/").substringBeforeLast(".")
 
     private fun buildDisplayTitleForItem(absPath: String, cover: ApiCover?): String {
-        val fallbackName = fileBaseName(absPath)
-        val seriesName = cover?.id ?: fallbackName
-        val seFile = parseSeasonEpisodeFromFilename(absPath)
-        val epFileOnly = parseEpisodeOnlyFromFilename(absPath)
-        val season = seFile?.first
-        val ep = seFile?.second ?: epFileOnly ?: cover?.episode
-        val isSeries = (cover?.type?.lowercase() == "series") || season != null || ep != null || cover?.season != null || cover?.episode != null
-        if (!isSeries) return seriesName
-        val cap = prettyCap(ep)
-        val temp = prettyTemp(season)
-        return if (temp != null && cap != null) "$temp $cap - $seriesName" else if (cap != null) "$cap - $seriesName" else seriesName
+        val fallback = fileBaseName(absPath)
+        val se = parseSeasonEpisodeFromFilename(absPath)
+        val ep = se?.second ?: parseEpisodeOnlyFromFilename(absPath) ?: cover?.episode
+        val season = se?.first ?: cover?.season
+        val isSeries = season != null || ep != null || cover?.type?.lowercase() == "series"
+        if (!isSeries) return cover?.id ?: fallback
+        val capStr = if (ep != null) "Cap ${pad2(ep)}" else ""
+        val tempStr = if (season != null) "T${pad2(season)}" else ""
+        return "$tempStr $capStr - ${cover?.id ?: fallback}".trim()
     }
 }
