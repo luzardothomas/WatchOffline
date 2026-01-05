@@ -164,16 +164,13 @@ class MainFragment : BrowseSupportFragment() {
         }
 
         private fun navigateToDetails(itemViewHolder: Presenter.ViewHolder, movie: Movie) {
-            Intent(requireContext(), DetailsActivity::class.java).apply {
+            val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
                 putExtra(DetailsActivity.MOVIE, movie)
-                val options = ActivityOptionsCompat.makeSceneTransitionAnimation(
-                    requireActivity(),
-                    (itemViewHolder.view as ImageCardView).mainImageView,
-                    DetailsActivity.SHARED_ELEMENT_NAME
-                )
-                startActivity(this, options.toBundle())
             }
+            startActivity(intent)
         }
+
+
 
         private fun handleStringAction(item: String) {
             when (item) {

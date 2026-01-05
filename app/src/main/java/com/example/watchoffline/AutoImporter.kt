@@ -128,7 +128,7 @@ class AutoImporter(
                     }
 
                     scannedServers++
-                    toast("Escaneando SMB ($scannedServers/${serverIds.size})… $share")
+                    toast("Escaneando SMB ($scannedServers/${serverIds.size}) del share: \'$share\'")
 
                     val smbFiles = listSmbVideos(serverId, share)
                     if (smbFiles.isEmpty()) continue
