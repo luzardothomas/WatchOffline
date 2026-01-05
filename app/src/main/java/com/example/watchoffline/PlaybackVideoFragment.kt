@@ -7,6 +7,7 @@ import android.os.Looper
 import android.util.Log
 import android.view.KeyEvent
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
@@ -22,7 +23,6 @@ import org.videolan.libvlc.Media
 import org.videolan.libvlc.util.VLCVideoLayout
 import org.videolan.libvlc.MediaPlayer as VlcMediaPlayer
 
-
 class PlaybackVideoFragment : Fragment() {
 
     private lateinit var root: View
@@ -37,22 +37,25 @@ class PlaybackVideoFragment : Fragment() {
     private lateinit var txtPos: TextView
     private lateinit var txtDur: TextView
 
-    private var libVlc: LibVLC? = null
-    private var vlcPlayer: VlcMediaPlayer? = null
+    // ✅ MOBILE ONLY: botón salir arriba-izquierda (puede ser ImageButton o TextView)
+    private var btnExitMobile: View? = null
+    private var mobileExitEnabled = false
 
     private val ui = Handler(Looper.getMainLooper())
     private var ticker: Runnable? = null
 
+    private var libVlc: LibVLC? = null
+    private var vlcPlayer: VlcMediaPlayer? = null
+
     private var isUserSeeking = false
     private var controlsVisible = true
 
-    private val SEEK_STEP_MS = 10_000L      // < >
-    private val SEEK_STEP_BAR = 25          // 0..1000 => 2.5% por toque
+    private val SEEK_STEP_MS = 10_000L
+    private val SEEK_STEP_BAR = 25
     private val AUTO_HIDE_MS = 2500L
 
-    private var pendingSeekMs: Long? = null
     private var lastSeekAppliedAt = 0L
-    private val SEEK_APPLY_DEBOUNCE_MS = 90L   // evita spamear VLC demasiado rápido
+    private val SEEK_APPLY_DEBOUNCE_MS = 90L
 
     private var previewSeekMs: Long? = null
     private val CLEAR_PREVIEW_DELAY = 650L
@@ -61,6 +64,29 @@ class PlaybackVideoFragment : Fragment() {
         isUserSeeking = false
         previewSeekMs = null
     }
+
+    // ===== Mobile exit: show/hide por alpha =====
+    private val hideExitRunnable = Runnable {
+        val b = btnExitMobile ?: return@Runnable
+        // OJO: en mobile lo dejamos VISIBLE siempre (para que capte click en 1 toque),
+        // solo lo "escondemos" con alpha = 0 y disabled click si querés.
+        b.animate().alpha(0f).setDuration(150).start()
+    }
+
+    private fun showExitTemporarily(timeoutMs: Long = 2500L) {
+        if (!mobileExitEnabled) return
+        val b = btnExitMobile ?: return
+
+        ui.removeCallbacks(hideExitRunnable)
+
+        if (b.visibility != View.VISIBLE) b.visibility = View.VISIBLE
+        b.animate().alpha(1f).setDuration(120).start()
+
+        ui.postDelayed(hideExitRunnable, timeoutMs)
+    }
+
+    private fun dp(v: Int): Int =
+        (v * resources.displayMetrics.density).toInt()
 
     private fun enterImmersiveMode() {
         requireActivity().window.decorView.systemUiVisibility =
@@ -74,23 +100,12 @@ class PlaybackVideoFragment : Fragment() {
 
     override fun onStart() {
         super.onStart()
-
-        // 🔒 Reforzar modo inmersivo cuando VLC toma el foco
-        view?.setOnSystemUiVisibilityChangeListener {
-            enterImmersiveMode()
-        }
+        view?.setOnSystemUiVisibilityChangeListener { enterImmersiveMode() }
     }
 
-
-
-
-
     private val hideControlsRunnable = Runnable {
-        // Solo ocultar overlay, NO el skip (lo maneja ticker)
         controlsVisible = false
         controlsOverlay.visibility = View.GONE
-
-        // ✅ Si el overlay se va, aseguramos que el root quede con foco para capturar DPAD
         root.requestFocus()
     }
 
@@ -108,37 +123,43 @@ class PlaybackVideoFragment : Fragment() {
         txtPos = root.findViewById(R.id.txt_pos)
         txtDur = root.findViewById(R.id.txt_dur)
 
-        // ✅ Evita “filtro gris molesto” de backgrounds default (sin tocar XML)
+        // ✅ mobile exit (si no está en XML, queda null y no pasa nada)
+        btnExitMobile = root.findViewById(R.id.btn_exit_mobile)
+
+        // ✅ Evita “filtro gris molesto”
         btnSeekBack.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         btnPlayPause.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         btnSeekFwd.setBackgroundColor(android.graphics.Color.TRANSPARENT)
-        // el skip intro lo dejás con tu drawable
 
         setupControls()
-
-        // ✅ Un solo handler de teclado, aplicado a root + video + skip
         setupRemoteHandlers()
 
-        // Hover/Focus visual para control remoto
         addTvFocusScale(btnSeekBack)
         addTvFocusScale(btnPlayPause, 1.18f)
         addTvFocusScale(btnSeekFwd)
         addTvFocusScale(seekBar, 1.06f)
         addTvFocusScale(skipIntroButton, 1.10f)
 
-        // Tap/click sobre video -> toggle overlay
-        videoLayout.setOnClickListener { toggleControls() }
+        videoLayout.setOnClickListener {
+            toggleControls()
+            showExitTemporarily()
+        }
 
-        // overlay arriba siempre
         controlsOverlay.bringToFront()
         controlsOverlay.translationZ = 50f
 
-        // Foco inicial (TV)
-        btnPlayPause.requestFocus()
+        // ✅ solo mobile
+        setupMobileExitButton()
 
-        // arranca el auto-hide cuando se ven
+        // ✅ MOBILE: mostrar el botón al entrar por primera vez (para que el usuario lo descubra)
+        if (mobileExitEnabled) {
+            ui.post { showExitTemporarily(2200L) }
+        }
+
+
+        if (isTvDevice()) btnPlayPause.requestFocus()
+
         scheduleAutoHide()
-
         return root
     }
 
@@ -159,7 +180,6 @@ class PlaybackVideoFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        // ✅ Si el overlay está oculto, que el root tenga foco para capturar DPAD
         if (!controlsVisible) root.requestFocus()
         enterImmersiveMode()
     }
@@ -170,8 +190,8 @@ class PlaybackVideoFragment : Fragment() {
         seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onStartTrackingTouch(seekBar: SeekBar) {
                 isUserSeeking = true
-                // mientras el usuario usa la barra, no auto-hide
                 ui.removeCallbacks(hideControlsRunnable)
+                showExitTemporarily()
             }
 
             override fun onStopTrackingTouch(seekBar: SeekBar) {
@@ -183,6 +203,7 @@ class PlaybackVideoFragment : Fragment() {
                 }
                 isUserSeeking = false
                 scheduleAutoHide()
+                showExitTemporarily()
             }
 
             override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {}
@@ -191,22 +212,25 @@ class PlaybackVideoFragment : Fragment() {
         btnPlayPause.setOnClickListener {
             togglePlayPause()
             bumpControlsTimeout()
+            showExitTemporarily()
         }
 
         btnSeekBack.setOnClickListener {
             seekByMs(-SEEK_STEP_MS)
             bumpControlsTimeout()
+            showExitTemporarily()
         }
 
         btnSeekFwd.setOnClickListener {
             seekByMs(SEEK_STEP_MS)
             bumpControlsTimeout()
+            showExitTemporarily()
         }
 
         skipIntroButton.setOnClickListener {
             performSkipIntro()
-            // ✅ Se ocultan controles, pero dejamos el sistema listo para volver a abrirlos
             hideOverlayOnly()
+            showExitTemporarily()
         }
     }
 
@@ -218,21 +242,66 @@ class PlaybackVideoFragment : Fragment() {
 
         val pm = requireContext().packageManager
         val hasLeanback = pm.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
-
         return isTelevision || hasLeanback
     }
 
-    private fun setupRemoteHandlers() {
+    private fun setupMobileExitButton() {
+        val btn = btnExitMobile ?: return
 
-        // ✅ En celular: no forzar foco / no capturar DPAD -> scroll y gestos libres
+        mobileExitEnabled = !isTvDevice()
+
+        if (!mobileExitEnabled) {
+            // TV: no existe
+            btn.visibility = View.GONE
+            btn.alpha = 0f
+            btn.isFocusable = false
+            btn.isFocusableInTouchMode = false
+            btn.setOnClickListener(null)
+            ui.removeCallbacks(hideExitRunnable)
+            return
+        }
+
+        // MOBILE:
+        // ✅ lo dejamos VISIBLE siempre, pero oculto por alpha.
+        // Así, un toque en la esquina pega directo al botón: 1 toque = salir.
+        btn.visibility = View.VISIBLE
+        btn.alpha = 0f
+
+        // 1 toque = salir
+        btn.setOnClickListener {
+            requireActivity().onBackPressedDispatcher.onBackPressed()
+        }
+
+        // Interacción general -> mostrar el icono (para feedback visual)
+        root.setOnTouchListener { _, ev ->
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN,
+                MotionEvent.ACTION_MOVE,
+                MotionEvent.ACTION_UP -> showExitTemporarily()
+            }
+            false
+        }
+
+        // Opcional: agrandar "hitbox" real del botón sin cambiar XML
+        // (esto NO cambia visual, solo área tocable)
+        btn.post {
+            try {
+                val hit = dp(72)
+                val lp = btn.layoutParams as ViewGroup.MarginLayoutParams
+                // mantenemos mismo tamaño, solo aseguramos margen ok; el toque ya funciona porque está visible
+                btn.layoutParams = lp
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun setupRemoteHandlers() {
+        // ✅ En celular: no forzar foco / no capturar DPAD
         if (!isTvDevice()) {
-            // importante: liberar cualquier captura previa
             root.setOnKeyListener(null)
             videoLayout.setOnKeyListener(null)
             skipIntroButton.setOnKeyListener(null)
             seekBar.setOnKeyListener(null)
 
-            // no fuerces foco en touch
             root.isFocusable = false
             root.isFocusableInTouchMode = false
 
@@ -242,50 +311,36 @@ class PlaybackVideoFragment : Fragment() {
             skipIntroButton.isFocusable = false
             skipIntroButton.isFocusableInTouchMode = false
 
-            // seekbar puede quedar focusable o no; en celular conviene NO forzarlo
             seekBar.isFocusable = false
             seekBar.isFocusableInTouchMode = false
 
             return
         }
 
-        // ✅ Android TV: mantenemos tu comportamiento actual (DPAD + foco)
+        // ✅ Android TV: comportamiento actual
         root.isFocusable = true
         root.isFocusableInTouchMode = true
         root.requestFocus()
 
         val keyListener = View.OnKeyListener { _, keyCode, event ->
             if (event.action != KeyEvent.ACTION_DOWN) return@OnKeyListener false
-
             if (controlsVisible) bumpControlsTimeout()
 
             val focused = root.findFocus()
 
-            // ==========================
-            // 1) Si estoy en la SeekBar
-            // ==========================
             if (focused === seekBar) {
                 return@OnKeyListener when (keyCode) {
                     KeyEvent.KEYCODE_DPAD_LEFT -> { seekBarStep(-1); true }
                     KeyEvent.KEYCODE_DPAD_RIGHT -> { seekBarStep(+1); true }
-                    KeyEvent.KEYCODE_DPAD_CENTER,
-                    KeyEvent.KEYCODE_ENTER -> true
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> true
                     KeyEvent.KEYCODE_DPAD_DOWN -> { hideOverlayOnly(); true }
                     else -> false
                 }
             }
 
-            // ==========================
-            // 2) Overlay oculto
-            // ==========================
             if (!controlsVisible) {
                 return@OnKeyListener when (keyCode) {
-
-                    KeyEvent.KEYCODE_DPAD_UP -> {
-                        showOverlayAndFocusPlay()
-                        true
-                    }
-
+                    KeyEvent.KEYCODE_DPAD_UP -> { showOverlayAndFocusPlay(); true }
                     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
                         if (skipIntroButton.visibility == View.VISIBLE) {
                             performSkipIntro()
@@ -301,39 +356,26 @@ class PlaybackVideoFragment : Fragment() {
                             true
                         }
                     }
-
                     KeyEvent.KEYCODE_DPAD_LEFT -> { seekByMs(-SEEK_STEP_MS); true }
                     KeyEvent.KEYCODE_DPAD_RIGHT -> { seekByMs(SEEK_STEP_MS); true }
-
                     else -> false
                 }
             }
 
-            // ==========================
-            // 3) Overlay visible
-            // ==========================
             when (keyCode) {
-                KeyEvent.KEYCODE_DPAD_DOWN -> {
-                    hideOverlayOnly()
-                    true
-                }
-
+                KeyEvent.KEYCODE_DPAD_DOWN -> { hideOverlayOnly(); true }
                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
                     val f = root.findFocus()
                     if (f != null && f.isClickable) {
-                        f.performClick()
-                        true
+                        f.performClick(); true
                     } else {
-                        togglePlayPause()
-                        true
+                        togglePlayPause(); true
                     }
                 }
-
                 else -> false
             }
         }
 
-        // ✅ Aplicar listener a los lugares de foco
         root.setOnKeyListener(keyListener)
 
         videoLayout.isFocusable = true
@@ -344,25 +386,20 @@ class PlaybackVideoFragment : Fragment() {
         skipIntroButton.isFocusableInTouchMode = true
         skipIntroButton.setOnKeyListener(keyListener)
 
-        // ✅ SeekBar con DPAD
         seekBar.isFocusable = true
         seekBar.isFocusableInTouchMode = true
         seekBar.setOnKeyListener { _, keyCode, event ->
             if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
-
             if (controlsVisible) bumpControlsTimeout()
-
             when (keyCode) {
                 KeyEvent.KEYCODE_DPAD_LEFT -> { seekBarStep(-1); true }
                 KeyEvent.KEYCODE_DPAD_RIGHT -> { seekBarStep(+1); true }
-                KeyEvent.KEYCODE_DPAD_CENTER,
-                KeyEvent.KEYCODE_ENTER -> true
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> true
                 KeyEvent.KEYCODE_DPAD_DOWN -> { hideOverlayOnly(); true }
                 else -> false
             }
         }
     }
-
 
     private fun toggleControls() {
         if (controlsVisible) hideOverlayOnly() else showOverlayAndFocusPlay()
@@ -388,34 +425,21 @@ class PlaybackVideoFragment : Fragment() {
 
     private fun scheduleAutoHide() {
         ui.removeCallbacks(hideControlsRunnable)
-
-        // ✅ si estoy parado en la pelotita, NO auto-hide
         val focusIsSeek = (root.findFocus() === seekBar)
         if (focusIsSeek) return
-
         ui.postDelayed(hideControlsRunnable, AUTO_HIDE_MS)
     }
 
-
     private fun bumpControlsTimeout() {
-        // si están visibles, extender vida
         if (controlsVisible) scheduleAutoHide()
     }
 
     private fun addTvFocusScale(view: View, scale: Float = 1.12f) {
         view.setOnFocusChangeListener { v, hasFocus ->
-
-            // ✅ regla de oro para la pelotita
             if (v === seekBar) {
-                if (hasFocus) {
-                    // mientras el usuario está en la pelotita, nunca ocultar
-                    ui.removeCallbacks(hideControlsRunnable)
-                } else {
-                    // cuando sale de la pelotita, recién ahí volvemos al auto-hide
-                    if (controlsVisible) scheduleAutoHide()
-                }
+                if (hasFocus) ui.removeCallbacks(hideControlsRunnable)
+                else if (controlsVisible) scheduleAutoHide()
             }
-
             v.animate()
                 .scaleX(if (hasFocus) scale else 1f)
                 .scaleY(if (hasFocus) scale else 1f)
@@ -424,23 +448,17 @@ class PlaybackVideoFragment : Fragment() {
         }
     }
 
-
     private fun performSkipIntro() {
         val movie = arguments?.getSerializable("movie") as? Movie
         val skip = movie?.skipToSecond ?: 0
         if (skip <= 0) return
 
         val p = vlcPlayer ?: return
+        p.time = skip * 1000L
 
-        // ✅ hacer skip sin pausar
-        val target = skip * 1000L
-        p.time = target
-
-        // opcional: si por alguna razón estaba pausado, seguir
         if (!p.isPlaying) p.play()
         btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
 
-        // ✅ importantísimo: devolver foco a root para que DPAD vuelva a funcionar
         root.requestFocus()
     }
 
@@ -467,63 +485,18 @@ class PlaybackVideoFragment : Fragment() {
         val dur = p.length
         if (dur <= 0) return
 
-        // 0..1000
         val newProg = (seekBar.progress + dir * SEEK_STEP_BAR).coerceIn(0, 1000)
         seekBar.progress = newProg
 
         val target = (dur * (newProg / 1000.0)).toLong().coerceIn(0L, dur)
+        try { p.time = target } catch (_: Exception) {}
 
-        // ✅ Seek real (video/imagen)
-        try {
-            p.time = target
-        } catch (_: Exception) {}
-
-        // ✅ Preview inmediato para el contador mientras tocás
         previewSeekMs = target
         txtPos.text = formatMs(target)
 
         isUserSeeking = true
         ui.removeCallbacks(clearPreviewRunnable)
         ui.postDelayed(clearPreviewRunnable, CLEAR_PREVIEW_DELAY)
-    }
-
-
-    private fun applySeekRobust(targetMs: Long, durMs: Long) {
-        val p = vlcPlayer ?: return
-
-        val now = android.os.SystemClock.uptimeMillis()
-        if (now - lastSeekAppliedAt < SEEK_APPLY_DEBOUNCE_MS) {
-            // si llegan flechas muy rápido, igual dejamos el pendingSeekMs actualizado y listo
-            return
-        }
-        lastSeekAppliedAt = now
-
-        try {
-            // 1) Intento principal: time
-            p.time = targetMs
-
-            // 2) Verificación + fallback con position (más confiable en algunos streams)
-            ui.postDelayed({
-                val pp = vlcPlayer ?: return@postDelayed
-                val cur = pp.time
-                if (kotlin.math.abs(cur - targetMs) > 1200) {
-                    val pos = (targetMs.toDouble() / durMs.toDouble()).toFloat().coerceIn(0f, 1f)
-                    try { pp.position = pos } catch (_: Exception) {}
-                }
-            }, 80)
-        } catch (_: Exception) {
-            // fallback directo
-            val pos = (targetMs.toDouble() / durMs.toDouble()).toFloat().coerceIn(0f, 1f)
-            try { p.position = pos } catch (_: Exception) {}
-        }
-    }
-
-
-
-
-    private val resetSeekingFlagRunnable = Runnable {
-        isUserSeeking = false
-        scheduleAutoHide()
     }
 
     private fun initVlc(videoUrl: String) {
@@ -595,8 +568,6 @@ class PlaybackVideoFragment : Fragment() {
                 val p = vlcPlayer
                 if (p != null) {
                     val dur = p.length
-
-                    // ✅ si el usuario está seekeando con control, mostramos preview
                     val posToShow = previewSeekMs ?: p.time
 
                     txtPos.text = formatMs(posToShow)
@@ -608,20 +579,16 @@ class PlaybackVideoFragment : Fragment() {
                             .coerceIn(0, 1000)
 
                         val focusIsSeek = (root.findFocus() === seekBar)
-
-                        // ✅ no pelear contra el control remoto
                         if (!focusIsSeek && !isUserSeeking) {
                             seekBar.progress = prog
                         }
                     }
 
-                    // Skip Intro visible sólo primeros 15s si hay skip
                     val movie = arguments?.getSerializable("movie") as? Movie
                     val hasSkip = (movie?.skipToSecond ?: 0) > 0
                     skipIntroButton.visibility =
                         if (hasSkip && posToShow < 15_000) View.VISIBLE else View.GONE
 
-                    // si overlay está oculto y skip visible: que el focus vaya al skip
                     if (!controlsVisible && skipIntroButton.visibility == View.VISIBLE) {
                         if (!skipIntroButton.isFocused) skipIntroButton.requestFocus()
                     }
@@ -634,9 +601,6 @@ class PlaybackVideoFragment : Fragment() {
         ticker = r
         ui.post(r)
     }
-
-
-
 
     private fun stopTicker() {
         ticker?.let { ui.removeCallbacks(it) }
@@ -651,9 +615,14 @@ class PlaybackVideoFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+
+        ui.removeCallbacks(hideExitRunnable)
+        if (mobileExitEnabled) root.setOnTouchListener(null)
+        btnExitMobile = null
+
         stopTicker()
         ui.removeCallbacks(hideControlsRunnable)
-        ui.removeCallbacks(resetSeekingFlagRunnable)
+        ui.removeCallbacks(clearPreviewRunnable)
 
         try { vlcPlayer?.stop() } catch (_: Exception) {}
         try { vlcPlayer?.detachViews() } catch (_: Exception) {}

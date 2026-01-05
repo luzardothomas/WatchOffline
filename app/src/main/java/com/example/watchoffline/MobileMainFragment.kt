@@ -10,6 +10,8 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.widget.EditText
 import android.widget.ImageButton
@@ -38,6 +40,23 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     private var currentQuery: String = ""
     private val handler = Handler(Looper.getMainLooper())
 
+    // ✅ Back button (auto-hide)
+    private val ui = Handler(Looper.getMainLooper())
+    private lateinit var btnBack: ImageButton
+    private lateinit var rootViewRef: View
+    private lateinit var sectionsRecyclerRef: RecyclerView
+    private var backVisible = false
+
+    private val hideBackRunnable = Runnable {
+        backVisible = false
+        if (!this::btnBack.isInitialized) return@Runnable
+        btnBack.animate()
+            .alpha(0f)
+            .setDuration(150)
+            .withEndAction { btnBack.visibility = View.GONE }
+            .start()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -54,8 +73,22 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         try { smbGateway.stopProxy() } catch (_: Exception) {}
     }
 
+    override fun onDestroyView() {
+        // ✅ cleanup back-button timers/listeners
+        ui.removeCallbacks(hideBackRunnable)
+        if (this::sectionsRecyclerRef.isInitialized) {
+            try { sectionsRecyclerRef.clearOnScrollListeners() } catch (_: Exception) {}
+        }
+        super.onDestroyView()
+    }
+
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+
+        // refs
+        rootViewRef = view.findViewById(R.id.root)
+        sectionsRecyclerRef = view.findViewById(R.id.sectionsRecycler)
+
 
         setupSearchUi(view)
         render(view)
@@ -86,10 +119,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             }
         }
 
-        btn.setOnClickListener {
-            setSearchVisible(input.visibility != View.VISIBLE)
-        }
-
         input.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -117,6 +146,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         rv.adapter = MobileSectionsAdapter(
             sections = sections,
             onMovieClick = { item ->
+
                 when (item.videoUrl) {
                     "__action_erase_json__" -> showDeleteDialog()
                     "__action_erase_all_json__" -> showDeleteAllDialog()
@@ -338,7 +368,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                     Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show()
                 }
             },
-            onDone = { count ->
+            onDone = { _ ->
                 activity?.runOnUiThread {
                     refreshUI()
                 }
@@ -539,6 +569,5 @@ data class MobileSection(
     val title: String,
     val items: List<Movie>
 )
-
 
 
