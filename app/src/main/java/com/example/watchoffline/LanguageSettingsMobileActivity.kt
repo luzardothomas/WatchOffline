@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.text.TextUtils
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.widget.HorizontalScrollView
@@ -21,16 +22,25 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
         private const val LANG_PREFIX = "LANGCFG::"
     }
 
+    private val TAG = "LangSettingsMobile"
+
+    // ✅ DEBUG: Logcat SIEMPRE + stdout
+    private fun dbg(msg: String) {
+        val line = "[$TAG] $msg"
+        // ASSERT: suele verse incluso con filtros altos
+        Log.wtf(TAG, line)
+        // fallback: aparece como I/System.out
+        System.out.println(line)
+    }
+
     data class Opt(val key: String, val label: String)
 
-    // ✅ Labels completos
     private val audioOptions = listOf(
         Opt("es_lat", "ESPAÑOL"),
         Opt("en", "INGLÉS"),
         Opt("ja", "JAPONÉS"),
     )
 
-    // ✅ Forzamos "DESHABILITADO" a 2 líneas para que ENTRE
     private val subsOptions = listOf(
         Opt("disable", "DESHABILITADO"),
         Opt("es_lat", "ESPAÑOL"),
@@ -45,6 +55,8 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        dbg("onCreate() ✅ activity=${this::class.java.name} taskId=$taskId")
+
         val scroll = ScrollView(this)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -56,6 +68,8 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
         root.addView(buildHeaderRow())
 
         val rows = buildRowsFromImportedJsons()
+        dbg("rows.size=${rows.size}")
+
         rows.forEach { r ->
             root.addView(buildDataRow(r))
             root.addView(divider())
@@ -79,36 +93,6 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
         }
     }
 
-
-    /** Contenedor centrado para headers (centra REAL dentro del ancho asignado) */
-    private fun headerCell(textStr: String): View {
-        val box = android.widget.FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        }
-
-        val tv = TextView(this).apply {
-            text = textStr
-            textSize = 13f
-            alpha = 0.9f
-            gravity = Gravity.CENTER
-            textAlignment = View.TEXT_ALIGNMENT_CENTER
-        }
-
-        box.addView(
-            tv,
-            android.widget.FrameLayout.LayoutParams(
-                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
-                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT
-            ).apply { gravity = Gravity.CENTER }
-        )
-
-        return box
-    }
-
-
     private fun buildTopBar(): View {
         val bar = android.widget.FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(
@@ -126,7 +110,10 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
             background = getDrawable(R.drawable.bg_action_button)
             isClickable = true
             isFocusable = true
-            setOnClickListener { finish() }
+            setOnClickListener {
+                dbg("CLICK SALIR")
+                finish()
+            }
         }
 
         bar.addView(
@@ -184,7 +171,6 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
         return row
     }
 
-
     private fun buildDataRow(r: Row): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -192,7 +178,6 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
             setPadding(0, dp(10), 0, dp(10))
         }
 
-        // ===== TÍTULO =====
         row.addView(TextView(this).apply {
             text = r.displayTitle
             textSize = 14f
@@ -204,15 +189,13 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
 
         row.addView(vDivider())
 
-        // ===== AUDIO =====
         row.addView(
             buildRadioGrid(r.scopeKey, "audio", audioOptions),
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.15f)
         )
 
-        row.addView(vDivider()) // 🔹 separador AUDIO | SUBTÍTULOS
+        row.addView(vDivider())
 
-        // ===== SUBTÍTULOS =====
         row.addView(
             buildRadioGrid(r.scopeKey, "subs", subsOptions),
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.45f)
@@ -220,11 +203,11 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
 
         row.addView(vDivider())
 
-        // ===== BOTÓN VALIDAR / VALIDADO =====
         val validated = isValidated(r.scopeKey)
+        dbg("buildDataRow scope=${r.scopeKey} validated=$validated")
 
         val btnScan = TextView(this).apply {
-            text = if (validated) "VALIDADO" else "VALIDAR"
+            text = if (validated) "OK" else "VALIDAR"
             textSize = 12f
             gravity = Gravity.CENTER
             textAlignment = View.TEXT_ALIGNMENT_CENTER
@@ -239,6 +222,7 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
             ellipsize = TextUtils.TruncateAt.END
 
             setOnClickListener {
+                dbg("CLICK VALIDAR scope=${r.scopeKey} validated=$validated")
                 if (!validated) runScanForRow(r)
             }
         }
@@ -254,9 +238,9 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
         return row
     }
 
-
     private fun runScanForRow(r: Row) {
         val videoUrl = pickRepresentativeUrlForScope(r.scopeKey)
+        dbg("runScanForRow scope=${r.scopeKey} url=${videoUrl ?: "null"}")
         if (videoUrl.isNullOrBlank()) return
 
         Toast.makeText(this, "Validando idiomas…", Toast.LENGTH_SHORT).show()
@@ -264,8 +248,12 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
         scanTracksWithVlc(
             videoUrl,
             onDone = { audioTracks, subsTracks ->
+                dbg("SCAN DONE scope=${r.scopeKey} audioTracks=${audioTracks.size} subsTracks=${subsTracks.size}")
+
                 val audioPrefs = inferAudioPrefsFromTrackNames(audioTracks.map { it.name })
                 val subsPrefs = inferSubsPrefsFromTrackNames(subsTracks.map { it.name })
+
+                dbg("INFER scope=${r.scopeKey} audioPrefs=$audioPrefs subsPrefs=$subsPrefs")
 
                 saveAvailablePrefs(r.scopeKey, "audio", audioPrefs)
                 saveAvailablePrefs(r.scopeKey, "subs", subsPrefs)
@@ -275,59 +263,10 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
 
                 recreate()
             },
-            onError = {
-                // opcional: Toast.makeText(this, it, Toast.LENGTH_LONG).show()
+            onError = { err ->
+                dbg("SCAN ERROR scope=${r.scopeKey} err=$err")
             }
         )
-    }
-
-    private fun pickRepresentativeUrlForScope(scopeKey: String): String? {
-        val dm = JsonDataManager()
-        dm.loadData(this)
-        val imported = dm.getImportedJsons()
-
-        if (scopeKey.startsWith("GROUP::")) {
-            val raw = scopeKey.removePrefix("GROUP::")
-            val pack = imported.firstOrNull { it.fileName.trim() == raw.trim() } ?: return null
-            return pack.videos.firstOrNull { it.videoUrl.isNotBlank() }?.videoUrl
-        }
-
-        if (scopeKey.startsWith("SEASON::")) {
-            val rest = scopeKey.removePrefix("SEASON::")
-            val parts = rest.split("::")
-            if (parts.size < 2) return null
-
-            val raw = parts[0]
-            val seasonTag = parts[1] // ej "S01"
-
-            val pack = imported.firstOrNull { it.fileName.trim() == raw.trim() } ?: return null
-            val match = pack.videos.firstOrNull { v ->
-                detectSeasonFromTitle(v.title)?.equals(seasonTag, ignoreCase = true) == true
-            }
-
-            return match?.videoUrl ?: pack.videos.firstOrNull()?.videoUrl
-        }
-
-        return null
-    }
-
-    private fun detectSeasonFromTitle(title: String): String? {
-        val t = title.trim()
-        val reSxx = Regex("""\bS(\d{1,2})\b""", RegexOption.IGNORE_CASE)
-        val reSxxExx = Regex("""\bS(\d{1,2})\s*E(\d{1,2})\b""", RegexOption.IGNORE_CASE)
-        val reX = Regex("""\b(\d{1,2})x(\d{1,2})\b""", RegexOption.IGNORE_CASE)
-        val reTemporada = Regex("""\b(temporada|season)\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE)
-
-        reSxxExx.find(t)?.groupValues?.getOrNull(1)?.toIntOrNull()
-            ?.let { return "S" + it.toString().padStart(2, '0') }
-        reX.find(t)?.groupValues?.getOrNull(1)?.toIntOrNull()
-            ?.let { return "S" + it.toString().padStart(2, '0') }
-        reTemporada.find(t)?.groupValues?.getOrNull(2)?.toIntOrNull()
-            ?.let { return "S" + it.toString().padStart(2, '0') }
-        reSxx.find(t)?.groupValues?.getOrNull(1)?.toIntOrNull()
-            ?.let { return "S" + it.toString().padStart(2, '0') }
-
-        return null
     }
 
     private fun enforceCurrentSelection(scopeKey: String, kind: String) {
@@ -335,19 +274,21 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
         val current = loadPref(k) ?: return
         val available = loadAvailablePrefs(scopeKey, kind) ?: return
 
-        val fallback = defaultValueFor(kind)
+        fun fallbackKey(): String {
+            return if (kind == "subs") "disable" else (available.firstOrNull() ?: current)
+        }
 
         val finalKey = when {
             kind == "subs" && current == "disable" -> "disable"
             available.contains(current) -> current
-            else -> fallback
+            else -> fallbackKey()
         }
 
+        dbg("enforce scope=$scopeKey kind=$kind current=$current available=$available -> final=$finalKey")
         if (finalKey != current) savePref(k, finalKey)
     }
 
     private fun buildRadioGrid(scopeKey: String, kind: String, options: List<Opt>): View {
-
         val hsv = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             isFillViewport = true
@@ -364,42 +305,40 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
-            setPadding(0, 0, 0, 0)
         }
         hsv.addView(wrap)
 
-        fun prefKey() = "$LANG_PREFIX$scopeKey::$kind"
-        val k = prefKey()
+        val k = "$LANG_PREFIX$scopeKey::$kind"
 
-        if (loadPref(k) == null) {
-            savePref(k, defaultValueFor(kind)) // audio=es_lat, subs=disable
-        }
+        if (loadPref(k) == null) savePref(k, defaultValueFor(kind))
 
         var selected = loadPref(k)?.trim().orEmpty()
         if (selected.isBlank()) selected = defaultValueFor(kind)
 
         val available: Set<String>? = loadAvailablePrefs(scopeKey, kind)
+        dbg("buildRadioGrid scope=$scopeKey kind=$kind selected=$selected available=${available ?: "NULL"}")
 
         fun isAllowed(key: String): Boolean {
-            if (available == null) return true
+            // ✅ Si NO está validado: bloquear todo EXCEPTO subs=disable
+            if (available == null) return (kind == "subs" && key == "disable")
             if (kind == "subs" && key == "disable") return true
             return available.contains(key)
         }
 
         if (available != null && !isAllowed(selected)) {
-            selected = defaultValueFor(kind)
+            val newSelected = when {
+                kind == "subs" -> "disable"
+                else -> available.firstOrNull() ?: selected
+            }
+            dbg("selected not allowed -> $selected => $newSelected")
+            selected = newSelected
             savePref(k, selected)
         }
 
-        // -------------------------
-        // ✅ Calcular ancho de celda según el texto más largo
-        // -------------------------
         val measureTv = TextView(this).apply { textSize = 11f }
         val maxTextPx = options.maxOfOrNull { opt ->
             measureTv.paint.measureText(opt.label)
         } ?: 0f
-
-        // padding lateral + un mínimo razonable
         val cellWidthPx = (maxTextPx + dp(18)).toInt().coerceAtLeast(dp(78))
 
         val dots = ArrayList<android.widget.ImageView>(options.size)
@@ -427,13 +366,35 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
         }
 
         fun setSelected(requestedKey: String) {
-            val fallback = defaultValueFor(kind)
+            dbg("CLICK RADIO scope=$scopeKey kind=$kind requested=$requestedKey")
+
+            if (available == null) {
+                val finalKey =
+                    if (kind == "subs" && requestedKey == "disable") "disable"
+                    else selected
+
+                if (selected == finalKey) {
+                    applyState()
+                    return
+                }
+
+                selected = finalKey
+                savePref(k, selected)
+
+                // 🔴 INVALIDAR TRACKS POR URL
+                bumpLangToken(scopeKey)
+
+                // 🔁 propagar a toda la serie
+                broadcastSelectionToWholeJson(scopeKey, kind, selected)
+
+                recreate()
+                return
+            }
 
             val finalKey = when {
-                available == null -> requestedKey
                 kind == "subs" && requestedKey == "disable" -> "disable"
                 isAllowed(requestedKey) -> requestedKey
-                else -> fallback
+                else -> selected
             }
 
             if (selected == finalKey) {
@@ -443,8 +404,16 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
 
             selected = finalKey
             savePref(k, selected)
-            applyState()
+
+            // 🔴 INVALIDAR TRACKS POR URL (CLAVE)
+            bumpLangToken(scopeKey)
+
+            // 🔁 aplicar a toda la serie / temporadas
+            broadcastSelectionToWholeJson(scopeKey, kind, selected)
+
+            recreate()
         }
+
 
         options.forEach { opt ->
             val cell = LinearLayout(this).apply {
@@ -462,17 +431,12 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
                 textSize = 11f
                 gravity = Gravity.CENTER
                 textAlignment = View.TEXT_ALIGNMENT_CENTER
-
-                // ✅ NO truncar a "ESP..."
                 ellipsize = null
                 setSingleLine(false)
                 maxLines = 2
                 setHorizontallyScrolling(false)
-
-                // ✅ evita cortes raros
                 breakStrategy = android.text.Layout.BREAK_STRATEGY_SIMPLE
                 hyphenationFrequency = android.text.Layout.HYPHENATION_FREQUENCY_NONE
-
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
@@ -497,7 +461,6 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
 
             cell.addView(lbl)
             cell.addView(dot)
-
             wrap.addView(cell)
         }
 
@@ -505,9 +468,16 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
         return hsv
     }
 
+    private fun bumpLangToken(scopeKey: String) {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        prefs.edit().putString("LANGCFG_TOKEN::$scopeKey", System.currentTimeMillis().toString()).apply()
+    }
+
 
     private fun isValidated(scopeKey: String): Boolean {
-        return loadAvailablePrefs(scopeKey, "audio") != null
+        val v = loadAvailablePrefs(scopeKey, "audio") != null
+        dbg("isValidated scope=$scopeKey -> $v")
+        return v
     }
 
     private fun divider(): View {
@@ -533,14 +503,113 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
 
     private fun loadPref(k: String): String? {
         val p = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return if (p.contains(k)) p.getString(k, null) else null
+        val v = if (p.contains(k)) p.getString(k, null) else null
+        dbg("loadPref key=$k -> ${v ?: "null"}")
+        return v
     }
 
     private fun savePref(k: String, v: String) {
+        dbg("savePref key=$k = $v")
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(k, v)
             .apply()
+    }
+
+    // -------------------------
+    // Propagación a JSON
+    // -------------------------
+
+    private fun extractRawFileName(scopeKey: String): String? {
+        return when {
+            scopeKey.startsWith("GROUP::") -> scopeKey.removePrefix("GROUP::").trim().ifBlank { null }
+            scopeKey.startsWith("SEASON::") -> {
+                val rest = scopeKey.removePrefix("SEASON::")
+                rest.split("::").getOrNull(0)?.trim()?.ifBlank { null }
+            }
+            else -> null
+        }
+    }
+
+    private fun buildAllScopeKeysForFile(rawFileName: String): List<String> {
+        val dm = JsonDataManager()
+        dm.loadData(this)
+        val imported = dm.getImportedJsons()
+        val pack = imported.firstOrNull { it.fileName.trim() == rawFileName.trim() }
+            ?: return listOf("GROUP::$rawFileName")
+
+        val seasons = detectSeasons(pack.videos.map { it.title }).sorted()
+        return buildList {
+            add("GROUP::$rawFileName")
+            seasons.forEach { s ->
+                val ss = s.toString().padStart(2, '0')
+                add("SEASON::$rawFileName::S$ss")
+            }
+        }
+    }
+
+    private fun pickRepresentativeUrlForScope(scopeKey: String): String? {
+        val dm = JsonDataManager()
+        dm.loadData(this)
+        val imported = dm.getImportedJsons()
+
+        if (scopeKey.startsWith("GROUP::")) {
+            val raw = scopeKey.removePrefix("GROUP::")
+            val pack = imported.firstOrNull { it.fileName.trim() == raw.trim() } ?: return null
+            return pack.videos.firstOrNull { it.videoUrl.isNotBlank() }?.videoUrl
+        }
+
+        if (scopeKey.startsWith("SEASON::")) {
+            val rest = scopeKey.removePrefix("SEASON::")
+            val parts = rest.split("::")
+            if (parts.size < 2) return null
+
+            val raw = parts[0]
+            val seasonTag = parts[1] // ej "S01"
+
+            val pack = imported.firstOrNull { it.fileName.trim() == raw.trim() } ?: return null
+            val match = pack.videos.firstOrNull { v ->
+                detectSeasonFromTitle(v.title)?.equals(seasonTag, ignoreCase = true) == true
+            }
+
+            return match?.videoUrl ?: pack.videos.firstOrNull { it.videoUrl.isNotBlank() }?.videoUrl
+        }
+
+        return null
+    }
+
+    private fun detectSeasonFromTitle(title: String): String? {
+        val t = title.trim()
+        val reSxx = Regex("""\bS(\d{1,2})\b""", RegexOption.IGNORE_CASE)
+        val reSxxExx = Regex("""\bS(\d{1,2})\s*E(\d{1,2})\b""", RegexOption.IGNORE_CASE)
+        val reX = Regex("""\b(\d{1,2})x(\d{1,2})\b""", RegexOption.IGNORE_CASE)
+        val reTemporada = Regex("""\b(temporada|season)\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE)
+
+        reSxxExx.find(t)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?.let { return "S" + it.toString().padStart(2, '0') }
+        reX.find(t)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?.let { return "S" + it.toString().padStart(2, '0') }
+        reTemporada.find(t)?.groupValues?.getOrNull(2)?.toIntOrNull()
+            ?.let { return "S" + it.toString().padStart(2, '0') }
+        reSxx.find(t)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?.let { return "S" + it.toString().padStart(2, '0') }
+
+        return null
+    }
+
+
+    private fun broadcastSelectionToWholeJson(scopeKey: String, kind: String, value: String) {
+        val raw = extractRawFileName(scopeKey)
+        dbg("broadcast scope=$scopeKey raw=${raw ?: "null"} kind=$kind value=$value")
+        if (raw == null) return
+
+        val allScopes = buildAllScopeKeysForFile(raw)
+        dbg("broadcast targets: ${allScopes.joinToString(" | ")}")
+
+        allScopes.forEach { sk ->
+            val kk = "$LANG_PREFIX$sk::$kind"
+            savePref(kk, value)
+        }
     }
 
     // -------------------------
@@ -553,7 +622,6 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
         val imported = dm.getImportedJsons()
 
         val rows = mutableListOf<Row>()
-
         imported.forEach { pack ->
             val rawFileName = pack.fileName.trim()
             val displayBase = prettyTitle(rawFileName)
@@ -600,11 +668,16 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
         return out
     }
 
+    // -------------------------
+    // Track list prefs
+    // -------------------------
+
     private fun trackListKey(scopeKey: String, kind: String) = "TRACKLIST::$scopeKey::$kind"
 
     private fun saveAvailablePrefs(scopeKey: String, kind: String, prefs: Set<String>) {
         val k = trackListKey(scopeKey, kind)
         val joined = prefs.joinToString("|")
+        dbg("saveAvailablePrefs key=$k joined='$joined'")
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(k, joined)
@@ -616,8 +689,14 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
         val p = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val raw = p.getString(k, null) ?: return null
         val out = raw.split("|").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
-        return out.ifEmpty { null }
+        val res = out.ifEmpty { null }
+        dbg("loadAvailablePrefs key=$k -> ${res ?: "null"} (raw='$raw')")
+        return res
     }
+
+    // -------------------------
+    // VLC Scan
+    // -------------------------
 
     data class TrackOpt(val id: Int, val name: String)
 
@@ -634,6 +713,7 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
                     videoUrl.startsWith("/") -> "file://$videoUrl"
                     else -> videoUrl
                 }
+                dbg("scanTracksWithVlc fixedUrl=$fixedUrl")
 
                 val lib = org.videolan.libvlc.LibVLC(
                     this,
@@ -669,8 +749,10 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
 
                     val hasAudio = audio.any { it.id != -1 }
                     val hasSubs = subs.isNotEmpty()
-                    if (hasAudio || hasSubs) break
 
+                    dbg("scan try=$tries hasAudio=$hasAudio audioCount=${audio.size} hasSubs=$hasSubs subsCount=${subs.size}")
+
+                    if (hasAudio || hasSubs) break
                     Thread.sleep(500)
                 }
 
@@ -699,13 +781,12 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
     private fun inferAudioPrefsFromTrackNames(names: List<String>): Set<String> {
         val out = linkedSetOf<String>()
         val n = names.map { it.lowercase(Locale.ROOT) }
-
         fun anyContains(vararg keys: String) = n.any { s -> keys.any { k -> s.contains(k) } }
 
         if (anyContains("español", "espanol", "spanish", "castellano", "lat")) out.add("es_lat")
         if (anyContains("english", "ingles", "inglés", "eng")) out.add("en")
         if (anyContains("japanese", "japones", "japonés", "jpn")) out.add("ja")
-
+        dbg("inferAudio from=$names -> $out")
         return out
     }
 
@@ -718,7 +799,8 @@ class LanguageSettingsMobileActivity : FragmentActivity() {
 
         if (anyContains("español", "espanol", "spanish", "castellano", "spa")) out.add("es_lat")
         if (anyContains("english", "ingles", "inglés", "eng")) out.add("en")
-
+        dbg("inferSubs from=$names -> $out")
         return out
     }
 }
+

@@ -308,13 +308,6 @@ class MainFragment : BrowseSupportFragment() {
         val rowsAdapter = ArrayObjectAdapter(ListRowPresenter())
         val cardPresenter = CardPresenter()
 
-        /// CONFIGURACIÓN DE IDIOMA
-
-        val langAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
-            add("Configurar IDIOMA")
-        }
-        rowsAdapter.add(ListRow(HeaderItem(0L, "CONFIGURACION DE IDIOMA"), langAdapter))
-
         // =========================
         // ✅ ARMADO DE REPRODUCCIÓN
         // =========================
@@ -324,7 +317,7 @@ class MainFragment : BrowseSupportFragment() {
             add("Borrar playlists RANDOM")
             add("Borrar TODAS las playlists RANDOM")
         }
-        rowsAdapter.add(ListRow(HeaderItem(1L, "ARMADO DE REPRODUCCIÓN"), playbackBuildAdapter))
+        rowsAdapter.add(ListRow(HeaderItem(0L, "ARMADO DE REPRODUCCIÓN"), playbackBuildAdapter))
 
         // =========================
         // ✅ ACCIONES
@@ -337,7 +330,7 @@ class MainFragment : BrowseSupportFragment() {
             add("Importar de SMB")
             add("Importar de DISPOSITIVO")
         }
-        rowsAdapter.add(ListRow(HeaderItem(2L, "ACCIONES"), actionsAdapter))
+        rowsAdapter.add(ListRow(HeaderItem(1L, "ACCIONES"), actionsAdapter))
 
         // =========================
         // ✅ CATALOGO
@@ -544,11 +537,6 @@ class MainFragment : BrowseSupportFragment() {
 
         private fun handleStringAction(item: String) {
             when (item) {
-
-                // CONFIGURACIÓN DE IDIOMAS
-
-                "Configurar IDIOMA" -> startActivity(Intent(requireContext(), LanguageSettingsTvActivity::class.java))
-
 
                 // ✅ ARMADO DE REPRODUCCIÓN
                 "Generar playlist RANDOM" -> runRandomGenerate()

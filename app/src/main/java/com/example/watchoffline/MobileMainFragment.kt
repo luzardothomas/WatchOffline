@@ -348,12 +348,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                     "__action_random_update__" -> { runRandomUpdate(); return@MobileSectionsAdapter }
                     "__action_random_delete__" -> { runRandomDeleteOne(); return@MobileSectionsAdapter }
                     "__action_random_delete_all__" -> { runRandomDeleteAll(); return@MobileSectionsAdapter }
-                    "__action_language_settings__" -> {
-                        writeLastPlayed("__action_language_settings__")
-                        startActivity(Intent(requireContext(), LanguageSettingsMobileActivity::class.java))
-                        return@MobileSectionsAdapter
-                    }
-
                 }
 
                 // =========================
@@ -433,13 +427,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     // =========================
 
     private fun buildSectionsFiltered(queryRaw: String): List<MobileSection> {
-
-        val langSettingsSection = MobileSection(
-            title = "CONFIGURACIÓN DE IDIOMAS",
-            items = listOf(
-                actionCard("CONFIGURAR IDIOMAS", "__action_language_settings__")
-            )
-        )
 
         val playbackBuildSection = MobileSection(
             title = "ARMADO DE REPRODUCCIÓN",
@@ -533,7 +520,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             }
         }
 
-        return listOf(langSettingsSection, playbackBuildSection, actionsSection) + contentSections
+        return listOf(playbackBuildSection, actionsSection) + contentSections
     }
 
     private fun runRandomGenerate() {

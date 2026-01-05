@@ -31,11 +31,13 @@ import org.videolan.libvlc.MediaPlayer as VlcMediaPlayer
 class PlaybackVideoFragment : Fragment() {
 
     companion object {
-
-        // SharedPreferences
         private const val PREFS_NAME = "watchoffline_prefs"
         private const val PREF_LAST_URL = "LAST_PLAYED_VIDEO_URL"
     }
+
+    // ✅ Preferencias GLOBALES (lo único que importa ahora)
+    private val PREF_GLOBAL_AUDIO = "GLOBAL_AUDIO_PREF" // "es_lat" | "en" | "ja" | "keep"
+    private val PREF_GLOBAL_SUBS  = "GLOBAL_SUBS_PREF"  // "disable" | "es_lat" | "en" | "keep"
 
     private val TAG = "PlaybackVideoFragment"
 
@@ -66,7 +68,7 @@ class PlaybackVideoFragment : Fragment() {
     private var currentIndex: Int = 0
     private var currentMovie: Movie? = null
 
-    // ✅ SOLO para playlists RANDOM (viene desde MainFragment/DetailsActivity)
+    // ✅ SOLO para playlists RANDOM
     private var loopPlaylist: Boolean = false
     private var disableLastPlayed: Boolean = false
 
@@ -101,93 +103,46 @@ class PlaybackVideoFragment : Fragment() {
     }
 
     // Tracks
-
     private var tracksAppliedForThisMovie = false
 
     private var spuTracks: Array<TrackDescription> = emptyArray()
     private var audioTracks: Array<TrackDescription> = emptyArray()
-    private var currentAudioTrackId: Int = -1 // VLC suele usar -1 como "default" en audio (depende stream)
-    private var currentSpuTrackId: Int = -1   // VLC Disable = -1
-    private var spuRefreshTries = 0
+    private var currentAudioTrackId: Int = -1
+    private var currentSpuTrackId: Int = -1
     private var tracksRefreshTries = 0
     private val MAX_TRACKS_REFRESH_TRIES = 18
     private val TRACKS_REFRESH_DELAY_MS = 650L
 
-    // Cache en RAM (rápido) + persistencia en prefs (sobrevive app)
+    // =========================
+    // ✅ Token por GROUP para invalidar TRACKS viejos (si todavía existieran)
+    // =========================
+    private fun groupScopeKey(): String {
+        val group = currentMovie?.studio?.trim().orEmpty()
+        return if (group.isNotBlank()) "GROUP::$group" else "GROUP::(none)"
+    }
+
+    private fun langToken(scopeKey: String): String {
+        val prefs = requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString("LANGCFG_TOKEN::$scopeKey", "0") ?: "0"
+    }
+
+    private fun bumpLangToken(scopeKey: String) {
+        val prefs = requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val k = "LANGCFG_TOKEN::$scopeKey"
+        val cur = prefs.getString(k, "0") ?: "0"
+        val next = (cur.toLongOrNull() ?: 0L) + 1L
+        prefs.edit().putString(k, next.toString()).apply()
+        Log.e(TAG, "LANGDBG bumpLangToken scope=$scopeKey $cur -> $next")
+    }
+
+    // Si todavía guardás algo por-URL, queda bajo token y se invalida con bump
+    private fun trackPrefsKey(url: String): String {
+        val token = langToken(groupScopeKey())
+        return "TRACKS::v=$token::" + url.trim()
+    }
+
+    // Cache por-key (tokenizado)
     private val trackCache = HashMap<String, Pair<Int, Int>>() // key -> (audioId, spuId)
-
-
-    private val tracksRefreshRunnable = object : Runnable {
-        override fun run() {
-            refreshTracks()
-
-            val hasRealSubs = spuTracks.any { it.id != -1 }
-            val hasRealAudio = audioTracks.any { it.id != -1 }
-
-            // ✅ apenas hay tracks reales, aplico saved/default UNA vez
-            if (!tracksAppliedForThisMovie && (hasRealSubs || hasRealAudio)) {
-                tracksAppliedForThisMovie = true
-                applySavedOrDefaultTracksForCurrentMovie()
-                // opcional: persistir lo que quedó aplicado
-                persistCurrentTracks("afterApply")
-            }
-
-            tracksRefreshTries++
-            if ((hasRealSubs || hasRealAudio) || tracksRefreshTries >= MAX_TRACKS_REFRESH_TRIES) return
-
-            ui.postDelayed(this, TRACKS_REFRESH_DELAY_MS)
-        }
-    }
-
-
-    private fun scheduleTracksRefreshLoop() {
-        ui.removeCallbacks(tracksRefreshRunnable)
-        tracksRefreshTries = 0
-        ui.post(tracksRefreshRunnable)
-    }
-
-    private fun refreshTracks() {
-        val p = vlcPlayer ?: run {
-            spuTracks = emptyArray()
-            audioTracks = emptyArray()
-            btnSubtitles.isEnabled = false
-            btnSubtitles.alpha = 0.35f
-            return
-        }
-
-        spuTracks = try { p.spuTracks ?: emptyArray() } catch (_: Exception) { emptyArray() }
-        audioTracks = try { p.audioTracks ?: emptyArray() } catch (_: Exception) { emptyArray() }
-
-        // Audio sin Disable
-        val audioRealCount = audioTracks.count { it.id != -1 }
-        // Subs puede ser solo Disable al principio, igual sirve mostrarlo (OFF)
-        val hasAny = (audioRealCount > 0) || spuTracks.isNotEmpty()
-
-        btnSubtitles.isEnabled = hasAny
-        btnSubtitles.alpha = if (hasAny) 1f else 0.35f
-
-        if (isTvDevice()) {
-            btnSubtitles.isFocusable = hasAny
-            btnSubtitles.isFocusableInTouchMode = hasAny
-        }
-    }
-
-
-    private fun setSubtitleTrack(trackId: Int) {
-        val p = vlcPlayer ?: return
-        currentSpuTrackId = trackId
-        try { p.spuTrack = trackId } catch (_: Exception) {}
-    }
-
-    private fun setAudioTrack(trackId: Int) {
-        val p = vlcPlayer ?: return
-        currentAudioTrackId = trackId
-        try { p.audioTrack = trackId } catch (_: Exception) {}
-    }
-
-
-
-    private fun trackPrefsKey(url: String) = "TRACKS::" + url.trim()
 
     private fun loadSavedTracks(url: String): Pair<Int, Int>? {
         val k = trackPrefsKey(url)
@@ -219,12 +174,213 @@ class PlaybackVideoFragment : Fragment() {
             .apply()
     }
 
+    // =========================
+    // ✅ Loop refresco tracks (cuando VLC ya los detectó)
+    // =========================
+    private val tracksRefreshRunnable = object : Runnable {
+        override fun run() {
+            refreshTracks()
+
+            val hasRealSubs = spuTracks.any { it.id != -1 }
+            val hasRealAudio = audioTracks.any { it.id != -1 }
+
+            Log.e(
+                TAG,
+                "LANGDBG tick tries=$tracksRefreshTries hasRealAudio=$hasRealAudio hasRealSubs=$hasRealSubs " +
+                        "audioCount=${audioTracks.size} spuCount=${spuTracks.size}"
+            )
+
+            if (!tracksAppliedForThisMovie && (hasRealSubs || hasRealAudio)) {
+                tracksAppliedForThisMovie = true
+                Log.e(TAG, "LANGDBG calling applySavedOrDefaultTracksForCurrentMovie()")
+                applySavedOrDefaultTracksForCurrentMovie()
+                persistCurrentTracks("afterApply") // opcional
+            }
+
+            tracksRefreshTries++
+            if ((hasRealSubs || hasRealAudio) || tracksRefreshTries >= MAX_TRACKS_REFRESH_TRIES) return
+            ui.postDelayed(this, TRACKS_REFRESH_DELAY_MS)
+        }
+    }
+
+    private fun scheduleTracksRefreshLoop() {
+        ui.removeCallbacks(tracksRefreshRunnable)
+        tracksRefreshTries = 0
+        ui.post(tracksRefreshRunnable)
+    }
+
+    private fun refreshTracks() {
+        val p = vlcPlayer ?: run {
+            spuTracks = emptyArray()
+            audioTracks = emptyArray()
+            btnSubtitles.isEnabled = false
+            btnSubtitles.alpha = 0.35f
+            return
+        }
+
+        spuTracks = try { p.spuTracks ?: emptyArray() } catch (_: Exception) { emptyArray() }
+        audioTracks = try { p.audioTracks ?: emptyArray() } catch (_: Exception) { emptyArray() }
+
+        val audioRealCount = audioTracks.count { it.id != -1 }
+        val hasAny = (audioRealCount > 0) || spuTracks.isNotEmpty()
+
+        btnSubtitles.isEnabled = hasAny
+        btnSubtitles.alpha = if (hasAny) 1f else 0.35f
+
+        if (isTvDevice()) {
+            btnSubtitles.isFocusable = hasAny
+            btnSubtitles.isFocusableInTouchMode = hasAny
+        }
+    }
+
+    private fun setSubtitleTrack(trackId: Int) {
+        val p = vlcPlayer ?: return
+        currentSpuTrackId = trackId
+        try { p.spuTrack = trackId } catch (_: Exception) {}
+    }
+
+    private fun setAudioTrack(trackId: Int) {
+        val p = vlcPlayer ?: return
+        currentAudioTrackId = trackId
+        try { p.audioTrack = trackId } catch (_: Exception) {}
+    }
+
+    // =========================
+    // ✅ Global prefs helpers
+    // =========================
+    private fun saveGlobalPref(kind: String, value: String) {
+        requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(if (kind == "audio") PREF_GLOBAL_AUDIO else PREF_GLOBAL_SUBS, value)
+            .apply()
+    }
+
+    private fun loadGlobalPref(kind: String): String? {
+        val p = requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return p.getString(if (kind == "audio") PREF_GLOBAL_AUDIO else PREF_GLOBAL_SUBS, null)
+    }
+
+    private fun norm(s: String?) = (s ?: "").trim().lowercase()
+
+    private fun inferLangFromName(name: String): String? {
+        val n = norm(name)
+        if (n.isBlank()) return null
+
+        if (n.contains("japanese") || n.contains("japon") || n.contains("jpn") || n == "ja") return "ja"
+        if (n.contains("english") || n.contains("ingles") || n.contains("inglés") || n.contains("eng") || n == "en") return "en"
+        if (n.contains("español") || n.contains("espanol") || n.contains("spanish") || n.contains("castellano") || n.contains("spa") || n == "es") return "es_lat"
+
+        return null
+    }
+
+    private fun pickSubIdByPref(pref: String): Int? {
+        fun hasAny(words: List<String>, name: String) = words.any { name.contains(it) }
+        if (pref == "disable") return -1
+
+        val list = spuTracks.filter { it.id != -1 }
+        if (list.isEmpty()) return null
+
+        val want = when (pref) {
+            "es_lat" -> listOf("español", "espanol", "spanish", "castellano", "spa", "es")
+            "en"     -> listOf("english", "ingles", "inglés", "eng", "en")
+            else     -> emptyList()
+        }
+        if (want.isEmpty()) return null
+
+        return list.firstOrNull { t -> hasAny(want, (t.name ?: "").lowercase()) }?.id
+    }
+
+    private fun pickAudioIdByPref(pref: String): Int? {
+        fun hasAny(words: List<String>, name: String) = words.any { name.contains(it) }
+
+        val list = audioTracks.filter { it.id != -1 }
+        if (list.isEmpty()) return null
+
+        val want = when (pref) {
+            "es_lat" -> listOf("español", "espanol", "spanish", "castellano", "lat", "spa", "es")
+            "en"     -> listOf("english", "ingles", "inglés", "eng", "en")
+            "ja"     -> listOf("japanese", "japones", "japonés", "jpn", "ja")
+            else     -> emptyList()
+        }
+        if (want.isEmpty()) return null
+
+        return list.firstOrNull { t -> hasAny(want, (t.name ?: "").lowercase()) }?.id
+    }
+
+    // =========================
+    // ✅ Aplicación al arrancar playback: SOLO GLOBAL
+    // =========================
+    private fun applySavedOrDefaultTracksForCurrentMovie() {
+        refreshTracks()
+
+        val audioPref = loadGlobalPref("audio") ?: "keep"
+        val subsPref  = loadGlobalPref("subs")  ?: "keep"
+
+        Log.e(TAG, "LANGDBG applyGlobal audioPref=$audioPref subsPref=$subsPref")
+
+        // -------- AUDIO --------
+        if (audioPref != "keep") {
+            val id = pickAudioIdByPref(audioPref)
+            if (id != null) {
+                setAudioTrack(id)
+                Log.e(TAG, "LANGDBG applied audioPref=$audioPref id=$id")
+            } else {
+                Log.e(TAG, "LANGDBG audioPref=$audioPref not-found -> keep current")
+            }
+        }
+
+        // -------- SUBS --------
+        when (subsPref) {
+            "disable" -> {
+                setSubtitleTrack(-1)
+                Log.e(TAG, "LANGDBG applied subsPref=disable id=-1")
+            }
+            "keep" -> { /* no tocar */ }
+            else -> {
+                val id = pickSubIdByPref(subsPref) ?: -1
+                setSubtitleTrack(id)
+                Log.e(TAG, "LANGDBG applied subsPref=$subsPref id=$id")
+            }
+        }
+    }
+
+    // =========================
+    // ✅ Persistencia “último reproducido”
+    // =========================
+    private fun persistLastPlayed(reason: String = "") {
+        if (disableLastPlayed) {
+            Log.e(TAG, "PERSIST skipped (disableLastPlayed=true) reason=$reason idx=$currentIndex size=${playlist.size}")
+            return
+        }
+
+        val url = currentMovie?.videoUrl?.trim().orEmpty()
+        if (url.isEmpty()) return
+
+        requireContext()
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(PREF_LAST_URL, url)
+            .apply()
+
+        Log.e(TAG, "PERSIST lastUrl=$url reason=$reason idx=$currentIndex size=${playlist.size}")
+    }
+
+    private fun persistCurrentTracks(reason: String = "") {
+        // ⚠️ Esto queda “opcional”. No manda la UX, la manda el GLOBAL pref.
+        val url = currentMovie?.videoUrl?.trim().orEmpty()
+        val p = vlcPlayer ?: return
+        if (url.isBlank()) return
+
+        val a = try { p.audioTrack } catch (_: Exception) { currentAudioTrackId }
+        val s = try { p.spuTrack } catch (_: Exception) { currentSpuTrackId }
+
+        saveTracks(url, a, s)
+        Log.d(TAG, "TRACKS persisted reason=$reason url=$url audio=$a spu=$s key=${trackPrefsKey(url)}")
+    }
+
     // ===== Mobile exit: show/hide por alpha =====
     private val hideExitRunnable = Runnable {
-        btnExitMobile?.animate()
-            ?.alpha(0f)
-            ?.setDuration(150)
-            ?.start()
+        btnExitMobile?.animate()?.alpha(0f)?.setDuration(150)?.start()
     }
 
     private fun showExitTemporarily(timeoutMs: Long = AUTO_HIDE_MS) {
@@ -267,42 +423,6 @@ class PlaybackVideoFragment : Fragment() {
     }
 
     // =========================
-    // ✅ Persistencia “último reproducido”
-    // =========================
-    private fun persistLastPlayed(reason: String = "") {
-        if (disableLastPlayed) {
-            Log.e(TAG, "PERSIST skipped (disableLastPlayed=true) reason=$reason idx=$currentIndex size=${playlist.size}")
-            return
-        }
-
-        val url = currentMovie?.videoUrl?.trim().orEmpty()
-        if (url.isEmpty()) return
-
-        requireContext()
-            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putString(PREF_LAST_URL, url)
-            .apply()
-
-        Log.e(TAG, "PERSIST lastUrl=$url reason=$reason idx=$currentIndex size=${playlist.size}")
-    }
-
-    private fun persistCurrentTracks(reason: String = "") {
-        val url = currentMovie?.videoUrl?.trim().orEmpty()
-        val p = vlcPlayer ?: return
-        if (url.isBlank()) return
-
-        val a = try { p.audioTrack } catch (_: Exception) { currentAudioTrackId }
-        val s = try { p.spuTrack } catch (_: Exception) { currentSpuTrackId }
-
-        saveTracks(url, a, s)
-        Log.d(TAG, "TRACKS persisted reason=$reason url=$url audio=$a spu=$s")
-    }
-
-
-
-
-    // =========================
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         root = inflater.inflate(R.layout.fragment_playback_video, container, false)
@@ -319,18 +439,14 @@ class PlaybackVideoFragment : Fragment() {
         txtPos = root.findViewById(R.id.txt_pos)
         txtDur = root.findViewById(R.id.txt_dur)
 
-        // ✅ mobile exit (si no está en XML, queda null y no pasa nada)
         btnExitMobile = root.findViewById(R.id.btn_exit_mobile)
 
-        // Prev / Next
         btnPrevVideo = root.findViewById(R.id.btn_prev_video)
         btnNextVideo = root.findViewById(R.id.btn_next_video)
 
-        // Apariencia fastbackward / fastforward (sólo icono)
         btnPrevVideo.setImageResource(android.R.drawable.ic_media_rew)
         btnNextVideo.setImageResource(android.R.drawable.ic_media_ff)
 
-        // Evitar “filtro gris molesto”
         btnPrevVideo.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         btnNextVideo.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         btnSeekBack.setBackgroundColor(android.graphics.Color.TRANSPARENT)
@@ -356,27 +472,19 @@ class PlaybackVideoFragment : Fragment() {
 
         videoLayout.setOnClickListener {
             toggleControls()
-
-            // ✅ Mobile: solo mostrar exit por touch, sin “hover”
             showExitTemporarily()
 
-            // ✅ TV: si querés mantener prioridad de foco
             if (isTvDevice() && controlsVisible) {
-                if (skipIntroButton.visibility == View.VISIBLE) {
-                    skipIntroButton.requestFocus()
-                } else {
-                    btnPlayPause.requestFocus()
-                }
+                if (skipIntroButton.visibility == View.VISIBLE) skipIntroButton.requestFocus()
+                else btnPlayPause.requestFocus()
             }
         }
 
         controlsOverlay.bringToFront()
         controlsOverlay.translationZ = 50f
 
-        // ✅ solo mobile
         setupMobileExitButton()
 
-        // ✅ MOBILE: mostrar el botón al entrar por primera vez
         if (mobileExitEnabled) {
             ui.post { showExitTemporarily() }
         }
@@ -389,7 +497,6 @@ class PlaybackVideoFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-
         root = view
 
         val dbgMovie = arguments?.getSerializable("movie") as? Movie
@@ -402,10 +509,7 @@ class PlaybackVideoFragment : Fragment() {
         introSkipDoneForCurrent = false
         lastSkipVisible = false
 
-        Log.e(
-            TAG,
-            "RESOLVED playlistSize=${playlist.size} currentIndex=$currentIndex movie=${currentMovie?.videoUrl}"
-        )
+        Log.e(TAG, "RESOLVED playlistSize=${playlist.size} currentIndex=$currentIndex movie=${currentMovie?.videoUrl}")
 
         val url = currentMovie?.videoUrl
         if (url.isNullOrBlank()) {
@@ -414,7 +518,6 @@ class PlaybackVideoFragment : Fragment() {
             return
         }
 
-        // ✅ flags (solo afectan a RANDOM si el intent los trae)
         loopPlaylist = requireActivity().intent?.getBooleanExtra("EXTRA_LOOP_PLAYLIST", false) == true
         disableLastPlayed = requireActivity().intent?.getBooleanExtra("EXTRA_DISABLE_LAST_PLAYED", false) == true
 
@@ -427,13 +530,9 @@ class PlaybackVideoFragment : Fragment() {
         initVlc(url)
         startTicker()
 
-        // Mantener pantalla encendida
         view.keepScreenOn = true
     }
 
-    /**
-     * ✅ ÚNICA FUENTE DE VERDAD: arguments
-     */
     private fun resolvePlaylistAndIndex() {
         val argMovie = arguments?.getSerializable("movie") as? Movie ?: run {
             playlist = emptyList()
@@ -507,9 +606,8 @@ class PlaybackVideoFragment : Fragment() {
         val next = nextIndex()
         if (next != null) {
             endHandled = false
-            playIndex(next) // playIndex persiste el nuevo (si no está deshabilitado)
+            playIndex(next)
         } else {
-            // ✅ caso normal: termina y sale
             requireActivity().finish()
         }
     }
@@ -552,7 +650,6 @@ class PlaybackVideoFragment : Fragment() {
         lastSkipVisible = false
         updatePrevNextState()
 
-        // Subs: por defecto desactivados
         currentSpuTrackId = -1
         spuTracks = emptyArray()
         btnSubtitles.isEnabled = false
@@ -623,237 +720,15 @@ class PlaybackVideoFragment : Fragment() {
         }
     }
 
-    private fun looksSpanish(name: String): Boolean {
-        val n = name.trim().lowercase()
-        return n.contains("español") ||
-                n.contains("espanol") ||
-                n.contains("spanish") ||
-                n.contains("castellano") ||
-                n.contains("spa") ||          // a veces viene como "spa"
-                n.contains("es-") || n.contains("[es]") || n == "es"
-    }
-
-    private fun pickSpanishTrackId(tracks: Array<TrackDescription>): Int? {
-        // 1) match por nombre
-        tracks.firstOrNull { t -> looksSpanish(t.name ?: "") }?.let { return it.id }
-
-        // 2) fallback: si hay algo que diga "default"
-        tracks.firstOrNull { t -> (t.name ?: "").lowercase().contains("default") }?.let { return it.id }
-
-        return null
-    }
-
-    private fun langPref(scopeKey: String, kind: String): String? {
-        val k = "LANGCFG::$scopeKey::$kind"
-        val p = requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return if (p.contains(k)) p.getString(k, null) else null
-    }
-
-    private fun detectSeasonFromTitle(title: String?): String? {
-        if (title.isNullOrBlank()) return null
-
-        Regex("""\bS(\d{1,2})\s*E(\d{1,2})\b""", RegexOption.IGNORE_CASE)
-            .find(title)?.let { m ->
-                val s = m.groupValues[1].toIntOrNull() ?: return null
-                return "S" + s.toString().padStart(2, '0')
-            }
-
-        Regex("""\b(\d{1,2})x(\d{1,2})\b""", RegexOption.IGNORE_CASE)
-            .find(title)?.let { m ->
-                val s = m.groupValues[1].toIntOrNull() ?: return null
-                return "S" + s.toString().padStart(2, '0')
-            }
-
-        Regex("""\b(temporada|season)\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE)
-            .find(title)?.let { m ->
-                val s = m.groupValues[2].toIntOrNull() ?: return null
-                return "S" + s.toString().padStart(2, '0')
-            }
-
-        return null
-    }
-
-    /**
-     * Llamar cuando arranca el playback:
-     * - si hay guardado por URL => aplicar
-     * - si no, elegir español si existe (audio y subs)
-     * - y guardar
-     */
-    private fun applySavedOrDefaultTracksForCurrentMovie() {
-        val url = currentMovie?.videoUrl?.trim().orEmpty()
-        if (url.isBlank()) return
-
-        refreshTracks()
-
-        // 1️⃣ Si hay algo guardado por URL → respetarlo (máxima prioridad)
-        val saved = loadSavedTracks(url)
-        if (saved != null) {
-            val (a, s) = saved
-
-            // Audio: solo si existe
-            if (audioTracks.any { it.id == a }) {
-                setAudioTrack(a)
-                currentAudioTrackId = a
-            }
-
-            // Subs: puede ser -1 (OFF)
-            if (s == -1 || spuTracks.any { it.id == s }) {
-                setSubtitleTrack(s)
-                currentSpuTrackId = s
-            }
-            return
-        }
-
-        // 2️⃣ LanguageSettings scopes (SEASON / GROUP)
-        val group = currentMovie?.studio?.trim().orEmpty()   // viene de Movie.studio (fileName)
-        val season = detectSeasonFromTitle(currentMovie?.title)
-
-        fun langPref(scopeKey: String, kind: String): String? {
-            val k = "LANGCFG::$scopeKey::$kind"
-            val p = requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            return if (p.contains(k)) p.getString(k, null) else null
-        }
-
-        // ✅ limpiar valores viejos por compat (si quedó "default" de builds anteriores)
-        fun sanitizePref(kind: String, v: String?): String? {
-            if (v == null) return null
-            if (v == "default") return if (kind == "audio") "es_lat" else "disable"
-            return v
-        }
-
-        fun pickAudioIdByPref(pref: String): Int? {
-            fun hasAny(words: List<String>, name: String) = words.any { name.contains(it) }
-
-            val list = audioTracks.filter { it.id != -1 }
-            if (list.isEmpty()) return null
-
-            val want = when (pref) {
-                "es_lat" -> listOf("español", "espanol", "spanish", "castellano", "lat", "spa", "es")
-                "en" -> listOf("english", "ingles", "inglés", "eng", "en")
-                "ja" -> listOf("japanese", "japones", "japonés", "jpn", "ja")
-                else -> emptyList()
-            }
-
-            if (want.isEmpty()) return null
-
-            return list.firstOrNull { t ->
-                hasAny(want, (t.name ?: "").lowercase())
-            }?.id
-        }
-
-        fun pickSubIdByPref(pref: String): Int? {
-            fun hasAny(words: List<String>, name: String) = words.any { name.contains(it) }
-
-            if (pref == "disable") return -1
-
-            val list = spuTracks.filter { it.id != -1 }
-            if (list.isEmpty()) return null
-
-            val want = when (pref) {
-                "es_lat" -> listOf("español", "espanol", "spanish", "castellano", "spa", "es")
-                "en" -> listOf("english", "ingles", "inglés", "eng", "en")
-                else -> emptyList()
-            }
-
-            if (want.isEmpty()) return null
-
-            return list.firstOrNull { t ->
-                hasAny(want, (t.name ?: "").lowercase())
-            }?.id
-        }
-
-        // leer prefs (prioridad: SEASON > GROUP)
-        var audioPref: String? = null
-        var subsPref: String? = null
-
-        if (group.isNotBlank()) {
-            if (season != null) {
-                audioPref = sanitizePref("audio", langPref("SEASON::$group::$season", "audio"))
-                subsPref = sanitizePref("subs", langPref("SEASON::$group::$season", "subs"))
-            }
-            if (audioPref == null) audioPref = sanitizePref("audio", langPref("GROUP::$group", "audio"))
-            if (subsPref == null) subsPref = sanitizePref("subs", langPref("GROUP::$group", "subs"))
-        }
-
-        var appliedSomething = false
-
-        // ✅ AUDIO:
-        // pref elegido -> si no existe -> Español Latino -> primer audio real (fallback final)
-        audioPref?.let { pref ->
-            val wantId = pickAudioIdByPref(pref)
-
-            val finalId =
-                if (wantId != null && audioTracks.any { it.id == wantId }) {
-                    wantId
-                } else {
-                    // ✅ fallback si NO existe lo pedido (ej japonés)
-                    pickAudioIdByPref("es_lat")
-                        ?: audioTracks.firstOrNull { it.id != -1 }?.id
-                }
-
-            if (finalId != null && audioTracks.any { it.id == finalId }) {
-                setAudioTrack(finalId)
-                currentAudioTrackId = finalId
-                appliedSomething = true
-            }
-        }
-
-        // ✅ SUBS:
-        // disable siempre -1
-        // si idioma no existe -> -1
-        subsPref?.let { pref ->
-            val id =
-                if (pref == "disable") -1
-                else pickSubIdByPref(pref) ?: -1
-
-            if (id == -1 || spuTracks.any { it.id == id }) {
-                setSubtitleTrack(id)
-                currentSpuTrackId = id
-                appliedSomething = true
-            }
-        }
-
-        // si aplicó algo por scopes, guardarlo por URL (sticky por episodio) y salir
-        if (appliedSomething) {
-            saveTracks(url, currentAudioTrackId, currentSpuTrackId)
-            return
-        }
-
-        // 3️⃣ Defaults reales:
-        // Audio: Español Latino si existe, sino primer audio real
-        // Subs: DISABLE
-        val defaultAudio =
-            pickSpanishTrackId(audioTracks)
-                ?: audioTracks.firstOrNull { it.id != -1 }?.id
-                ?: -1
-
-        val defaultSpu = -1 // DISABLE
-
-        if (defaultAudio != -1) {
-            setAudioTrack(defaultAudio)
-            currentAudioTrackId = defaultAudio
-        }
-
-        setSubtitleTrack(defaultSpu)
-        currentSpuTrackId = defaultSpu
-
-        saveTracks(url, currentAudioTrackId, currentSpuTrackId)
-    }
-
-
-
     private fun setupSubtitles() {
         btnSubtitles.isEnabled = false
         btnSubtitles.alpha = 0.35f
-
         btnSubtitles.setOnClickListener {
             bumpControlsTimeout()
             showExitTemporarily()
             openTracksDialog()
         }
     }
-
-
 
     private fun refreshSpuTracks() {
         val p = vlcPlayer ?: run {
@@ -876,21 +751,18 @@ class PlaybackVideoFragment : Fragment() {
         }
     }
 
+    // ✅ ACÁ está la propagación:
+    // - Audio: guarda GLOBAL_AUDIO_PREF y bump token
+    // - Subs:  guarda GLOBAL_SUBS_PREF  y bump token
     private fun openTracksDialog() {
         refreshTracks()
 
-        val p = vlcPlayer
-        if (p == null) return
+        val p = vlcPlayer ?: return
 
-        // Audio: filtramos Disable (-1)
         val audioList = audioTracks.filter { it.id != -1 }
-        // Subs: dejamos todo (incluye Disable -1)
         val subsList = spuTracks.toList()
 
-        if (audioList.isEmpty() && subsList.isEmpty()) {
-            // sin toast como pediste: simplemente no hacemos nada
-            return
-        }
+        if (audioList.isEmpty() && subsList.isEmpty()) return
 
         fun trackName(t: TrackDescription, fallback: String): String {
             val n = (t.name ?: "").trim()
@@ -925,20 +797,29 @@ class PlaybackVideoFragment : Fragment() {
                 audioNames
             )
 
-            // selección actual (si VLC da -1, elegimos 0)
             val currentAudio = try { p.audioTrack } catch (_: Exception) { currentAudioTrackId }
             val checkedAudio = audioList.indexOfFirst { it.id == currentAudio }.let { if (it >= 0) it else 0 }
             lvAudio.setItemChecked(checkedAudio, true)
 
             lvAudio.setOnItemClickListener { _, _, which, _ ->
-                val id = audioList[which].id
+                val t = audioList[which]
+                val id = t.id
+
                 setAudioTrack(id)
                 currentAudioTrackId = id
 
-                val url = currentMovie?.videoUrl?.trim().orEmpty()
-                saveTracks(url, id, currentSpuTrackId)
-            }
+                // ✅ guardar GLOBAL
+                val pref = inferLangFromName(t.name ?: "") ?: "keep"
+                saveGlobalPref("audio", pref)
 
+                // ✅ invalidar TRACKS por-URL anteriores del group
+                bumpLangToken(groupScopeKey())
+
+                Log.e(TAG, "LANGDBG GLOBAL audioPref=$pref (from='${t.name}') id=$id")
+
+                // opcional: persistir por-url del episodio actual bajo token nuevo
+                persistCurrentTracks("audioPick")
+            }
 
             container.addView(lvAudio)
         }
@@ -957,7 +838,6 @@ class PlaybackVideoFragment : Fragment() {
             }
 
             val subsNames = subsList.map { t ->
-                // VLC ya trae "Disable" normalmente
                 trackName(t, "Subtítulo ${t.id}")
             }.toTypedArray()
 
@@ -972,14 +852,19 @@ class PlaybackVideoFragment : Fragment() {
             lvSubs.setItemChecked(checkedSubs, true)
 
             lvSubs.setOnItemClickListener { _, _, which, _ ->
-                val id = subsList[which].id
-                setSubtitleTrack(id)
-                currentSpuTrackId = id
+                val t = subsList[which]
+                setSubtitleTrack(t.id)
+                currentSpuTrackId = t.id
 
-                val url = currentMovie?.videoUrl?.trim().orEmpty()
-                saveTracks(url, currentAudioTrackId, id)
+                val pref = if (t.id == -1) "disable" else (inferLangFromName(t.name ?: "") ?: "keep")
+                saveGlobalPref("subs", pref)
+
+                bumpLangToken(groupScopeKey())
+
+                Log.e(TAG, "LANGDBG GLOBAL subsPref=$pref (from='${t.name}') id=${t.id}")
+
+                persistCurrentTracks("subsPick")
             }
-
 
             container.addView(lvSubs)
         }
@@ -987,40 +872,32 @@ class PlaybackVideoFragment : Fragment() {
         AlertDialog.Builder(requireContext())
             .setTitle("Tracks")
             .setView(container)
-            .setPositiveButton("Cerrar", null)  // ✅ único modo de cerrar
+            .setPositiveButton("Cerrar", null)
             .show()
     }
 
     private fun isTvDevice(): Boolean {
         val ctx = requireContext()
 
-        // 1) UI mode (lo "correcto")
         val uiMode = ctx.resources.configuration.uiMode
         val isTelevision =
             (uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK) ==
                     android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
 
-        // 2) Features (lo "correcto" para Android TV / Leanback)
         val pm = ctx.packageManager
         val hasLeanback =
             pm.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK) ||
                     pm.hasSystemFeature("android.software.leanback")
 
-        // 3) Feature TV (algunos devices sí lo reportan aunque no leanback)
         val hasTelevisionFeature =
             pm.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TELEVISION)
 
-        // 4) Heurística para TV boxes que reportan mal:
-        //    sin touch + navegación por DPAD ⇒ tratalo como TV
         val cfg = ctx.resources.configuration
         val noTouch = cfg.touchscreen == android.content.res.Configuration.TOUCHSCREEN_NOTOUCH
         val dpad = cfg.navigation == android.content.res.Configuration.NAVIGATION_DPAD
 
         return isTelevision || hasLeanback || hasTelevisionFeature || (noTouch && dpad)
     }
-
-
-
 
     private fun setupMobileExitButton() {
         val btn = btnExitMobile ?: return
@@ -1040,7 +917,6 @@ class PlaybackVideoFragment : Fragment() {
         btn.visibility = View.VISIBLE
         btn.alpha = 0f
 
-        // ✅ CLAVE: Exit nunca debe robar foco (ni en mobile/no-TV)
         btn.isFocusable = false
         btn.isFocusableInTouchMode = false
 
@@ -1058,15 +934,14 @@ class PlaybackVideoFragment : Fragment() {
             false
         }
     }
+
     private fun setupRemoteHandlers() {
-        // ✅ MOBILE: anular por completo “modo control remoto”
         if (!isTvDevice()) {
             root.setOnKeyListener(null)
             videoLayout.setOnKeyListener(null)
             skipIntroButton.setOnKeyListener(null)
             seekBar.setOnKeyListener(null)
 
-            // Mobile táctil: no queremos foco/hover ni navegación DPAD
             root.isFocusable = false
             root.isFocusableInTouchMode = false
 
@@ -1095,9 +970,6 @@ class PlaybackVideoFragment : Fragment() {
             return
         }
 
-        // =========================
-        // ✅ TV: queda igual que lo tenías
-        // =========================
         root.isFocusable = true
         root.isFocusableInTouchMode = true
         root.requestFocus()
@@ -1170,11 +1042,8 @@ class PlaybackVideoFragment : Fragment() {
                 KeyEvent.KEYCODE_DPAD_DOWN -> { hideOverlayOnly(); true }
                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
                     val f = root.findFocus()
-                    if (f != null && f.isClickable) {
-                        f.performClick(); true
-                    } else {
-                        togglePlayPause(); true
-                    }
+                    if (f != null && f.isClickable) { f.performClick(); true }
+                    else { togglePlayPause(); true }
                 }
                 KeyEvent.KEYCODE_BACK -> {
                     persistLastPlayed()
@@ -1231,7 +1100,6 @@ class PlaybackVideoFragment : Fragment() {
         scheduleAutoHide()
     }
 
-
     private fun hideOverlayOnly() {
         ui.removeCallbacks(hideControlsRunnable)
         hideControlsRunnable.run()
@@ -1241,17 +1109,11 @@ class PlaybackVideoFragment : Fragment() {
         ui.removeCallbacks(hideControlsRunnable)
 
         val focusIsSeek = (root.findFocus() === seekBar)
-
-        // ✅ SOLO en TV real dejamos que el seekbar bloquee el autohide
-        // En Mobile (aunque reciba ENTER/DPAD) queremos que se oculte para no “grisear” el video.
         if (isTvDevice() && focusIsSeek) return
-
-        // (opcional) si el usuario está arrastrando el seekbar, no ocultar
         if (isUserSeeking) return
 
         ui.postDelayed(hideControlsRunnable, AUTO_HIDE_MS)
     }
-
 
     private fun bumpControlsTimeout() {
         if (controlsVisible) scheduleAutoHide()
@@ -1282,7 +1144,6 @@ class PlaybackVideoFragment : Fragment() {
 
         p.time = targetSec * 1000L
 
-        // evita rebote inmediato
         skipHideUntilMs = System.currentTimeMillis() + 2000L
         skipIntroButton.visibility = View.GONE
 
@@ -1360,7 +1221,6 @@ class PlaybackVideoFragment : Fragment() {
                         scheduleAutoHide()
                     }
 
-                    // ✅ Cuando VLC detecta/actualiza streams, suelen aparecer subs
                     VlcMediaPlayer.Event.ESAdded,
                     VlcMediaPlayer.Event.ESSelected,
                     VlcMediaPlayer.Event.ESDeleted -> ui.post {
@@ -1444,7 +1304,6 @@ class PlaybackVideoFragment : Fragment() {
 
                     skipIntroButton.visibility = if (shouldShowSkip) View.VISIBLE else View.GONE
 
-                    // ✅ Regla absoluta: si controles ocultos + skip visible => hover en Skip (TV)
                     if (isTvDevice() && !controlsVisible && skipIntroButton.visibility == View.VISIBLE) {
                         if (!skipIntroButton.isFocused) {
                             ui.post {
