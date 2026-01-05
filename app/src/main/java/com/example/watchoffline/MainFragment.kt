@@ -38,6 +38,10 @@ class MainFragment : BrowseSupportFragment() {
 
     private val jsonDataManager = JsonDataManager()
 
+    // ✅ RANDOM playlists
+    private lateinit var randomizeImporter: RandomizeImporter
+
+
     // ✅ SMB
     private lateinit var smbGateway: SmbGateway
 
@@ -45,6 +49,27 @@ class MainFragment : BrowseSupportFragment() {
     private val preloadedPosterUrls = HashSet<String>()
 
     private var pendingFocusLastPlayed = false
+
+
+
+    private fun writeLastPlayedUrl(url: String) {
+        val u = url.trim()
+        if (u.isEmpty()) return
+        requireContext()
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_LAST_PLAYED, u)
+            .apply()
+    }
+
+    private fun readLastPlayedUrl(): String? {
+        val prefs = requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val u = prefs.getString(KEY_LAST_PLAYED, null)?.trim()
+        Log.e(TAG, "READ lastPlayedUrl=$u")
+        return u?.takeIf { it.isNotEmpty() }
+    }
+
+
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
@@ -60,6 +85,8 @@ class MainFragment : BrowseSupportFragment() {
         super.onActivityCreated(savedInstanceState)
 
         jsonDataManager.loadData(requireContext())
+
+        randomizeImporter = RandomizeImporter(requireContext(), jsonDataManager)
 
         smbGateway = SmbGateway(requireContext())
         smbGateway.ensureProxyStarted(8081)
@@ -162,17 +189,6 @@ class MainFragment : BrowseSupportFragment() {
         }
     }
 
-    // =========================
-    // ✅ FOCUS ÚLTIMO REPRODUCIDO (ESTABLE, sin ViewHolderTask)
-    // =========================
-
-
-    private fun readLastPlayedUrl(): String? {
-        val prefs = requireContext().getSharedPreferences("watchoffline_prefs", Context.MODE_PRIVATE)
-        val u = prefs.getString("LAST_PLAYED_VIDEO_URL", null)?.trim()
-        Log.e(TAG, "READ lastPlayedUrl=$u")
-        return u?.takeIf { it.isNotEmpty() }
-    }
 
 
     /**
@@ -292,6 +308,20 @@ class MainFragment : BrowseSupportFragment() {
         val rowsAdapter = ArrayObjectAdapter(ListRowPresenter())
         val cardPresenter = CardPresenter()
 
+        // =========================
+        // ✅ ARMADO DE REPRODUCCIÓN
+        // =========================
+        val playbackBuildAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
+            add("Generar playlist RANDOM")
+            add("Actualizar playlist RANDOM")
+            add("Borrar playlists RANDOM")
+            add("Borrar TODAS las playlists RANDOM")
+        }
+        rowsAdapter.add(ListRow(HeaderItem(0L, "ARMADO DE REPRODUCCIÓN"), playbackBuildAdapter))
+
+        // =========================
+        // ✅ ACCIONES
+        // =========================
         val actionsAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
             add(getString(R.string.erase_json))
             add("Borrar todos los JSON")
@@ -300,17 +330,47 @@ class MainFragment : BrowseSupportFragment() {
             add("Importar de SMB")
             add("Importar de DISPOSITIVO")
         }
+        rowsAdapter.add(ListRow(HeaderItem(1L, "ACCIONES"), actionsAdapter))
 
-        rowsAdapter.add(ListRow(HeaderItem(0L, "ACCIONES"), actionsAdapter))
+        // =========================
+        // ✅ CATALOGO
+        // =========================
+        val importedAll = jsonDataManager.getImportedJsons()
 
-        jsonDataManager.getImportedJsons().forEach { imported ->
-            val rowAdapter = ArrayObjectAdapter(cardPresenter).apply {
-                imported.videos.forEach { v -> add(v.toMovie()) }
+        fun isRandomImported(imported: ImportedJson): Boolean =
+            imported.fileName.uppercase(Locale.ROOT).startsWith("RANDOM")
+
+        val importedSorted = importedAll.sortedWith(
+            compareByDescending<ImportedJson> { isRandomImported(it) }
+                .thenBy { prettyTitle(it.fileName).lowercase(Locale.ROOT) }
+        )
+
+        val randomCover = "android.resource://${requireContext().packageName}/drawable/dados"
+
+        importedSorted.forEachIndexed { idx, imported ->
+            val rowAdapter = ArrayObjectAdapter(cardPresenter)
+
+            if (isRandomImported(imported)) {
+                // ✅ UNA SOLA CARD (launcher de playlist RANDOM)
+                rowAdapter.add(
+                    Movie(
+                        title = prettyTitle(imported.fileName),
+                        videoUrl = "playlist://${imported.fileName}",
+                        cardImageUrl = randomCover,
+                        backgroundImageUrl = null,
+                        skipToSecond = 0,
+                        delaySkip = 0,
+                        description = "Playlist RANDOM"
+                    )
+                )
+            } else {
+                imported.videos.forEach { v -> rowAdapter.add(v.toMovie()) }
             }
 
+            val headerId = 1000L + idx
             rowsAdapter.add(
                 ListRow(
-                    HeaderItem(imported.fileName.hashCode().toLong(), prettyTitle(imported.fileName)),
+                    HeaderItem(headerId, prettyTitle(imported.fileName)),
                     rowAdapter
                 )
             )
@@ -318,6 +378,10 @@ class MainFragment : BrowseSupportFragment() {
 
         adapter = rowsAdapter
     }
+
+
+
+
 
     private fun VideoItem.toMovie() = Movie(
         title = title,
@@ -370,6 +434,68 @@ class MainFragment : BrowseSupportFragment() {
             movie: Movie,
             row: Row
         ) {
+
+            val clickedUrl = movie.videoUrl?.trim().orEmpty()
+            if (clickedUrl.isNotEmpty()) {
+                writeLastPlayedUrl(clickedUrl)   // ✅ SIEMPRE la última card clickeada (incluye playlist://)
+            }
+
+
+            // =========================
+            // ✅ PLAYLIST RANDOM
+            // =========================
+            if (movie.videoUrl?.startsWith("playlist://") == true) {
+                // ✅ PLAYLIST RANDOM (launcher)
+                val url = movie.videoUrl ?: return
+
+                if (url.startsWith("playlist://")) {
+                    val playlistName = url.removePrefix("playlist://").trim()
+
+                    val imported = jsonDataManager.getImportedJsons()
+                        .firstOrNull { it.fileName == playlistName }
+
+                    if (imported == null || imported.videos.isEmpty()) {
+                        Toast.makeText(requireContext(), "Playlist no encontrada o vacía", Toast.LENGTH_LONG).show()
+                        return
+                    }
+
+                    val playlist = ArrayList<Movie>().apply {
+                        imported.videos.forEach { v -> add(v.toMovie()) }
+                    }
+
+                    val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
+                        putExtra(DetailsActivity.MOVIE, playlist[0])
+                        putExtra(DetailsActivity.EXTRA_PLAYLIST, playlist)
+                        putExtra(DetailsActivity.EXTRA_INDEX, 0)
+
+                        // 🔁 SOLO RANDOM
+                        putExtra("EXTRA_LOOP_PLAYLIST", true)
+                        putExtra("EXTRA_DISABLE_LAST_PLAYED", true)
+                    }
+
+                    pendingFocusLastPlayed = false
+
+                    val cardView = itemViewHolder.view as? ImageCardView
+                    val shared = cardView?.mainImageView
+
+                    if (shared != null) {
+                        val options = ActivityOptionsCompat.makeSceneTransitionAnimation(
+                            requireActivity(),
+                            shared,
+                            DetailsActivity.SHARED_ELEMENT_NAME
+                        )
+                        startActivity(intent, options.toBundle())
+                    } else {
+                        startActivity(intent)
+                    }
+                    return
+                }
+
+            }
+
+            // =========================
+            // ✅ FLUJO NORMAL
+            // =========================
             val listRow = row as? ListRow
             val adapter = listRow?.adapter
 
@@ -384,8 +510,6 @@ class MainFragment : BrowseSupportFragment() {
             val index = playlist.indexOfFirst { it.videoUrl == movie.videoUrl }
                 .let { if (it >= 0) it else 0 }
 
-            Log.e(TAG, "NAV movie=${movie.videoUrl} playlistSize=${playlist.size} index=$index")
-
             val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
                 putExtra(DetailsActivity.MOVIE, movie)
                 if (playlist.size > 1) {
@@ -394,10 +518,10 @@ class MainFragment : BrowseSupportFragment() {
                 }
             }
 
+            pendingFocusLastPlayed = true
+
             val cardView = itemViewHolder.view as? ImageCardView
             val shared = cardView?.mainImageView
-
-            pendingFocusLastPlayed = true
 
             if (shared != null) {
                 val options = ActivityOptionsCompat.makeSceneTransitionAnimation(
@@ -411,8 +535,19 @@ class MainFragment : BrowseSupportFragment() {
             }
         }
 
+
+
+
         private fun handleStringAction(item: String) {
             when (item) {
+
+                // ✅ ARMADO DE REPRODUCCIÓN
+                "Generar playlist RANDOM" -> runRandomGenerate()
+                "Actualizar playlist RANDOM" -> runRandomUpdate()
+                "Borrar playlists RANDOM" -> runRandomDeleteSelected()
+                "Borrar TODAS las playlists RANDOM" -> runRandomDeleteAll()
+
+                // ✅ ACCIONES (tuyas)
                 getString(R.string.erase_json) -> showDeleteDialog()
                 "Borrar todos los JSON" -> showDeleteAllDialog()
                 "Credenciales SMB" -> openSmbConnectFlow()
@@ -422,7 +557,42 @@ class MainFragment : BrowseSupportFragment() {
                 else -> Toast.makeText(requireContext(), item, Toast.LENGTH_SHORT).show()
             }
         }
+
     }
+
+    private fun runRandomGenerate() {
+        randomizeImporter.actionGenerateRandom(
+            toast = { msg -> activity?.runOnUiThread { Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() } },
+            onDone = { activity?.runOnUiThread { refreshUI() } },
+            onError = { err -> activity?.runOnUiThread { Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() } }
+        )
+    }
+
+    private fun runRandomUpdate() {
+        randomizeImporter.actionUpdateRandom(
+            toast = { msg -> activity?.runOnUiThread { Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() } },
+            onDone = { activity?.runOnUiThread { refreshUI() } },
+            onError = { err -> activity?.runOnUiThread { Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() } }
+        )
+    }
+
+    private fun runRandomDeleteSelected() {
+        randomizeImporter.actionDeleteRandomPlaylists(
+            toast = { msg -> activity?.runOnUiThread { Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() } },
+            onDone = { activity?.runOnUiThread { refreshUI() } },
+            onError = { err -> activity?.runOnUiThread { Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() } }
+        )
+    }
+
+    private fun runRandomDeleteAll() {
+        randomizeImporter.actionDeleteAllRandomPlaylists(
+            toast = { msg -> activity?.runOnUiThread { Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() } },
+            onDone = { activity?.runOnUiThread { refreshUI() } },
+            onError = { err -> activity?.runOnUiThread { Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() } }
+        )
+    }
+
+
 
     private fun showClearSmbDialog() {
         AlertDialog.Builder(requireContext())
@@ -749,6 +919,7 @@ class MainFragment : BrowseSupportFragment() {
         private const val DEBUG_LOGS = false
 
         private const val PREFS_NAME = "watchoffline_prefs"
-        private const val EXTRA_LAST_PLAYED_URL = "LAST_PLAYED_VIDEO_URL"
+        private const val KEY_LAST_PLAYED = "LAST_PLAYED_VIDEO_URL"
     }
+
 }

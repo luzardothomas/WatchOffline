@@ -55,15 +55,23 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     private val PREFS_NAME = "watchoffline_prefs"
     private val KEY_LAST_PLAYED = "LAST_PLAYED_VIDEO_URL"
 
-    private fun readLastPlayedUrl(): String? {
-        val u = requireContext()
+    private fun writeLastPlayed(key: String) {
+        if (key.isBlank()) return
+        requireContext()
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_LAST_PLAYED, key.trim())
+            .apply()
+    }
+
+    private fun readLastPlayed(): String? {
+        return requireContext()
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getString(KEY_LAST_PLAYED, null)
             ?.trim()
-
-        Log.d(TAG, "FOCUSDBG_M readLastPlayedUrl=$u")
-        return u?.takeIf { it.isNotEmpty() }
+            ?.takeIf { it.isNotEmpty() }
     }
+
 
     private data class FocusTarget(
         val sectionIndex: Int,  // índice en el RecyclerView vertical (secciones)
@@ -72,16 +80,20 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
     private var lastRenderedSections: List<MobileSection> = emptyList()
 
-    private fun findLastPlayedTarget(sections: List<MobileSection>, lastUrl: String): FocusTarget? {
-        // sections[0] suele ser "ACCIONES", así que va a quedar naturalmente salteada
+    private fun findLastPlayedTarget(
+        sections: List<MobileSection>,
+        key: String
+    ): FocusTarget? {
         for (sIndex in sections.indices) {
             val section = sections[sIndex]
             if (section.title == "ACCIONES") continue
+            if (section.title == "ARMADO DE REPRODUCCIÓN") continue
+
 
             for (i in section.items.indices) {
                 val m = section.items[i]
-                if (m.videoUrl == lastUrl) {
-                    return FocusTarget(sectionIndex = sIndex, itemIndex = i)
+                if ((m.videoUrl ?: "") == key) {
+                    return FocusTarget(sIndex, i)
                 }
             }
         }
@@ -89,13 +101,14 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     }
 
 
+
     /**
      * ✅ En Mobile: scrollea hasta la sección del último reproducido
      * y le pide al adapter que lo “marque” visualmente.
      */
     private fun focusLastPlayedIfAnyMobile() {
-        val lastUrl = readLastPlayedUrl()?.trim().orEmpty()
-        if (lastUrl.isBlank()) return
+        val key = readLastPlayed()?.trim().orEmpty()
+        if (key.isBlank()) return
 
         val rv = if (this::sectionsRecyclerRef.isInitialized) sectionsRecyclerRef
         else view?.findViewById(R.id.sectionsRecycler) ?: return
@@ -103,70 +116,53 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         val sections = lastRenderedSections
         if (sections.isEmpty()) return
 
-        val target = findLastPlayedTarget(sections, lastUrl) ?: run {
-            Log.d(TAG, "FOCUSDBG_M lastUrl not found (quizá filtro/search) url=$lastUrl")
-            return
-        }
+        val target = findLastPlayedTarget(sections, key) ?: return
 
-        Log.d(TAG, "FOCUSDBG_M TARGET section=${target.sectionIndex} item=${target.itemIndex} url=$lastUrl")
-
-        // ✅ si la lupa tenía foco, se lo sacamos
+        // sacar foco de search si estaba
         try {
-            if (this::btnToggleSearchRef.isInitialized) btnToggleSearchRef.clearFocus()
-            if (this::searchInputRef.isInitialized) searchInputRef.clearFocus()
+            btnToggleSearchRef.clearFocus()
+            searchInputRef.clearFocus()
         } catch (_: Throwable) {}
 
-        // 1) scroll vertical a la sección
         rv.post {
             rv.scrollToPosition(target.sectionIndex)
 
-            // 2) marcar visual en adapter (si está)
-            (rv.adapter as? MobileSectionsAdapter)?.setSelectedVideoUrl(lastUrl)
+            (rv.adapter as? MobileSectionsAdapter)?.setSelectedVideoUrl(key)
 
-            // 3) retry hasta que exista el VH de esa sección y el recycler horizontal
             var tries = 0
             fun tryFocus() {
                 tries++
-
-                val sectionVH = rv.findViewHolderForAdapterPosition(target.sectionIndex)
-                val sectionView = sectionVH?.itemView
-                val rowRv = sectionView?.findViewById<RecyclerView>(R.id.sectionRowRecycler)
+                val vh = rv.findViewHolderForAdapterPosition(target.sectionIndex)
+                val rowRv = vh?.itemView?.findViewById<RecyclerView>(R.id.sectionRowRecycler)
 
                 if (rowRv == null) {
                     if (tries < 25) rv.postDelayed({ tryFocus() }, 16)
-                    else Log.e(TAG, "FOCUSDBG_M GIVEUP sectionVH/rowRv")
                     return
                 }
 
-                // scrollear horizontal al item
                 rowRv.scrollToPosition(target.itemIndex)
 
                 rowRv.postDelayed({
-                    // ahora intentar obtener el VH del item dentro del horizontal
                     val itemVH = rowRv.findViewHolderForAdapterPosition(target.itemIndex)
                     val itemView = itemVH?.itemView
 
                     if (itemView != null) {
-                        // ✅ ESTE es el foco real (hover real en TV/DPAD)
                         itemView.isFocusable = true
                         itemView.isFocusableInTouchMode = true
                         itemView.requestFocus()
-
-                        Log.d(TAG, "FOCUSDBG_M FOCUS_OK section=${target.sectionIndex} item=${target.itemIndex}")
                     } else {
-                        // si todavía no existe, reintentar un poquito
                         if (tries < 25) {
                             rv.postDelayed({ tryFocus() }, 16)
-                        } else {
-                            Log.e(TAG, "FOCUSDBG_M GIVEUP itemVH")
                         }
                     }
                 }, 60)
+
             }
 
             rv.postDelayed({ tryFocus() }, 120)
         }
     }
+
 
 
     override fun onResume() {
@@ -344,13 +340,19 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         val sections = buildSectionsFiltered(currentQuery)
         lastRenderedSections = sections
 
-
-        // ✅ Arma contexto playlist+index para cada item real (no acciones)
+        // ✅ Arma contexto playlist+index para items reales:
+        // - NO acciones
+        // - NO "ARMADO DE REPRODUCCIÓN"
+        // - NO launcher playlist:// (RANDOM)
         playlistCtxByKey = HashMap()
         sections.forEach { section ->
             if (section.title == "ACCIONES") return@forEach
-            val list = ArrayList(section.items)
-            section.items.forEachIndexed { idx, movie ->
+            if (section.title == "ARMADO DE REPRODUCCIÓN") return@forEach
+
+            val onlyReal = section.items.filter { it.videoUrl?.startsWith("playlist://") != true }
+            val list = ArrayList(onlyReal)
+
+            onlyReal.forEachIndexed { idx, movie ->
                 playlistCtxByKey[movieKey(movie)] = PlaylistCtx(
                     playlist = list,
                     index = idx
@@ -361,7 +363,61 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         rv.adapter = MobileSectionsAdapter(
             sections = sections,
             onMovieClick = { item ->
-                when (item.videoUrl) {
+
+                val url = item.videoUrl ?: ""
+
+                // ✅ Guardar SIEMPRE la última card clickeada
+                // (incluye playlist://RANDOM...)
+                if (!url.startsWith("__action_")) {
+                    writeLastPlayed(url)
+                }
+
+                // =========================
+                // ✅ ARMADO DE REPRODUCCIÓN (acciones RANDOM)
+                // =========================
+                when (url) {
+                    "__action_random_generate__" -> { runRandomGenerate(); return@MobileSectionsAdapter }
+                    "__action_random_update__" -> { runRandomUpdate(); return@MobileSectionsAdapter }
+                    "__action_random_delete__" -> { runRandomDeleteOne(); return@MobileSectionsAdapter }
+                    "__action_random_delete_all__" -> { runRandomDeleteAll(); return@MobileSectionsAdapter }
+                }
+
+                // =========================
+                // ✅ Launcher playlist RANDOM (1 sola card)
+                // =========================
+                if (url.startsWith("playlist://")) {
+                    val playlistName = url.removePrefix("playlist://").trim()
+
+                    val imported = jsonDataManager.getImportedJsons()
+                        .firstOrNull { it.fileName == playlistName }
+
+                    if (imported == null || imported.videos.isEmpty()) {
+                        Toast.makeText(requireContext(), "Playlist no encontrada o vacía", Toast.LENGTH_LONG).show()
+                        return@MobileSectionsAdapter
+                    }
+
+                    val playlist = ArrayList<Movie>().apply {
+                        imported.videos.forEach { v -> add(v.toMovie()) }
+                    }
+
+                    startActivity(
+                        Intent(requireContext(), DetailsActivity::class.java).apply {
+                            putExtra(DetailsActivity.MOVIE, playlist[0])
+                            putExtra(DetailsActivity.EXTRA_PLAYLIST, playlist)
+                            putExtra(DetailsActivity.EXTRA_INDEX, 0)
+
+                            // 🔁 SOLO RANDOM
+                            putExtra("EXTRA_LOOP_PLAYLIST", true)
+                            putExtra("EXTRA_DISABLE_LAST_PLAYED", true)
+                        }
+                    )
+                    return@MobileSectionsAdapter
+                }
+
+                // =========================
+                // ✅ Acciones existentes + flujo normal
+                // =========================
+                when (url) {
                     "__action_erase_json__" -> showDeleteDialog()
                     "__action_erase_all_json__" -> showDeleteAllDialog()
                     "__action_connect_smb__" -> openSmbConnectFlow()
@@ -375,7 +431,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                             Intent(requireContext(), DetailsActivity::class.java).apply {
                                 putExtra(DetailsActivity.MOVIE, item)
 
-                                // ✅ Keys reales (las de DetailsActivity)
                                 if (ctx != null && ctx.playlist.isNotEmpty()) {
                                     putExtra(DetailsActivity.EXTRA_PLAYLIST, ctx.playlist)
                                     putExtra(
@@ -383,11 +438,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                                         ctx.index.coerceIn(0, ctx.playlist.lastIndex)
                                     )
                                 }
-
-                                Log.d(
-                                    TAG,
-                                    "OPEN details movie=${item.videoUrl} ctxSize=${ctx?.playlist?.size} idx=${ctx?.index}"
-                                )
                             }
                         )
                     }
@@ -395,12 +445,9 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             }
         )
 
-        // ✅ si hay pendiente (vuelvo del player) intentar enfocar
-        rootView.post {
-            focusLastPlayedIfAnyMobile()
-        }
-
+        rootView.post { focusLastPlayedIfAnyMobile() }
     }
+
 
     private fun refreshUI() {
         jsonDataManager.loadData(requireContext())
@@ -412,6 +459,17 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     // =========================
 
     private fun buildSectionsFiltered(queryRaw: String): List<MobileSection> {
+
+        val playbackBuildSection = MobileSection(
+            title = "ARMADO DE REPRODUCCIÓN",
+            items = listOf(
+                actionCard("Generar playlist RANDOM", "__action_random_generate__"),
+                actionCard("Actualizar playlist RANDOM", "__action_random_update__"),
+                actionCard("Borrar playlists RANDOM", "__action_random_delete__"),
+                actionCard("Borrar TODAS las playlists RANDOM", "__action_random_delete_all__"),
+            )
+        )
+
         val actionsSection = MobileSection(
             title = "ACCIONES",
             items = listOf(
@@ -424,20 +482,63 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             )
         )
 
+        fun isRandomName(name: String): Boolean =
+            name.trim().uppercase(Locale.ROOT).startsWith("RANDOM")
+
         val q = normalize(queryRaw)
-        val imported = jsonDataManager.getImportedJsons()
+        val importedAll = jsonDataManager.getImportedJsons()
+
+        val importedSorted = importedAll.sortedWith(
+            compareByDescending<ImportedJson> { isRandomName(it.fileName) }
+                .thenBy { prettyTitle(it.fileName).lowercase(Locale.ROOT) }
+        )
+
+        val randomCover = "android.resource://${requireContext().packageName}/drawable/dados"
 
         val contentSections = if (q.isBlank()) {
-            imported.map { one ->
-                MobileSection(
-                    title = prettyTitle(one.fileName),
-                    items = one.videos.map { it.toMovie() }
-                )
+            importedSorted.map { one ->
+                val title = prettyTitle(one.fileName)
+
+                val items: List<Movie> =
+                    if (isRandomName(one.fileName)) {
+                        // ✅ 1 sola card launcher
+                        listOf(
+                            Movie(
+                                title = title,
+                                videoUrl = "playlist://${one.fileName}",
+                                cardImageUrl = randomCover,
+                                backgroundImageUrl = "",
+                                skipToSecond = 0,
+                                delaySkip = 0,
+                                description = "Playlist RANDOM"
+                            )
+                        )
+                    } else {
+                        one.videos.map { it.toMovie() }
+                    }
+
+                MobileSection(title = title, items = items)
             }
         } else {
-            imported.mapNotNull { one ->
+            importedSorted.mapNotNull { one ->
                 val jsonTitle = prettyTitle(one.fileName)
                 val jsonMatch = normalize(jsonTitle).contains(q)
+
+                if (isRandomName(one.fileName)) {
+                    // ✅ en búsqueda: mostrar launcher SOLO si matchea el nombre del JSON RANDOM
+                    if (!jsonMatch) return@mapNotNull null
+
+                    val launcher = Movie(
+                        title = jsonTitle,
+                        videoUrl = "playlist://${one.fileName}",
+                        cardImageUrl = randomCover,
+                        backgroundImageUrl = "",
+                        skipToSecond = 0,
+                        delaySkip = 0,
+                        description = "Playlist RANDOM"
+                    )
+                    return@mapNotNull MobileSection(title = jsonTitle, items = listOf(launcher))
+                }
 
                 val filtered = one.videos.filter { v ->
                     jsonMatch || normalize(v.title).contains(q)
@@ -451,14 +552,62 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             }
         }
 
-        return listOf(actionsSection) + contentSections
+        return listOf(playbackBuildSection, actionsSection) + contentSections
     }
+
+    private fun runRandomGenerate() {
+        RandomizeImporter(
+            context = requireContext(),
+            jsonDataManager = jsonDataManager
+        ).actionGenerateRandom(
+            toast = { msg -> activity?.runOnUiThread { Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() } },
+            onDone = { activity?.runOnUiThread { refreshUI() } },
+            onError = { err -> activity?.runOnUiThread { Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() } }
+        )
+    }
+
+    private fun runRandomUpdate() {
+        RandomizeImporter(
+            context = requireContext(),
+            jsonDataManager = jsonDataManager
+        ).actionUpdateRandom(
+            toast = { msg -> activity?.runOnUiThread { Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() } },
+            onDone = { activity?.runOnUiThread { refreshUI() } },
+            onError = { err -> activity?.runOnUiThread { Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() } }
+        )
+    }
+
+    // ✅ este es el nuevo UX: lista simple, tap y borra esa playlist
+    private fun runRandomDeleteOne() {
+        RandomizeImporter(
+            context = requireContext(),
+            jsonDataManager = jsonDataManager
+        ).actionDeleteRandomPlaylists(
+            toast = { msg -> activity?.runOnUiThread { Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() } },
+            onDone = { activity?.runOnUiThread { refreshUI() } },
+            onError = { err -> activity?.runOnUiThread { Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() } }
+        )
+    }
+
+    private fun runRandomDeleteAll() {
+        RandomizeImporter(
+            context = requireContext(),
+            jsonDataManager = jsonDataManager
+        ).actionDeleteAllRandomPlaylists(
+            toast = { msg -> activity?.runOnUiThread { Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() } },
+            onDone = { activity?.runOnUiThread { refreshUI() } },
+            onError = { err -> activity?.runOnUiThread { Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() } }
+        )
+    }
+
+
 
     private fun normalize(s: String): String =
         s.trim()
             .lowercase(Locale.getDefault())
             .replace('_', ' ')
             .replace(Regex("\\s+"), " ")
+
 
     // =========================
     // Cards

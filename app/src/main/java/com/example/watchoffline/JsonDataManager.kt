@@ -67,6 +67,17 @@ class JsonDataManager {
         importedJsons.addAll(Gson().fromJson(json, type))
     }
 
+    fun upsertJson(context: Context, fileName: String, videos: List<VideoItem>) {
+        importedJsons.removeAll { it.fileName == fileName }
+        importedJsons.add(ImportedJson(fileName, videos))
+        saveData(context)
+    }
+
+    fun exists(fileName: String): Boolean {
+        return importedJsons.any { it.fileName == fileName }
+    }
+
+
     private fun saveData(context: Context) {
         val json = Gson().toJson(importedJsons)
         context.getSharedPreferences("json_data", Context.MODE_PRIVATE)

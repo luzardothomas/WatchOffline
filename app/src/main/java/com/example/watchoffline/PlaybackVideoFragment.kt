@@ -58,10 +58,16 @@ class PlaybackVideoFragment : Fragment() {
     private lateinit var btnPrevVideo: ImageButton
     private lateinit var btnNextVideo: ImageButton
 
+
     // ✅ Playlist REAL (solo desde arguments)
     private var playlist: List<Movie> = emptyList()
     private var currentIndex: Int = 0
     private var currentMovie: Movie? = null
+
+    // ✅ SOLO para playlists RANDOM (viene desde MainFragment/DetailsActivity)
+    private var loopPlaylist: Boolean = false
+    private var disableLastPlayed: Boolean = false
+
 
     // ✅ MOBILE ONLY: botón salir arriba-izquierda
     private var btnExitMobile: View? = null
@@ -148,6 +154,11 @@ class PlaybackVideoFragment : Fragment() {
     // ✅ Persistencia “último reproducido”
     // =========================
     private fun persistLastPlayed(reason: String = "") {
+        if (disableLastPlayed) {
+            Log.e(TAG, "PERSIST skipped (disableLastPlayed=true) reason=$reason idx=$currentIndex size=${playlist.size}")
+            return
+        }
+
         val url = currentMovie?.videoUrl?.trim().orEmpty()
         if (url.isEmpty()) return
 
@@ -159,6 +170,7 @@ class PlaybackVideoFragment : Fragment() {
 
         Log.e(TAG, "PERSIST lastUrl=$url reason=$reason idx=$currentIndex size=${playlist.size}")
     }
+
 
     // =========================
 
@@ -254,6 +266,13 @@ class PlaybackVideoFragment : Fragment() {
             return
         }
 
+        // ✅ flags (solo afectan a RANDOM si el intent los trae)
+        loopPlaylist = requireActivity().intent?.getBooleanExtra("EXTRA_LOOP_PLAYLIST", false) == true
+        disableLastPlayed = requireActivity().intent?.getBooleanExtra("EXTRA_DISABLE_LAST_PLAYED", false) == true
+
+        Log.e(TAG, "FLAGS loopPlaylist=$loopPlaylist disableLastPlayed=$disableLastPlayed")
+
+
         persistLastPlayed("enter")
         endHandled = false
         updatePrevNextState()
@@ -288,23 +307,24 @@ class PlaybackVideoFragment : Fragment() {
 
     private fun setupPrevNextHandlers() {
         btnPrevVideo.setOnClickListener {
-            if (!btnPrevVideo.isEnabled) return@setOnClickListener
-            playIndex(currentIndex - 1)
+            val prev = prevIndex() ?: return@setOnClickListener
+            playIndex(prev)
             bumpControlsTimeout()
             showExitTemporarily()
         }
 
         btnNextVideo.setOnClickListener {
-            if (!btnNextVideo.isEnabled) return@setOnClickListener
-            playIndex(currentIndex + 1)
+            val next = nextIndex() ?: return@setOnClickListener
+            playIndex(next)
             bumpControlsTimeout()
             showExitTemporarily()
         }
     }
 
+
     private fun updatePrevNextState() {
-        val hasPrev = playlist.size > 1 && currentIndex > 0
-        val hasNext = playlist.size > 1 && currentIndex < playlist.lastIndex
+        val hasPrev = hasPrev()
+        val hasNext = hasNext()
 
         btnPrevVideo.isEnabled = hasPrev
         btnNextVideo.isEnabled = hasNext
@@ -319,24 +339,51 @@ class PlaybackVideoFragment : Fragment() {
         }
     }
 
-    private fun hasNext(): Boolean = playlist.size > 1 && currentIndex < playlist.lastIndex
-    private fun hasPrev(): Boolean = playlist.size > 1 && currentIndex > 0
+
+    private fun nextIndex(): Int? {
+        if (playlist.size <= 1) return null
+        return if (currentIndex < playlist.lastIndex) currentIndex + 1
+        else if (loopPlaylist) 0
+        else null
+    }
+
+    private fun prevIndex(): Int? {
+        if (playlist.size <= 1) return null
+        return if (currentIndex > 0) currentIndex - 1
+        else if (loopPlaylist) playlist.lastIndex
+        else null
+    }
+
+    private fun hasNext(): Boolean = nextIndex() != null
+    private fun hasPrev(): Boolean = prevIndex() != null
+
 
     private fun handleVideoEnded() {
         if (endHandled) return
         endHandled = true
 
-        if (hasNext()) {
+        val next = nextIndex()
+        if (next != null) {
             endHandled = false
-            playIndex(currentIndex + 1) // playIndex persiste el nuevo
+            playIndex(next) // playIndex persiste el nuevo (si no está deshabilitado)
         } else {
+            // ✅ caso normal: termina y sale
             requireActivity().finish()
         }
     }
 
+
     private fun playIndex(newIndex: Int) {
         if (playlist.size <= 1) return
-        val idx = newIndex.coerceIn(0, playlist.lastIndex)
+
+        val idx = if (loopPlaylist) {
+            // wrap circular seguro
+            val size = playlist.size
+            ((newIndex % size) + size) % size
+        } else {
+            newIndex.coerceIn(0, playlist.lastIndex)
+        }
+
         if (idx == currentIndex) return
 
         val newMovie = playlist[idx]
@@ -363,7 +410,7 @@ class PlaybackVideoFragment : Fragment() {
         lastSkipVisible = false
         updatePrevNextState()
 
-        // ✅ ESTE es el “último visto” al volver
+        // ✅ En RANDOM no guarda lastPlayed (persistLastPlayed lo corta por flag)
         persistLastPlayed("playIndex")
 
         endHandled = false
@@ -372,6 +419,7 @@ class PlaybackVideoFragment : Fragment() {
 
         if (isTvDevice()) btnPlayPause.requestFocus()
     }
+
 
     override fun onResume() {
         super.onResume()
@@ -506,8 +554,9 @@ class PlaybackVideoFragment : Fragment() {
             when (keyCode) {
                 KeyEvent.KEYCODE_MEDIA_NEXT,
                 KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                    if (hasNext()) {
-                        playIndex(currentIndex + 1)
+                    val next = nextIndex()
+                    if (next != null) {
+                        playIndex(next)
                         bumpControlsTimeout()
                         showExitTemporarily()
                     }
@@ -516,13 +565,15 @@ class PlaybackVideoFragment : Fragment() {
 
                 KeyEvent.KEYCODE_MEDIA_PREVIOUS,
                 KeyEvent.KEYCODE_MEDIA_REWIND -> {
-                    if (hasPrev()) {
-                        playIndex(currentIndex - 1)
+                    val prev = prevIndex()
+                    if (prev != null) {
+                        playIndex(prev)
                         bumpControlsTimeout()
                         showExitTemporarily()
                     }
                     return@OnKeyListener true
                 }
+
             }
 
             val focused = root.findFocus()
