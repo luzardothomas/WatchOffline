@@ -46,6 +46,12 @@ class PlaybackVideoFragment : Fragment() {
     private lateinit var btnPlayPause: ImageButton
     private lateinit var btnSeekFwd: ImageButton
     private lateinit var skipIntroButton: Button
+
+    private var lastSkipVisible = false
+    private var introSkipDoneForCurrent = false
+
+    private var skipHideUntilMs: Long = 0L
+
     private lateinit var txtPos: TextView
     private lateinit var txtDur: TextView
 
@@ -73,6 +79,8 @@ class PlaybackVideoFragment : Fragment() {
     private val SEEK_STEP_MS = 10_000L
     private val SEEK_STEP_BAR = 25
     private val AUTO_HIDE_MS = 10000L
+
+    private val SKIP_WINDOW_MS = 90_000L
 
     private var previewSeekMs: Long? = null
     private val CLEAR_PREVIEW_DELAY = 650L
@@ -121,8 +129,15 @@ class PlaybackVideoFragment : Fragment() {
     private val hideControlsRunnable = Runnable {
         controlsVisible = false
         controlsOverlay.visibility = View.GONE
-        root.requestFocus()
+
+        // ✅ Regla: si controles ocultos y Skip visible => foco en Skip (solo TV)
+        if (isTvDevice() && skipIntroButton.visibility == View.VISIBLE) {
+            skipIntroButton.requestFocus()
+        } else {
+            root.requestFocus()
+        }
     }
+
 
     // =========================
     // ✅ Persistencia “último reproducido”
@@ -217,6 +232,9 @@ class PlaybackVideoFragment : Fragment() {
         Log.e(TAG, "ARGS movie=${dbgMovie?.videoUrl} playlistSize=${dbgList?.size} index=$dbgIndex")
 
         resolvePlaylistAndIndex()
+        introSkipDoneForCurrent = false
+        lastSkipVisible = false
+
 
         Log.e(TAG, "RESOLVED playlistSize=${playlist.size} currentIndex=$currentIndex movie=${currentMovie?.videoUrl}")
 
@@ -331,6 +349,8 @@ class PlaybackVideoFragment : Fragment() {
 
         currentIndex = idx
         currentMovie = newMovie
+        introSkipDoneForCurrent = false
+        lastSkipVisible = false
         updatePrevNextState()
 
         // ✅ ESTE es el “último visto” al volver
@@ -627,11 +647,19 @@ class PlaybackVideoFragment : Fragment() {
     }
 
     private fun performSkipIntro() {
-        val skip = currentMovie?.skipToSecond ?: 0
-        if (skip <= 0) return
+        val skipSec = (currentMovie?.skipToSecond ?: 0)
+        val delaySec = (currentMovie?.delaySkip ?: 0)
+
+        val targetSec = delaySec + skipSec
+        if (targetSec <= 0) return
 
         val p = vlcPlayer ?: return
-        p.time = skip * 1000L
+
+        p.time = targetSec * 1000L
+
+        // evita rebote inmediato
+        skipHideUntilMs = System.currentTimeMillis() + 2000L
+        skipIntroButton.visibility = View.GONE
 
         if (!p.isPlaying) p.play()
         btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
@@ -767,13 +795,33 @@ class PlaybackVideoFragment : Fragment() {
                         }
                     }
 
-                    val hasSkip = (currentMovie?.skipToSecond ?: 0) > 0
-                    skipIntroButton.visibility =
-                        if (hasSkip && posToShow < 15_000) View.VISIBLE else View.GONE
+                    val nowMs = System.currentTimeMillis()
 
-                    if (!controlsVisible && skipIntroButton.visibility == View.VISIBLE) {
-                        if (!skipIntroButton.isFocused) skipIntroButton.requestFocus()
+                    val skipSec = (currentMovie?.skipToSecond ?: 0)
+                    val delaySec = (currentMovie?.delaySkip ?: 0)
+
+                    val hasSkip = skipSec > 0
+                    val delayMs = delaySec * 1000L
+                    val startMs = delayMs
+                    val endMs = delayMs + SKIP_WINDOW_MS
+
+                    val allowShow = nowMs >= skipHideUntilMs
+                    val shouldShowSkip = allowShow && hasSkip && (posToShow in startMs..endMs)
+
+                    skipIntroButton.visibility = if (shouldShowSkip) View.VISIBLE else View.GONE
+
+                    // ✅ Regla absoluta: si controles ocultos + skip visible => hover en Skip (TV)
+                    if (isTvDevice() && !controlsVisible && skipIntroButton.visibility == View.VISIBLE) {
+                        if (!skipIntroButton.isFocused) {
+                            ui.post {
+                                if (!controlsVisible && skipIntroButton.visibility == View.VISIBLE) {
+                                    skipIntroButton.requestFocus()
+                                }
+                            }
+                        }
                     }
+
+
                 }
 
                 ui.postDelayed(this, 300)
@@ -783,6 +831,7 @@ class PlaybackVideoFragment : Fragment() {
         ticker = r
         ui.post(r)
     }
+
 
     private fun stopTicker() {
         ticker?.let { ui.removeCallbacks(it) }

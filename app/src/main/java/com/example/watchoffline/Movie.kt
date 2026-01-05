@@ -13,7 +13,10 @@ data class Movie(
     var cardImageUrl: String? = null,
     var videoUrl: String? = null,
     var studio: String? = null,
-    var skipToSecond: Int = 0
+
+    // ⏭ Skip intro
+    var skipToSecond: Int = 0,
+    var delaySkip: Int = 0
 ) : Serializable {
 
     override fun toString(): String {
@@ -21,6 +24,8 @@ data class Movie(
                 "id=" + id +
                 ", title='" + title + '\'' +
                 ", videoUrl='" + videoUrl + '\'' +
+                ", skipToSecond=" + skipToSecond +
+                ", delaySkip=" + delaySkip +
                 ", backgroundImageUrl='" + backgroundImageUrl + '\'' +
                 ", cardImageUrl='" + cardImageUrl + '\'' +
                 '}'

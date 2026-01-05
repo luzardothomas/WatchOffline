@@ -270,12 +270,6 @@ class MainFragment : BrowseSupportFragment() {
         return true
     }
 
-
-
-
-
-
-
     // =========================
 
     private fun preloadPostersForImportedJsons() {
@@ -284,7 +278,7 @@ class MainFragment : BrowseSupportFragment() {
 
         val all = jsonDataManager.getImportedJsons().flatMap { it.videos }
         for (v in all) {
-            val url = v.imgSml?.trim().orEmpty()
+            val url = v.cardImageUrl?.trim().orEmpty()
             if (url.isNotEmpty() && preloadedPosterUrls.add(url)) {
                 Glide.with(ctx)
                     .load(url)
@@ -364,12 +358,14 @@ class MainFragment : BrowseSupportFragment() {
 
     private fun VideoItem.toMovie() = Movie(
         title = title,
-        videoUrl = videoSrc,
-        cardImageUrl = imgSml,
-        backgroundImageUrl = imgBig,
-        skipToSecond = skipToSecond,
+        videoUrl = videoUrl,
+        cardImageUrl = cardImageUrl,
+        backgroundImageUrl = backgroundImageUrl,
+        skipToSecond = skip,
+        delaySkip = delaySkip,
         description = "Importado desde un JSON"
     )
+
 
     private fun setupEventListeners() {
         setOnSearchClickedListener {

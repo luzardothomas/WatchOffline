@@ -3,14 +3,32 @@ package com.example.watchoffline
 import android.content.Context
 import com.google.common.reflect.TypeToken
 import com.google.gson.Gson
+import com.google.gson.annotations.SerializedName
+
 
 data class VideoItem(
-    val title: String,
-    val skipToSecond: Int,
-    val imgBig: String,
-    val imgSml: String,
-    val videoSrc: String
+    @SerializedName("title")
+    val title: String = "",
+
+    @SerializedName(value = "skip", alternate = ["skipToSecond"])
+    val skip: Int = 0,
+
+    @SerializedName(value = "delaySkip", alternate = ["delaySeconds"])
+    val delaySkip: Int = 0,
+
+    // ✅ compat viejo: imgSml -> cardImageUrl
+    @SerializedName(value = "cardImageUrl", alternate = ["imgSml"])
+    val cardImageUrl: String = "",
+
+    // ✅ compat viejo: imgBig -> backgroundImageUrl
+    @SerializedName(value = "backgroundImageUrl", alternate = ["imgBig"])
+    val backgroundImageUrl: String = "",
+
+    // ✅ compat viejo: videoSrc -> videoUrl
+    @SerializedName(value = "videoUrl", alternate = ["videoSrc"])
+    val videoUrl: String = ""
 )
+
 
 data class ImportedJson(
     val fileName: String,

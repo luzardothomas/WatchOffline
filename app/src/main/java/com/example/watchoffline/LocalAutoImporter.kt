@@ -164,7 +164,8 @@ class LocalAutoImporter(
                         )
                     ).map { r ->
                         // ✅ imgBig/imgSml NO vacíos (siempre placeholder si falta)
-                        VideoItem(r.title, r.skip, r.img, r.img, r.videoSrc)
+                        VideoItem(r.title, r.skip, 0, r.img, r.img, r.videoSrc)
+
                     }
 
                     previews.add(
@@ -192,7 +193,7 @@ class LocalAutoImporter(
                             { it.path.lowercase() }
                         )
                     ).map { r ->
-                        VideoItem(r.title, r.skip, r.img, r.img, r.videoSrc)
+                        VideoItem(r.title, r.skip, 0, r.img, r.img, r.videoSrc)
                     }
 
                     val fileName =

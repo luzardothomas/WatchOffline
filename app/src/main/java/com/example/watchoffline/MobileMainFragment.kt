@@ -476,12 +476,14 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
     private fun VideoItem.toMovie() = Movie(
         title = title,
-        videoUrl = videoSrc,
-        cardImageUrl = imgSml,
-        backgroundImageUrl = imgBig,
-        skipToSecond = skipToSecond,
+        videoUrl = videoUrl,
+        cardImageUrl = cardImageUrl,
+        backgroundImageUrl = backgroundImageUrl,
+        skipToSecond = skip,
+        delaySkip = delaySkip,
         description = "Importado desde un JSON"
     )
+
 
     // =========================
     // SMB / Local actions

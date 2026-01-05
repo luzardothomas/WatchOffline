@@ -151,16 +151,20 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
                 if (titleMatch || jsonMatch) {
                     val movie = Movie(
                         title = v.title,
-                        videoUrl = v.videoSrc,
-                        cardImageUrl = v.imgSml,
-                        backgroundImageUrl = v.imgBig,
-                        skipToSecond = v.skipToSecond,
+                        videoUrl = v.videoUrl,
+                        cardImageUrl = v.cardImageUrl,
+                        backgroundImageUrl = v.backgroundImageUrl,
+                        skipToSecond = v.skip,
+                        delaySkip = v.delaySkip,
                         description = jsonTitle
                     )
 
-                    val key = movie.videoUrl?.takeIf { it.isNotBlank() } ?: "${jsonTitle}:${movie.title}"
+                    val key = movie.videoUrl?.takeIf { it.isNotBlank() }
+                        ?: "${jsonTitle}:${movie.title}"
+
                     out[key] = movie
                 }
+
             }
         }
 

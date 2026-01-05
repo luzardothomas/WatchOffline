@@ -24,8 +24,6 @@ import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 import java.security.cert.X509Certificate
 
-
-
 class AutoImporter(
     private val context: Context,
     private val smbGateway: SmbGateway,
@@ -45,6 +43,7 @@ class AutoImporter(
         val title: String,
         val img: String,
         val skip: Int,
+        val delay: Int,          // ✅ NUEVO
         val videoSrc: String
     )
 
@@ -62,6 +61,10 @@ class AutoImporter(
         @SerializedName("season") val season: Int? = null,
         @SerializedName("episode") val episode: Int? = null,
         @SerializedName("skipSeconds") val skipToSecond: Int? = null,
+
+        // ✅ NUEVO: viene del Worker (out.delaySeconds)
+        @SerializedName("delaySeconds") val delaySkip: Int? = null,
+
         @SerializedName("file") val file: String? = null,
         @SerializedName("url") val url: String? = null
     )
@@ -72,14 +75,12 @@ class AutoImporter(
 
     private val gson = Gson()
 
-    // LRU cache para no crecer infinito
     private val coverCache = Collections.synchronizedMap(object : LinkedHashMap<String, ApiCover?>(256, 0.75f, true) {
-        private val MAX = 600 // ajustá según tu librería
+        private val MAX = 600
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ApiCover?>?): Boolean = size > MAX
     })
 
-    // Pool controlado para calls HTTP de covers
-    private val coverPool = Executors.newFixedThreadPool(8) // 6-10 suele ir bien
+    private val coverPool = Executors.newFixedThreadPool(8)
     private val COVER_TIMEOUT_MS = 8000
 
     private val videoExt = hashSetOf(
@@ -87,7 +88,7 @@ class AutoImporter(
     )
 
     // =========================
-    // Regex precompiladas (evita recompilar siempre)
+    // Regex precompiladas
     // =========================
 
     private val reSeason1 = Regex("""(?i)temporada\s*(\d{1,2})""")
@@ -124,19 +125,13 @@ class AutoImporter(
     }
 
     private val trustAllHostnameVerifier = HostnameVerifier { hostname, _ ->
-        // Permitimos solo tu host (evita abrir la puerta a cualquier cosa)
         hostname.equals(API_HOST, ignoreCase = true)
     }
 
-    /**
-     * Devuelve conexión con TLS relajado SOLO para tu API y SOLO en debug.
-     * En release usa el stack normal del sistema.
-     */
     private fun openConnectionForUrl(fullUrl: String): HttpURLConnection {
         val url = URL(fullUrl)
         val conn = url.openConnection() as HttpURLConnection
 
-        // Solo aplica a HTTPS y solo a tu host
         if (conn is HttpsURLConnection && url.host.equals(API_HOST, ignoreCase = true) && BuildConfig.DEBUG) {
             conn.sslSocketFactory = trustAllSslSocketFactory
             conn.hostnameVerifier = trustAllHostnameVerifier
@@ -144,7 +139,6 @@ class AutoImporter(
 
         return conn
     }
-
 
     // =========================
     // Public API
@@ -182,24 +176,24 @@ class AutoImporter(
                     val smbFiles = listSmbVideos(serverId, share)
                     if (smbFiles.isEmpty()) continue
 
-                    // 1) construir queries (barato)
                     val jobs = ArrayList<Pair<String, String>>(smbFiles.size) // (path, query)
                     for (p in smbFiles) jobs.add(p to buildQueryForPathSmart(p))
 
-                    // 2) pedir covers concurrente (caro)
                     val coverMap = fetchCoversBatch(jobs.map { it.second }.distinct())
 
-                    // 3) armar items
                     for ((smbPath, q) in jobs) {
-                        val cover = coverMap[q] // puede ser null
+                        val cover = coverMap[q]
 
                         val videoUrl = buildProxyUrl(serverId, share, smbPath)
                         val img = resolveCoverUrl(cover?.url)
                         val title = buildDisplayTitleForItem(smbPath, cover)
 
-                        val skipFinal = if (cover?.type.equals("series", ignoreCase = true)) {
-                            cover?.skipToSecond ?: 0
-                        } else 0
+                        val isSeries = cover?.type.equals("series", ignoreCase = true)
+
+                        val skipFinal = if (isSeries) (cover?.skipToSecond ?: 0) else 0
+
+                        // ✅ NUEVO: delay solo para series (default 0)
+                        val delayFinal = if (isSeries) (cover?.delaySkip ?: 0) else 0
 
                         allRawItems.add(
                             RawItem(
@@ -209,6 +203,7 @@ class AutoImporter(
                                 title = title,
                                 img = img,
                                 skip = skipFinal,
+                                delay = delayFinal,  // ✅ NUEVO
                                 videoSrc = videoUrl
                             )
                         )
@@ -220,12 +215,10 @@ class AutoImporter(
                     return@Thread
                 }
 
-                // Dedupe por videoSrc (por si hay repetidos)
                 val unique = LinkedHashMap<String, RawItem>(allRawItems.size)
                 for (ri in allRawItems) unique.putIfAbsent(ri.videoSrc, ri)
                 val itemsUnique = unique.values.toList()
 
-                // Clasificar en series vs movies con un solo parse del path
                 val seriesMap = linkedMapOf<Pair<String, Int>, MutableList<RawItem>>()
                 val movies = ArrayList<RawItem>(itemsUnique.size)
 
@@ -244,7 +237,6 @@ class AutoImporter(
 
                 val previews = ArrayList<PreviewJson>(seriesMap.size + 16)
 
-                // Series → 1 JSON por temporada
                 val seriesEntries = seriesMap.entries.toList()
                     .sortedWith(compareBy({ normalizeName(it.key.first) }, { it.key.second }))
 
@@ -260,7 +252,8 @@ class AutoImporter(
 
                     val videos = ArrayList<VideoItem>(list.size)
                     for (r in list) {
-                        videos.add(VideoItem(r.title, r.skip, r.img, r.img, r.videoSrc))
+                        // ✅ IMPORTANTE: VideoItem debe aceptar delay en el constructor.
+                        videos.add(VideoItem(r.title, r.skip, r.delay, r.img, r.img, r.videoSrc))
                     }
 
                     previews.add(
@@ -272,7 +265,6 @@ class AutoImporter(
                     )
                 }
 
-                // Movies → agrupar por saga
                 val sagaMap = linkedMapOf<String, MutableList<RawItem>>()
                 for (m in movies) {
                     sagaMap.getOrPut(inferSagaNameFromPath(m.smbPath)) { ArrayList() }.add(m)
@@ -291,7 +283,10 @@ class AutoImporter(
                     )
 
                     val videos = ArrayList<VideoItem>(list.size)
-                    for (r in list) videos.add(VideoItem(r.title, r.skip, r.img, r.img, r.videoSrc))
+                    for (r in list) {
+                        // movies: delay=0
+                        videos.add(VideoItem(r.title, r.skip, r.delay, r.img, r.img, r.videoSrc))
+                    }
 
                     val fileName =
                         if (list.size > 1) "saga_${normalizeName(saga).replace(" ", "_")}.json"
@@ -313,7 +308,6 @@ class AutoImporter(
                     return@Thread
                 }
 
-                // Solo una lectura de existentes (y lo vamos actualizando)
                 val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toHashSet()
 
                 var imported = 0
@@ -337,19 +331,16 @@ class AutoImporter(
     // Cover resolving
     // =========================
 
-    // ✅ si no hay url, guardamos "" y la UI muestra el drawable
     private fun resolveCoverUrl(apiUrl: String?): String {
         val u = apiUrl?.trim()
         return if (!u.isNullOrEmpty()) u else ""
     }
 
     private fun fetchCoversBatch(queries: List<String>): Map<String, ApiCover?> {
-        // si es chico, no hace falta pool
         if (queries.isEmpty()) return emptyMap()
 
         val out = LinkedHashMap<String, ApiCover?>(queries.size)
 
-        // 1) cache hit primero
         val missing = ArrayList<String>()
         for (q in queries) {
             val cached = coverCache[q]
@@ -361,7 +352,6 @@ class AutoImporter(
         }
         if (missing.isEmpty()) return out
 
-        // 2) pedir concurrente pero controlado
         val futures = ArrayList<Future<Pair<String, ApiCover?>>>(missing.size)
         for (q in missing) {
             futures.add(coverPool.submit(Callable {
@@ -411,9 +401,8 @@ class AutoImporter(
         }
     }
 
-
     // =========================
-    // SMB listing (iterativo, rápido)
+    // SMB listing
     // =========================
 
     private fun listSmbVideos(serverId: String, shareName: String): List<String> {
@@ -435,7 +424,7 @@ class AutoImporter(
 
         smbGateway.withDiskShare(serverId, shareName) { share ->
             val stack = ArrayDeque<String>()
-            stack.addLast("") // root
+            stack.addLast("")
 
             while (stack.isNotEmpty()) {
                 val dir = stack.removeLast()
@@ -470,7 +459,6 @@ class AutoImporter(
     }
 
     private fun buildProxyUrl(serverId: String, share: String, smbPath: String): String {
-        // optimización: encode por segmento una sola vez
         val encodedPath = smbPath.split("/").joinToString("/") { seg ->
             URLEncoder.encode(seg, "UTF-8").replace("+", "%20")
         }
@@ -492,7 +480,6 @@ class AutoImporter(
             .lowercase()
 
     private fun splitPathParts(path: String): List<String> {
-        // evita replace+split duplicado en varios lados
         val clean = path.replace("\\", "/").trim('/')
         if (clean.isBlank()) return emptyList()
         return clean.split("/").filter { it.isNotBlank() }
@@ -525,7 +512,6 @@ class AutoImporter(
         val file = path.replace("\\", "/").substringAfterLast("/")
         val name = file.substringBeforeLast(".", file)
 
-        // último match de ep words
         reEpWords.findAll(name).toList().lastOrNull()?.let { return it.groupValues[1].toInt() }
         reEpTail.find(name)?.let { return it.groupValues[1].toInt() }
 
