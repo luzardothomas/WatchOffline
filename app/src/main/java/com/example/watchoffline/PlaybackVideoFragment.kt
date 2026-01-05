@@ -176,6 +176,9 @@ class PlaybackVideoFragment : Fragment() {
 
         initVlc(url)
         startTicker()
+
+        // Mantener pantalla encendida mientras este fragment esté visible
+        view.keepScreenOn = true
     }
 
     override fun onResume() {
@@ -631,5 +634,7 @@ class PlaybackVideoFragment : Fragment() {
 
         try { libVlc?.release() } catch (_: Exception) {}
         libVlc = null
+
+        view?.keepScreenOn = false
     }
 }

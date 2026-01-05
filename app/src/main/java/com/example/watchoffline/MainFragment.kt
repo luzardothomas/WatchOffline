@@ -12,7 +12,6 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.text.TextUtils
-import android.util.DisplayMetrics
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
@@ -25,30 +24,16 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.ActivityOptionsCompat
 import androidx.core.content.ContextCompat
-import androidx.leanback.app.BackgroundManager
 import androidx.leanback.app.BrowseSupportFragment
 import androidx.leanback.widget.*
 import com.bumptech.glide.Glide
-import com.bumptech.glide.load.DataSource
-import com.bumptech.glide.load.engine.GlideException
-import com.bumptech.glide.request.RequestListener
-import com.bumptech.glide.request.target.SimpleTarget
-import com.bumptech.glide.request.target.Target
-import com.bumptech.glide.request.transition.Transition
 import java.util.LinkedHashMap
 import java.util.Locale
-import java.util.Timer
-import java.util.TimerTask
 import java.util.UUID
 
 class MainFragment : BrowseSupportFragment() {
 
     private val mHandler = Handler(Looper.getMainLooper())
-    private lateinit var mBackgroundManager: BackgroundManager
-    private var mDefaultBackground: Drawable? = null
-    private lateinit var mMetrics: DisplayMetrics
-    private var mBackgroundTimer: Timer? = null
-    private var mBackgroundUri: String? = null
 
     private val jsonDataManager = JsonDataManager()
 
@@ -63,6 +48,9 @@ class MainFragment : BrowseSupportFragment() {
 
         hideHeadersDockCompletely(view)
         disableSearchOrbFocus(view)
+
+        // ✅ Fondo fijo (no se carga background grande)
+        view.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.default_background))
     }
 
     override fun onActivityCreated(savedInstanceState: Bundle?) {
@@ -75,8 +63,7 @@ class MainFragment : BrowseSupportFragment() {
 
         preloadPostersForImportedJsons()
 
-        prepareBackgroundManager()
-        resetBackgroundToDefault()
+        // ❌ BackgroundManager eliminado (no más fondo gigante)
         setupUIElements()
         loadRows()
         setupEventListeners()
@@ -86,7 +73,6 @@ class MainFragment : BrowseSupportFragment() {
 
     override fun onDestroy() {
         super.onDestroy()
-        mBackgroundTimer?.cancel()
         try { smbGateway.stopDiscovery() } catch (_: Exception) {}
         try { smbGateway.stopProxy() } catch (_: Exception) {}
     }
@@ -101,23 +87,6 @@ class MainFragment : BrowseSupportFragment() {
         val bg = ContextCompat.getColor(requireContext(), R.color.default_background)
         brandColor = bg
         searchAffordanceColor = ContextCompat.getColor(requireContext(), R.color.search_opaque)
-    }
-
-    private fun prepareBackgroundManager() {
-        mBackgroundManager = BackgroundManager.getInstance(requireActivity())
-        mBackgroundManager.attach(requireActivity().window)
-        mDefaultBackground = ContextCompat.getDrawable(requireContext(), R.drawable.default_background)
-        mMetrics = DisplayMetrics().apply {
-            @Suppress("DEPRECATION")
-            requireActivity().windowManager.defaultDisplay.getMetrics(this)
-        }
-    }
-
-    private fun resetBackgroundToDefault() {
-        mBackgroundTimer?.cancel()
-        mBackgroundTimer = null
-        mBackgroundUri = null
-        mBackgroundManager.drawable = mDefaultBackground
     }
 
     // ✅ elimina columna fantasma de headers sin romper Leanback
@@ -234,7 +203,7 @@ class MainFragment : BrowseSupportFragment() {
         title = title,
         videoUrl = videoSrc,
         cardImageUrl = imgSml,
-        backgroundImageUrl = imgBig,
+        backgroundImageUrl = imgBig, // queda, pero NO se usa para fondo
         skipToSecond = skipToSecond,
         description = "Importado desde un JSON"
     )
@@ -244,69 +213,9 @@ class MainFragment : BrowseSupportFragment() {
             startActivity(Intent(requireContext(), SearchActivity::class.java))
         }
         onItemViewClickedListener = ItemViewClickedListener()
-        onItemViewSelectedListener = ItemViewSelectedListener()
-    }
 
-    private inner class ItemViewSelectedListener : OnItemViewSelectedListener {
-        override fun onItemSelected(
-            itemViewHolder: Presenter.ViewHolder?,
-            item: Any?,
-            rowViewHolder: RowPresenter.ViewHolder,
-            row: Row
-        ) {
-            when (item) {
-                is Movie -> {
-                    mBackgroundUri = item.backgroundImageUrl
-                    startBackgroundTimer()
-                }
-                else -> resetBackgroundToDefault()
-            }
-        }
-    }
-
-    private fun updateBackground(uri: String?) {
-        Glide.with(requireActivity())
-            .load(uri)
-            .centerCrop()
-            .error(mDefaultBackground)
-            .listener(object : RequestListener<Drawable> {
-                override fun onLoadFailed(
-                    e: GlideException?,
-                    model: Any?,
-                    target: Target<Drawable>?,
-                    isFirstResource: Boolean
-                ): Boolean {
-                    Log.e(TAG, "BG Glide FAILED model=$model err=${e?.rootCauses?.firstOrNull()?.message}", e)
-                    return false
-                }
-
-                override fun onResourceReady(
-                    resource: Drawable?,
-                    model: Any?,
-                    target: Target<Drawable>?,
-                    dataSource: DataSource?,
-                    isFirstResource: Boolean
-                ): Boolean = false
-            })
-            .into(object : SimpleTarget<Drawable>(mMetrics.widthPixels, mMetrics.heightPixels) {
-                override fun onResourceReady(resource: Drawable, transition: Transition<in Drawable>?) {
-                    mBackgroundManager.drawable = resource
-                }
-            })
-        mBackgroundTimer?.cancel()
-    }
-
-    private fun startBackgroundTimer() {
-        mBackgroundTimer?.cancel()
-        mBackgroundTimer = Timer().apply {
-            schedule(UpdateBackgroundTask(), BACKGROUND_UPDATE_DELAY.toLong())
-        }
-    }
-
-    private inner class UpdateBackgroundTask : TimerTask() {
-        override fun run() {
-            mHandler.post { updateBackground(mBackgroundUri) }
-        }
+        // ✅ NO cargar fondo grande nunca: dejamos selected listener como no-op
+        onItemViewSelectedListener = OnItemViewSelectedListener { _, _, _, _ -> }
     }
 
     private inner class ItemViewClickedListener : OnItemViewClickedListener {
@@ -332,7 +241,6 @@ class MainFragment : BrowseSupportFragment() {
                 }
             }
         }
-
 
         private fun navigateToDetails(
             itemViewHolder: Presenter.ViewHolder,
@@ -371,8 +279,6 @@ class MainFragment : BrowseSupportFragment() {
             }
         }
     }
-
-
 
     private fun showClearSmbDialog() {
         AlertDialog.Builder(requireContext())
@@ -451,7 +357,6 @@ class MainFragment : BrowseSupportFragment() {
                 jsonDataManager.removeAll(requireContext())
                 preloadedPosterUrls.clear()
                 refreshUI()
-                resetBackgroundToDefault()
                 Toast.makeText(requireContext(), "JSONs eliminados", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Cancelar", null)
@@ -615,9 +520,7 @@ class MainFragment : BrowseSupportFragment() {
         jsonDataManager.loadData(requireContext())
         preloadPostersForImportedJsons()
         loadRows()
-
-        val hasAnyMovie = jsonDataManager.getImportedJsons().any { it.videos.isNotEmpty() }
-        if (!hasAnyMovie) resetBackgroundToDefault() else startBackgroundTimer()
+        // ✅ sin background timer
     }
 
     private inner class GridItemPresenter : Presenter() {
@@ -695,7 +598,6 @@ class MainFragment : BrowseSupportFragment() {
 
     companion object {
         private const val TAG = "MainFragment"
-        private const val BACKGROUND_UPDATE_DELAY = 300
         private const val POSTER_PRELOAD_SIZE_DP = 180
         private const val DEBUG_LOGS = false
     }
