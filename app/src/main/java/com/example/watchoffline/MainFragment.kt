@@ -320,7 +320,7 @@ class MainFragment : BrowseSupportFragment() {
         rowsAdapter.add(ListRow(HeaderItem(0L, "ARMADO DE REPRODUCCIÓN"), playbackBuildAdapter))
 
         // =========================
-        // ✅ ACCIONES
+        // ✅ ACCIONES PARA VIDEOS
         // =========================
         val actionsAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
             add(getString(R.string.erase_json))
@@ -330,7 +330,7 @@ class MainFragment : BrowseSupportFragment() {
             add("Importar de SMB")
             add("Importar de DISPOSITIVO")
         }
-        rowsAdapter.add(ListRow(HeaderItem(1L, "ACCIONES"), actionsAdapter))
+        rowsAdapter.add(ListRow(HeaderItem(1L, "ACCIONES PARA VIDEOS"), actionsAdapter))
 
         // =========================
         // ✅ CATALOGO
