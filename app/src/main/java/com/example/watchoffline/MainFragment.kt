@@ -23,6 +23,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.app.ActivityOptionsCompat
 import androidx.core.content.ContextCompat
 import androidx.leanback.app.BackgroundManager
 import androidx.leanback.app.BrowseSupportFragment
@@ -315,17 +316,47 @@ class MainFragment : BrowseSupportFragment() {
             rowViewHolder: RowPresenter.ViewHolder,
             row: Row
         ) {
+            Log.d(TAG, "CLICK Search/TV item=${item::class.java.name} row=${row::class.java.name} view=${itemViewHolder.view::class.java.name}")
+
             when (item) {
-                is Movie -> navigateToDetails(item)
-                is String -> handleStringAction(item)
+                is Movie -> {
+                    Log.d(TAG, "CLICK Movie title='${item.title}' url='${item.videoUrl}'")
+                    navigateToDetails(itemViewHolder, item)
+                }
+                is String -> {
+                    Log.d(TAG, "CLICK String='$item'")
+                    handleStringAction(item)
+                }
+                else -> {
+                    Log.w(TAG, "CLICK unhandled type=${item::class.java.name} item=$item")
+                }
             }
         }
 
-        private fun navigateToDetails(movie: Movie) {
+
+        private fun navigateToDetails(
+            itemViewHolder: Presenter.ViewHolder,
+            movie: Movie
+        ) {
             val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
                 putExtra(DetailsActivity.MOVIE, movie)
             }
-            startActivity(intent)
+
+            // ✅ IMPORTANTE: en Search no siempre es ImageCardView, por eso es "as?"
+            val cardView = itemViewHolder.view as? ImageCardView
+            val shared = cardView?.mainImageView
+
+            if (shared != null) {
+                val options = ActivityOptionsCompat.makeSceneTransitionAnimation(
+                    requireActivity(),
+                    shared,
+                    DetailsActivity.SHARED_ELEMENT_NAME
+                )
+                startActivity(intent, options.toBundle())
+            } else {
+                // ✅ Search / otros presenters: sin shared element
+                startActivity(intent)
+            }
         }
 
         private fun handleStringAction(item: String) {
@@ -340,6 +371,8 @@ class MainFragment : BrowseSupportFragment() {
             }
         }
     }
+
+
 
     private fun showClearSmbDialog() {
         AlertDialog.Builder(requireContext())

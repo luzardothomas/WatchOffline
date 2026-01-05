@@ -119,6 +119,15 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             }
         }
 
+        // ✅ estado inicial (oculto)
+        setSearchVisible(false)
+
+        // ✅ el botón ahora alterna search on/off
+        btn.setOnClickListener {
+            val nowVisible = input.visibility == View.VISIBLE
+            setSearchVisible(!nowVisible)
+        }
+
         input.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -132,6 +141,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             }
         })
     }
+
 
     // =========================
     // UI

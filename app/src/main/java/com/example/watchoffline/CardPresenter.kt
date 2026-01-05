@@ -155,16 +155,17 @@ class CardPresenter : Presenter() {
 
     override fun onUnbindViewHolder(viewHolder: Presenter.ViewHolder) {
         val holder = viewHolder as CardViewHolder
-        val ctx = holder.cardView.context
 
-        // cortar cargas / liberar imagen
-        Glide.with(ctx).clear(holder.cardView.mainImageView)
+        try {
+            Glide.with(holder.cardView.mainImageView).clear(holder.cardView.mainImageView)
+        } catch (_: Exception) {}
+
         holder.cardView.mainImageView.setImageDrawable(null)
 
-        // limpiar overlay text
         holder.titleView.text = ""
         holder.titleView.visibility = View.GONE
     }
+
 
     private fun updateCardBackgroundColor(view: ImageCardView, selected: Boolean) {
         val color = if (selected) sSelectedBackgroundColor else sDefaultBackgroundColor
