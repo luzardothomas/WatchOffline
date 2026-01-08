@@ -21,14 +21,13 @@ import com.bumptech.glide.load.engine.DiskCacheStrategy
 import org.videolan.BuildConfig
 import kotlin.properties.Delegates
 
-
 class CardPresenter : Presenter() {
 
     private var mDefaultCardImage: Drawable? = null
     private var sSelectedBackgroundColor: Int by Delegates.notNull()
     private var sDefaultBackgroundColor: Int by Delegates.notNull()
 
-    // cache interno (evita recalcular dpToPx cada bind / cada VH)
+    // cache interno
     private var cachedDensity = -1f
     private var cachedSizePx = 0
     private var cachedPadH = 0
@@ -47,7 +46,6 @@ class CardPresenter : Presenter() {
 
         val ctx = parent.context
 
-        // init una sola vez (Presenter vive bastante)
         if (mDefaultCardImage == null) {
             sDefaultBackgroundColor = ContextCompat.getColor(ctx, R.color.default_background)
             sSelectedBackgroundColor = ContextCompat.getColor(ctx, R.color.selected_background)
@@ -55,16 +53,19 @@ class CardPresenter : Presenter() {
             overlayBg = ColorDrawable(0x99000000.toInt())
         }
 
-        // cache de px por densidad (TV suele ser estable, pero por las dudas)
         ensurePxCache(ctx)
-
         val sizePx = cachedSizePx
 
-        // Root que permite overlay
+        // 1. EL ROOT AHORA ES EL QUE MANDA EL FOCO
         val root = FrameLayout(ctx).apply {
             layoutParams = ViewGroup.LayoutParams(sizePx, sizePx)
             clipToPadding = true
             clipChildren = true
+
+            // PROPIEDADES CRÍTICAS PARA TV BOXES GENÉRICOS
+            isFocusable = true
+            isFocusableInTouchMode = true
+            descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         }
 
         val cardView = object : ImageCardView(ctx) {
@@ -78,16 +79,15 @@ class CardPresenter : Presenter() {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
 
-            // Card cuadrada
             setMainImageDimensions(sizePx, sizePx)
             setMainImageScaleType(ImageView.ScaleType.CENTER_CROP)
 
-            // No usar el info-area clásico
             titleText = null
             contentText = null
 
-            isFocusable = true
-            isFocusableInTouchMode = true
+            // 2. EL HIJO YA NO ES FOCUSABLE (El padre lo controla)
+            isFocusable = false
+            isFocusableInTouchMode = false
 
             updateCardBackgroundColor(this, false)
         }
@@ -98,15 +98,12 @@ class CardPresenter : Presenter() {
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.BOTTOM
             )
-
-            // Estilo overlay
             setPadding(cachedPadH, cachedPadV, cachedPadH, cachedPadV)
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, TITLE_SP)
             maxLines = 2
             ellipsize = TextUtils.TruncateAt.END
             setLineSpacing(0f, 1.05f)
-
             background = overlayBg
 
             isFocusable = false
@@ -115,6 +112,12 @@ class CardPresenter : Presenter() {
 
         root.addView(cardView)
         root.addView(titleOverlay)
+
+        // 3. PUENTE DE FOCO: Cuando el root recibe foco, activamos la card visualmente
+        root.onFocusChangeListener = View.OnFocusChangeListener { _, hasFocus ->
+            // Esto dispara el setSelected del ImageCardView (animación + color)
+            cardView.isSelected = hasFocus
+        }
 
         return CardViewHolder(root, cardView, titleOverlay)
     }
@@ -130,7 +133,6 @@ class CardPresenter : Presenter() {
             Log.d(TAG, "bind title=$title url=${if (url.isNotEmpty()) "yes" else "no"} skip=${movie.skipToSecond}")
         }
 
-        // texto overlay
         holder.titleView.text = title
         holder.titleView.visibility = if (title.isNotEmpty()) View.VISIBLE else View.GONE
 
@@ -140,14 +142,13 @@ class CardPresenter : Presenter() {
         val sizePx = cachedSizePx
         val model: Any? = if (url.isNotEmpty()) url else mDefaultCardImage
 
-        // Glide: cache + resize exacto + recorte
         Glide.with(ctx)
             .load(model)
             .override(sizePx, sizePx)
             .centerCrop()
             .diskCacheStrategy(DiskCacheStrategy.AUTOMATIC)
-            .dontAnimate()                 // menos jank en TV al scrollear
-            .thumbnail(0.25f)              // preview rápido si viene de red
+            .dontAnimate()
+            .thumbnail(0.25f)
             .placeholder(mDefaultCardImage)
             .error(mDefaultCardImage)
             .into(holder.cardView.mainImageView)
@@ -155,22 +156,18 @@ class CardPresenter : Presenter() {
 
     override fun onUnbindViewHolder(viewHolder: Presenter.ViewHolder) {
         val holder = viewHolder as CardViewHolder
-
         try {
             Glide.with(holder.cardView.mainImageView).clear(holder.cardView.mainImageView)
         } catch (_: Exception) {}
 
         holder.cardView.mainImageView.setImageDrawable(null)
-
         holder.titleView.text = ""
         holder.titleView.visibility = View.GONE
     }
 
-
     private fun updateCardBackgroundColor(view: ImageCardView, selected: Boolean) {
         val color = if (selected) sSelectedBackgroundColor else sDefaultBackgroundColor
         view.setBackgroundColor(color)
-        // igual lo dejamos (no molesta) pero no dependemos de info-area
         view.setInfoAreaBackgroundColor(color)
     }
 
@@ -186,15 +183,9 @@ class CardPresenter : Presenter() {
 
     companion object {
         private const val TAG = "CardPresenter"
-
-        // ✅ Unificá tamaño: cuadrado
         private const val SIZE_DP = 180
-
-        // Overlay paddings
         private const val PAD_H_DP = 10
         private const val PAD_V_DP = 8
-
         private const val TITLE_SP = 14f
     }
 }
-

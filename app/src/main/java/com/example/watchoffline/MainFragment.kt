@@ -4,7 +4,8 @@ import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
-import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -14,6 +15,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.text.TextUtils
 import android.util.Log
+import android.util.StateSet
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -27,6 +29,7 @@ import androidx.core.app.ActivityOptionsCompat
 import androidx.core.content.ContextCompat
 import androidx.leanback.app.BrowseSupportFragment
 import androidx.leanback.widget.*
+import androidx.recyclerview.widget.RecyclerView
 import com.bumptech.glide.Glide
 import java.util.LinkedHashMap
 import java.util.Locale
@@ -35,12 +38,10 @@ import java.util.UUID
 class MainFragment : BrowseSupportFragment() {
 
     private val mHandler = Handler(Looper.getMainLooper())
-
     private val jsonDataManager = JsonDataManager()
 
     // ✅ RANDOM playlists
     private lateinit var randomizeImporter: RandomizeImporter
-
 
     // ✅ SMB
     private lateinit var smbGateway: SmbGateway
@@ -50,57 +51,35 @@ class MainFragment : BrowseSupportFragment() {
 
     private var pendingFocusLastPlayed = false
 
-
-
-    private fun writeLastPlayedUrl(url: String) {
-        val u = url.trim()
-        if (u.isEmpty()) return
-        requireContext()
-            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putString(KEY_LAST_PLAYED, u)
-            .apply()
-    }
-
-    private fun readLastPlayedUrl(): String? {
-        val prefs = requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val u = prefs.getString(KEY_LAST_PLAYED, null)?.trim()
-        Log.e(TAG, "READ lastPlayedUrl=$u")
-        return u?.takeIf { it.isNotEmpty() }
-    }
-
-
-
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        // Optimización visual básica
         hideHeadersDockCompletely(view)
         disableSearchOrbFocus(view)
-
-        // ✅ Fondo fijo (no se carga background grande)
         view.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.default_background))
+
+        // ✅ OPTIMIZACIÓN CRÍTICA DE SCROLL (La magia para que vuele)
+        setupSmoothScrolling(view)
     }
 
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         super.onActivityCreated(savedInstanceState)
 
         jsonDataManager.loadData(requireContext())
-
         randomizeImporter = RandomizeImporter(requireContext(), jsonDataManager)
-
         smbGateway = SmbGateway(requireContext())
         smbGateway.ensureProxyStarted(8081)
 
+        // Preload ligero (solo primeras imágenes)
         preloadPostersForImportedJsons()
 
         setupUIElements()
         loadRows()
         setupEventListeners()
 
-        // ✅ AL INICIAR HOME: como antes, arrancar en ACCIONES
         mHandler.post { focusFirstItemReal() }
     }
-
 
     override fun onDestroy() {
         super.onDestroy()
@@ -110,216 +89,76 @@ class MainFragment : BrowseSupportFragment() {
 
     override fun onResume() {
         super.onResume()
-        Log.e(TAG, "FOCUSDBG onResume() CALLED adapter=${adapter?.javaClass?.simpleName}")
+        mHandler.post { focusLastPlayedIfAny() }
+        // Aseguramos que Glide vuelva a cargar si quedó pausado
+        Glide.with(requireContext()).resumeRequests()
+    }
 
-        mHandler.post {
-            focusLastPlayedIfAny()
+    // ==========================================
+    // ✅ OPTIMIZACIÓN DE SCROLL / GLIDE
+    // ==========================================
+    private fun setupSmoothScrolling(root: View) {
+        // Buscamos la lista vertical interna de Leanback
+        val verticalGrid = root.findViewById<VerticalGridView>(androidx.leanback.R.id.browse_grid) ?: return
+
+        verticalGrid.apply {
+            // 1. Aumentar caché: Guarda 20 filas en memoria.
+            setItemViewCacheSize(20)
+
+            // 2. Optimización de layout
+            setHasFixedSize(true)
+
+            // 3. PAUSAR IMÁGENES AL SCROLLEAR
+            addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                    if (newState == RecyclerView.SCROLL_STATE_IDLE) {
+                        // Si frenó, cargamos imágenes
+                        if (isAdded) Glide.with(requireContext()).resumeRequests()
+                    } else {
+                        // Si se mueve, PAUSA total. Prioridad a la animación.
+                        if (isAdded) Glide.with(requireContext()).pauseRequests()
+                    }
+                }
+            })
         }
     }
 
-
     private fun setupUIElements() {
         title = getString(R.string.browse_title)
-
-        // ✅ tu fix
         headersState = HEADERS_HIDDEN
         isHeadersTransitionOnBackEnabled = false
-
         val bg = ContextCompat.getColor(requireContext(), R.color.default_background)
         brandColor = bg
         searchAffordanceColor = ContextCompat.getColor(requireContext(), R.color.search_opaque)
     }
 
-    // ✅ elimina columna fantasma de headers sin romper Leanback
-    private fun hideHeadersDockCompletely(root: View) {
-        root.post {
-            val bg = ContextCompat.getColor(requireContext(), R.color.default_background)
+    // ✅ OPTIMIZACIÓN LIST ROW CORREGIDA: Sin sombras, sin efectos, PERO CON TÍTULOS
+    private fun createOptimizedListRowPresenter(): ListRowPresenter {
+        return ListRowPresenter().apply {
+            shadowEnabled = false        // Sin sombras (GPU heavy)
+            selectEffectEnabled = false  // Sin efecto zoom/dim automático
 
-            root.findViewById<ViewGroup>(androidx.leanback.R.id.browse_headers_dock)?.apply {
-                setBackgroundColor(bg)
-                layoutParams = layoutParams.apply { width = 1 }
-                alpha = 0f
-                isFocusable = false
-                isFocusableInTouchMode = false
-                descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
-            }
-
-            root.findViewById<ViewGroup>(androidx.leanback.R.id.browse_headers)?.apply {
-                alpha = 0f
-                isFocusable = false
-                isFocusableInTouchMode = false
-                descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
-            }
-
-            root.findViewById<View>(androidx.leanback.R.id.browse_frame)?.apply {
-                setPadding(0, paddingTop, paddingRight, paddingBottom)
-            }
+            // ❌ headerPresenter = null  <-- ESTO BORRABA LOS TÍTULOS. LO QUITAMOS.
         }
-    }
-
-    // ✅ evita que el Search Orb se quede con el foco inicial
-    private fun disableSearchOrbFocus(root: View) {
-        root.post {
-            root.findViewById<View>(androidx.leanback.R.id.search_orb)?.apply {
-                isFocusable = false
-                isFocusableInTouchMode = false
-                clearFocus()
-            }
-        }
-    }
-
-    // ✅ foco inicial al primer item real (simple)
-    private fun focusFirstItemReal() {
-        val root = view ?: return
-        root.post {
-            setSelectedPosition(0, false)
-
-            val vgrid = root.findViewById<VerticalGridView>(androidx.leanback.R.id.browse_grid)
-                ?: return@post
-
-            vgrid.post {
-                val firstRowView = vgrid.getChildAt(0) ?: return@post
-                val rowContent = firstRowView.findViewById<HorizontalGridView>(androidx.leanback.R.id.row_content)
-                    ?: return@post
-
-                rowContent.post {
-                    rowContent.getChildAt(0)?.requestFocus() ?: rowContent.requestFocus()
-                }
-            }
-        }
-    }
-
-
-
-    /**
-     * ✅ Enfoca la card del último video reproducido si existe.
-     * Devuelve true si pudo (o dejó el intento en marcha), false si no encontró.
-     *
-     * Implementación estable:
-     * - setSelectedPosition(row)
-     * - buscar VerticalGridView y el ViewHolder real
-     * - luego enfocar HorizontalGridView y el item
-     */
-    private fun focusLastPlayedIfAny(): Boolean {
-        Log.e(TAG, "FOCUSDBG ENTER focusLastPlayedIfAny")
-
-        val lastUrl = readLastPlayedUrl()?.trim()
-        if (lastUrl.isNullOrEmpty()) {
-            Log.e(TAG, "FOCUSDBG no lastUrl")
-            return false
-        }
-
-        val rows = adapter as? ArrayObjectAdapter ?: run {
-            Log.e(TAG, "FOCUSDBG adapter not ArrayObjectAdapter")
-            return false
-        }
-
-        var targetRowIndex = -1
-        var targetColIndex = -1
-
-        for (r in 0 until rows.size()) {
-            val row = rows.get(r) as? ListRow ?: continue
-            val rowAdapter = row.adapter ?: continue
-
-            for (c in 0 until rowAdapter.size()) {
-                val m = rowAdapter.get(c) as? Movie ?: continue
-                if (m.videoUrl == lastUrl) {
-                    targetRowIndex = r
-                    targetColIndex = c
-                    break
-                }
-            }
-            if (targetRowIndex >= 0) break
-        }
-
-        if (targetRowIndex < 0 || targetColIndex < 0) {
-            Log.e(TAG, "FOCUSDBG NOT FOUND url=$lastUrl")
-            return false
-        }
-
-        Log.e(TAG, "FOCUSDBG FOUND row=$targetRowIndex col=$targetColIndex url=$lastUrl")
-
-        // ✅ Esto es lo único que Leanback “garantiza”: te da el holder cuando exista
-        setSelectedPosition(targetRowIndex, false, object : Presenter.ViewHolderTask() {
-
-            private var tries = 0
-
-            override fun run(holder: Presenter.ViewHolder?) {
-                tries++
-
-                if (holder == null) {
-                    Log.e(TAG, "FOCUSDBG holder==null tries=$tries")
-                    if (tries < 30) {
-                        mHandler.postDelayed({ setSelectedPosition(targetRowIndex, false, this) }, 16)
-                    }
-                    return
-                }
-
-                val rowView = holder.view
-                val rowContent = rowView.findViewById<HorizontalGridView>(androidx.leanback.R.id.row_content)
-
-                if (rowContent == null) {
-                    Log.e(TAG, "FOCUSDBG row_content==null tries=$tries")
-                    if (tries < 30) {
-                        mHandler.postDelayed({ setSelectedPosition(targetRowIndex, false, this) }, 16)
-                    }
-                    return
-                }
-
-                // ✅ Scroll + selección horizontal REAL
-                rowContent.scrollToPosition(targetColIndex)
-
-                rowContent.post {
-                    rowContent.setSelectedPosition(targetColIndex)
-                    rowContent.requestFocus()
-
-                    Log.e(
-                        TAG,
-                        "FOCUSDBG APPLIED row=$targetRowIndex col=$targetColIndex selected=${rowContent.selectedPosition}"
-                    )
-                }
-            }
-        })
-
-        return true
-    }
-
-    // =========================
-
-    private fun preloadPostersForImportedJsons() {
-        val ctx = requireContext()
-        val sizePx = (POSTER_PRELOAD_SIZE_DP * ctx.resources.displayMetrics.density).toInt()
-
-        val all = jsonDataManager.getImportedJsons().flatMap { it.videos }
-        for (v in all) {
-            val url = v.cardImageUrl?.trim().orEmpty()
-            if (url.isNotEmpty() && preloadedPosterUrls.add(url)) {
-                Glide.with(ctx)
-                    .load(url)
-                    .override(sizePx, sizePx)
-                    .centerCrop()
-                    .preload()
-            }
-        }
-
     }
 
     private fun loadRows() {
-        val rowsAdapter = ArrayObjectAdapter(ListRowPresenter())
+        // Usamos el presenter ULTRA optimizado
+        val rowsAdapter = ArrayObjectAdapter(createOptimizedListRowPresenter())
         val cardPresenter = CardPresenter()
 
         // =========================
-        // ✅ ACCIONES PARA VIDEOS
+        // ACCIONES PRINCIPALES
         // =========================
         val actionsAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
             add("Importar de DISPOSITIVO")
             add(getString(R.string.erase_json))
             add("Borrar todos los JSON")
         }
-        rowsAdapter.add(ListRow(HeaderItem(0L, "ACCIONES PRINCIPALES"), actionsAdapter))
+        rowsAdapter.add(ListRow(HeaderItem(0L, "ACCIONES"), actionsAdapter))
 
         // =========================
-        // ✅ ARMADO DE REPRODUCCIÓN
+        // ARMADO DE REPRODUCCIÓN
         // =========================
         val playbackBuildAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
             add("Generar playlist RANDOM")
@@ -327,11 +166,10 @@ class MainFragment : BrowseSupportFragment() {
             add("Borrar playlists RANDOM")
             add("Borrar TODAS las playlists RANDOM")
         }
-        rowsAdapter.add(ListRow(HeaderItem(1L, "ARMADO DE REPRODUCCIÓN"), playbackBuildAdapter))
-
+        rowsAdapter.add(ListRow(HeaderItem(1L, "REPRODUCCIÓN"), playbackBuildAdapter))
 
         // =========================
-        // ✅ OPCIONES AVANZADAS
+        // OPCIONES AVANZADAS
         // =========================
         val advancedActions = ArrayObjectAdapter(GridItemPresenter()).apply {
             add("Importar de SMB")
@@ -339,11 +177,10 @@ class MainFragment : BrowseSupportFragment() {
             add("Limpiar credenciales especificas")
             add("Limpiar credenciales")
         }
-        rowsAdapter.add(ListRow(HeaderItem(2L, "ACCIONES AVANZADAS"), advancedActions))
-
+        rowsAdapter.add(ListRow(HeaderItem(2L, "AVANZADAS"), advancedActions))
 
         // =========================
-        // ✅ CATALOGO
+        // CATALOGO
         // =========================
         val importedAll = jsonDataManager.getImportedJsons()
 
@@ -361,7 +198,6 @@ class MainFragment : BrowseSupportFragment() {
             val rowAdapter = ArrayObjectAdapter(cardPresenter)
 
             if (isRandomImported(imported)) {
-                // ✅ UNA SOLA CARD (launcher de playlist RANDOM)
                 rowAdapter.add(
                     Movie(
                         title = prettyTitle(imported.fileName),
@@ -389,6 +225,230 @@ class MainFragment : BrowseSupportFragment() {
         adapter = rowsAdapter
     }
 
+    // ==========================================
+    // GRID ITEM PRESENTER (Zero Allocation)
+    // ==========================================
+    private inner class GridItemPresenter : Presenter() {
+
+        private var density: Float = 0f
+        private var initialized = false
+
+        private val colorFocused = 0xFF0E8A9A.toInt()
+        private val colorDefault = 0xFF2C2C2C.toInt()
+        private val strokeFocused = 0xFFFFFFFF.toInt()
+        private val strokeDefault = 0x66FFFFFF.toInt()
+
+        private fun initMetrics(ctx: Context) {
+            if (!initialized) {
+                density = ctx.resources.displayMetrics.density
+                initialized = true
+            }
+        }
+
+        private fun dp(v: Int): Int = (v * density).toInt()
+
+        private fun createStateListDrawable(): StateListDrawable {
+            val res = StateListDrawable()
+
+            val focusedDr = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(14).toFloat()
+                setColor(colorFocused)
+                setStroke(dp(2), strokeFocused)
+            }
+
+            val defaultDr = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(14).toFloat()
+                setColor(colorDefault)
+                setStroke(dp(2), strokeDefault)
+            }
+
+            res.addState(intArrayOf(android.R.attr.state_focused), focusedDr)
+            res.addState(StateSet.WILD_CARD, defaultDr)
+
+            // Eliminamos fade duration para respuesta instantánea en scroll rápido
+            res.setEnterFadeDuration(0)
+            res.setExitFadeDuration(0)
+
+            return res
+        }
+
+        override fun onCreateViewHolder(parent: ViewGroup): ViewHolder {
+            val ctx = parent.context
+            initMetrics(ctx)
+
+            val container = FrameLayout(ctx).apply {
+                layoutParams = ViewGroup.LayoutParams(dp(180), dp(180))
+                // Clip simple, menos costoso
+                clipToOutline = true
+                outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+                background = createStateListDrawable()
+                isFocusable = true
+                isFocusableInTouchMode = true
+            }
+
+            val tv = TextView(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+                setPadding(dp(10), dp(10), dp(10), dp(10))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                includeFontPadding = false
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+                textAlignment = View.TEXT_ALIGNMENT_CENTER
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                setLineSpacing(0f, 1.05f)
+            }
+
+            container.addView(tv)
+
+            container.setOnFocusChangeListener { v, hasFocus ->
+                // Animación muy corta y simple
+                v.animate()
+                    .scaleX(if (hasFocus) 1.05f else 1f)
+                    .scaleY(if (hasFocus) 1.05f else 1f)
+                    .setDuration(100)
+                    .start()
+            }
+
+            return ViewHolder(container)
+        }
+
+        override fun onBindViewHolder(viewHolder: ViewHolder, item: Any) {
+            val container = viewHolder.view as FrameLayout
+            val tv = container.getChildAt(0) as TextView
+            tv.text = (item as String).uppercase(Locale.getDefault())
+        }
+
+        override fun onUnbindViewHolder(viewHolder: ViewHolder) {}
+    }
+
+    // ==========================================
+    // Helpers
+    // ==========================================
+
+    private fun hideHeadersDockCompletely(root: View) {
+        root.post {
+            val bg = ContextCompat.getColor(requireContext(), R.color.default_background)
+            root.findViewById<ViewGroup>(androidx.leanback.R.id.browse_headers_dock)?.apply {
+                setBackgroundColor(bg)
+                layoutParams = layoutParams.apply { width = 1 }
+                alpha = 0f
+                isFocusable = false
+                descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            }
+            root.findViewById<ViewGroup>(androidx.leanback.R.id.browse_headers)?.apply {
+                alpha = 0f
+                isFocusable = false
+                descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            }
+            root.findViewById<View>(androidx.leanback.R.id.browse_frame)?.apply {
+                setPadding(0, paddingTop, paddingRight, paddingBottom)
+            }
+        }
+    }
+
+    private fun disableSearchOrbFocus(root: View) {
+        root.post {
+            root.findViewById<View>(androidx.leanback.R.id.search_orb)?.apply {
+                isFocusable = false
+                clearFocus()
+            }
+        }
+    }
+
+    private fun focusFirstItemReal() {
+        val root = view ?: return
+        root.post {
+            setSelectedPosition(0, false)
+            val vgrid = root.findViewById<VerticalGridView>(androidx.leanback.R.id.browse_grid) ?: return@post
+            vgrid.post {
+                val firstRowView = vgrid.getChildAt(0) ?: return@post
+                val rowContent = firstRowView.findViewById<HorizontalGridView>(androidx.leanback.R.id.row_content) ?: return@post
+                rowContent.post { rowContent.getChildAt(0)?.requestFocus() ?: rowContent.requestFocus() }
+            }
+        }
+    }
+
+    private fun writeLastPlayedUrl(url: String) {
+        val u = url.trim()
+        if (u.isEmpty()) return
+        requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString(KEY_LAST_PLAYED, u).apply()
+    }
+
+    private fun readLastPlayedUrl(): String? {
+        val prefs = requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_LAST_PLAYED, null)?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun focusLastPlayedIfAny(): Boolean {
+        val lastUrl = readLastPlayedUrl() ?: return false
+        val rows = adapter as? ArrayObjectAdapter ?: return false
+
+        var targetRowIndex = -1
+        var targetColIndex = -1
+
+        for (r in 0 until rows.size()) {
+            val row = rows.get(r) as? ListRow ?: continue
+            val rowAdapter = row.adapter ?: continue
+            for (c in 0 until rowAdapter.size()) {
+                val m = rowAdapter.get(c) as? Movie ?: continue
+                if (m.videoUrl == lastUrl) {
+                    targetRowIndex = r; targetColIndex = c; break
+                }
+            }
+            if (targetRowIndex >= 0) break
+        }
+
+        if (targetRowIndex < 0) return false
+
+        setSelectedPosition(targetRowIndex, false, object : Presenter.ViewHolderTask() {
+            private var tries = 0
+            override fun run(holder: Presenter.ViewHolder?) {
+                tries++
+                if (holder == null || holder.view == null) {
+                    if (tries < 20) mHandler.postDelayed({ setSelectedPosition(targetRowIndex, false, this) }, 50)
+                    return
+                }
+                val rowContent = holder.view.findViewById<HorizontalGridView>(androidx.leanback.R.id.row_content)
+                if (rowContent == null) {
+                    if (tries < 20) mHandler.postDelayed({ setSelectedPosition(targetRowIndex, false, this) }, 50)
+                    return
+                }
+                rowContent.scrollToPosition(targetColIndex)
+                rowContent.post {
+                    rowContent.setSelectedPosition(targetColIndex)
+                    rowContent.requestFocus()
+                }
+            }
+        })
+        return true
+    }
+
+    private fun preloadPostersForImportedJsons() {
+        val ctx = requireContext()
+        val sizePx = (POSTER_PRELOAD_SIZE_DP * ctx.resources.displayMetrics.density).toInt()
+        val all = jsonDataManager.getImportedJsons().flatMap { it.videos }.take(20)
+        for (v in all) {
+            val url = v.cardImageUrl?.trim().orEmpty()
+            if (url.isNotEmpty() && preloadedPosterUrls.add(url)) {
+                Glide.with(ctx).load(url).override(sizePx, sizePx).centerCrop().preload()
+            }
+        }
+    }
+
+    private fun prettyTitle(fileName: String): String {
+        return fileName.removeSuffix(".json")
+            .replace("_", " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .split(" ")
+            .joinToString(" ") { it.replaceFirstChar { char -> if (char.isLowerCase()) char.titlecase(Locale.getDefault()) else char.toString() } }
+    }
 
     private fun VideoItem.toMovie() = Movie(
         title = title,
@@ -400,112 +460,46 @@ class MainFragment : BrowseSupportFragment() {
         description = "Importado desde un JSON"
     )
 
-
     private fun setupEventListeners() {
-        setOnSearchClickedListener {
-            startActivity(Intent(requireContext(), SearchActivity::class.java))
-        }
+        setOnSearchClickedListener { startActivity(Intent(requireContext(), SearchActivity::class.java)) }
         onItemViewClickedListener = ItemViewClickedListener()
-
-        // ✅ DEBUG: ver qué card queda realmente seleccionada (esto te dice la verdad)
-        onItemViewSelectedListener = OnItemViewSelectedListener { _, item, _, row ->
-            val rowTitle = (row as? ListRow)?.headerItem?.name
-            val m = item as? Movie
-
-            Log.d(
-                TAG,
-                "FOCUSDBG SELECTED rowTitle=$rowTitle item=${item?.javaClass?.simpleName} url=${m?.videoUrl}"
-            )
-        }
     }
 
-
     private inner class ItemViewClickedListener : OnItemViewClickedListener {
-        override fun onItemClicked(
-            itemViewHolder: Presenter.ViewHolder,
-            item: Any,
-            rowViewHolder: RowPresenter.ViewHolder,
-            row: Row
-        ) {
-            Log.d(TAG, "CLICK Search/TV item=${item::class.java.name} row=${row::class.java.name} view=${itemViewHolder.view::class.java.name}")
-
+        override fun onItemClicked(itemViewHolder: Presenter.ViewHolder, item: Any, rowViewHolder: RowPresenter.ViewHolder, row: Row) {
             when (item) {
                 is Movie -> navigateToDetails(itemViewHolder, item, row)
                 is String -> handleStringAction(item)
-                else -> Log.w(TAG, "CLICK unhandled type=${item::class.java.name} item=$item")
             }
         }
 
-        private fun navigateToDetails(
-            itemViewHolder: Presenter.ViewHolder,
-            movie: Movie,
-            row: Row
-        ) {
-
+        private fun navigateToDetails(itemViewHolder: Presenter.ViewHolder, movie: Movie, row: Row) {
             val clickedUrl = movie.videoUrl?.trim().orEmpty()
-            if (clickedUrl.isNotEmpty()) {
-                writeLastPlayedUrl(clickedUrl)   // ✅ SIEMPRE la última card clickeada (incluye playlist://)
-            }
+            if (clickedUrl.isNotEmpty()) writeLastPlayedUrl(clickedUrl)
 
-
-            // =========================
-            // ✅ PLAYLIST RANDOM
-            // =========================
             if (movie.videoUrl?.startsWith("playlist://") == true) {
-                // ✅ PLAYLIST RANDOM (launcher)
                 val url = movie.videoUrl ?: return
-
-                if (url.startsWith("playlist://")) {
-                    val playlistName = url.removePrefix("playlist://").trim()
-
-                    val imported = jsonDataManager.getImportedJsons()
-                        .firstOrNull { it.fileName == playlistName }
-
-                    if (imported == null || imported.videos.isEmpty()) {
-                        Toast.makeText(requireContext(), "Playlist no encontrada o vacía", Toast.LENGTH_LONG).show()
-                        return
-                    }
-
-                    val playlist = ArrayList<Movie>().apply {
-                        imported.videos.forEach { v -> add(v.toMovie()) }
-                    }
-
-                    val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
-                        putExtra(DetailsActivity.MOVIE, playlist[0])
-                        putExtra(DetailsActivity.EXTRA_PLAYLIST, playlist)
-                        putExtra(DetailsActivity.EXTRA_INDEX, 0)
-
-                        // 🔁 SOLO RANDOM
-                        putExtra("EXTRA_LOOP_PLAYLIST", true)
-                        putExtra("EXTRA_DISABLE_LAST_PLAYED", true)
-                    }
-
-                    pendingFocusLastPlayed = false
-
-                    val cardView = itemViewHolder.view as? ImageCardView
-                    val shared = cardView?.mainImageView
-
-                    if (shared != null) {
-                        val options = ActivityOptionsCompat.makeSceneTransitionAnimation(
-                            requireActivity(),
-                            shared,
-                            DetailsActivity.SHARED_ELEMENT_NAME
-                        )
-                        startActivity(intent, options.toBundle())
-                    } else {
-                        startActivity(intent)
-                    }
+                val playlistName = url.removePrefix("playlist://").trim()
+                val imported = jsonDataManager.getImportedJsons().firstOrNull { it.fileName == playlistName }
+                if (imported == null || imported.videos.isEmpty()) {
+                    Toast.makeText(requireContext(), "Playlist vacía", Toast.LENGTH_LONG).show()
                     return
                 }
-
+                val playlist = ArrayList<Movie>().apply { imported.videos.forEach { v -> add(v.toMovie()) } }
+                val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
+                    putExtra(DetailsActivity.MOVIE, playlist[0])
+                    putExtra(DetailsActivity.EXTRA_PLAYLIST, playlist)
+                    putExtra(DetailsActivity.EXTRA_INDEX, 0)
+                    putExtra("EXTRA_LOOP_PLAYLIST", true)
+                    putExtra("EXTRA_DISABLE_LAST_PLAYED", true)
+                }
+                pendingFocusLastPlayed = false
+                startActivityWithAnim(itemViewHolder, intent)
+                return
             }
 
-            // =========================
-            // ✅ FLUJO NORMAL
-            // =========================
             val listRow = row as? ListRow
             val adapter = listRow?.adapter
-
             val playlist = ArrayList<Movie>()
             if (adapter != null) {
                 for (i in 0 until adapter.size()) {
@@ -513,10 +507,7 @@ class MainFragment : BrowseSupportFragment() {
                     if (obj is Movie) playlist.add(obj)
                 }
             }
-
-            val index = playlist.indexOfFirst { it.videoUrl == movie.videoUrl }
-                .let { if (it >= 0) it else 0 }
-
+            val index = playlist.indexOfFirst { it.videoUrl == movie.videoUrl }.let { if (it >= 0) it else 0 }
             val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
                 putExtra(DetailsActivity.MOVIE, movie)
                 if (playlist.size > 1) {
@@ -524,19 +515,16 @@ class MainFragment : BrowseSupportFragment() {
                     putExtra(DetailsActivity.EXTRA_INDEX, index)
                 }
             }
-
             pendingFocusLastPlayed = true
+            startActivityWithAnim(itemViewHolder, intent)
+        }
 
-            val cardView = itemViewHolder.view as? ImageCardView
+        private fun startActivityWithAnim(vh: Presenter.ViewHolder, intent: Intent) {
+            val cardView = vh.view as? ImageCardView
             val shared = cardView?.mainImageView
-
             if (shared != null) {
-                val options = ActivityOptionsCompat.makeSceneTransitionAnimation(
-                    requireActivity(),
-                    shared,
-                    DetailsActivity.SHARED_ELEMENT_NAME
-                )
-                startActivity(intent, options.toBundle())
+                val opts = ActivityOptionsCompat.makeSceneTransitionAnimation(requireActivity(), shared, DetailsActivity.SHARED_ELEMENT_NAME)
+                startActivity(intent, opts.toBundle())
             } else {
                 startActivity(intent)
             }
@@ -544,20 +532,14 @@ class MainFragment : BrowseSupportFragment() {
 
         private fun handleStringAction(item: String) {
             when (item) {
-
-                // ACCIONES AVANZADAS
                 "Conectarse a un SMB" -> openSmbConnectFlow()
                 "Limpiar credenciales especificas" -> showDeleteSpecificSmbDialog()
                 "Limpiar credenciales" -> showClearSmbDialog()
                 "Importar de SMB" -> runAutoImport()
-
-                // ✅ ARMADO DE REPRODUCCIÓN
                 "Generar playlist RANDOM" -> runRandomGenerate()
                 "Actualizar playlist RANDOM" -> runRandomUpdate()
                 "Borrar playlists RANDOM" -> runRandomDeleteSelected()
                 "Borrar TODAS las playlists RANDOM" -> runRandomDeleteAll()
-
-                // ✅ ACCIONES PRINCIPALES
                 getString(R.string.erase_json) -> showDeleteDialog()
                 "Borrar todos los JSON" -> showDeleteAllDialog()
                 "Importar de DISPOSITIVO" -> requestLocalImportWithPermission()
@@ -566,6 +548,9 @@ class MainFragment : BrowseSupportFragment() {
         }
     }
 
+    // ==========================================
+    // Acciones Lógicas (Import, SMB, Dialogs)
+    // ==========================================
     private fun runRandomGenerate() {
         randomizeImporter.actionGenerateRandom(
             toast = { msg -> activity?.runOnUiThread { Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() } },
@@ -598,71 +583,45 @@ class MainFragment : BrowseSupportFragment() {
         )
     }
 
-
     private fun showClearSmbDialog() {
         AlertDialog.Builder(requireContext())
             .setTitle("Reset SMB")
-            .setMessage("Esto borra credenciales y shares guardados. Vas a tener que reconectar el SMB. ¿Continuar?")
+            .setMessage("¿Borrar todas las credenciales y shares?")
             .setPositiveButton("Borrar") { _, _ ->
                 smbGateway.clearAllSmbData()
-                Toast.makeText(requireContext(), "Credenciales eliminadas ✅", Toast.LENGTH_LONG).show()
+                Toast.makeText(requireContext(), "Credenciales eliminadas", Toast.LENGTH_LONG).show()
             }
-            .setNegativeButton("Cancelar", null)
-            .show()
+            .setNegativeButton("Cancelar", null).show()
     }
 
     private fun showDeleteSpecificSmbDialog() {
-        // 1. Obtener la lista de servidores cacheados
         val servers = smbGateway.listCachedServers()
-
         if (servers.isEmpty()) {
             Toast.makeText(requireContext(), "No hay servidores guardados", Toast.LENGTH_SHORT).show()
             return
         }
-
-        // 2. Preparar los nombres legibles evitando duplicados como "IP (IP)"
-        val labels = servers.map { server ->
-            if (server.name == server.host || server.name.isBlank()) {
-                server.host // Solo la IP si no hay nombre distinto
-            } else {
-                "${server.name} (${server.host})" // Nombre (IP) si son diferentes
-            }
-        }.toTypedArray()
-
-        // 3. Mostrar diálogo de SELECCIÓN
+        val labels = servers.map { if (it.name == it.host || it.name.isBlank()) it.host else "${it.name} (${it.host})" }.toTypedArray()
         AlertDialog.Builder(requireContext())
             .setTitle("Seleccionar SMB para eliminar")
             .setItems(labels) { _, which ->
                 val selectedServer = servers[which]
-                val serverLabel = labels[which]
-
-                // 4. Diálogo de CONFIRMACIÓN (Anidado)
                 AlertDialog.Builder(requireContext())
-                    .setTitle("Confirmar eliminación")
-                    .setMessage("¿Estás seguro de borrar la credencial y configuración de:\n$serverLabel?")
+                    .setTitle("Confirmar")
+                    .setMessage("¿Borrar ${labels[which]}?")
                     .setPositiveButton("Borrar") { _, _ ->
                         smbGateway.deleteSpecificSmbData(selectedServer.id)
                         refreshUI()
-                        Toast.makeText(requireContext(), "Credencial eliminada ✅", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(requireContext(), "Eliminado", Toast.LENGTH_SHORT).show()
                     }
-                    .setNegativeButton("Cancelar") { dialog, _ ->
-                        dialog.dismiss()
-                    }
-                    .show()
+                    .setNegativeButton("Cancelar", null).show()
             }
-            .setNegativeButton("Cerrar", null)
-            .show()
+            .setNegativeButton("Cerrar", null).show()
     }
-
 
     private fun ensureAllFilesAccessTv(): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!Environment.isExternalStorageManager()) {
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                    Uri.parse("package:${requireContext().packageName}")
-                )
-                startActivity(intent)
+                startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:${requireContext().packageName}")))
                 return false
             }
         }
@@ -670,23 +629,12 @@ class MainFragment : BrowseSupportFragment() {
     }
 
     private fun requestLocalImportWithPermission() {
-        if (ensureAllFilesAccessTv()) {
-            runLocalAutoImport()
-        } else {
-            Toast.makeText(
-                requireContext(),
-                "Habilitá 'Acceso a todos los archivos' y volvé a intentar",
-                Toast.LENGTH_LONG
-            ).show()
-        }
+        if (ensureAllFilesAccessTv()) runLocalAutoImport()
+        else Toast.makeText(requireContext(), "Habilitá permisos de almacenamiento", Toast.LENGTH_LONG).show()
     }
 
     private fun runLocalAutoImport() {
-        LocalAutoImporter(
-            context = requireContext(),
-            jsonDataManager = jsonDataManager,
-            serverPort = 8080
-        ).run(
+        LocalAutoImporter(requireContext(), jsonDataManager, 8080).run(
             toast = { msg -> activity?.runOnUiThread { Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() } },
             onDone = { activity?.runOnUiThread { refreshUI() } },
             onError = { err -> activity?.runOnUiThread { Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() } }
@@ -694,12 +642,7 @@ class MainFragment : BrowseSupportFragment() {
     }
 
     private fun runAutoImport() {
-        AutoImporter(
-            context = requireContext(),
-            smbGateway = smbGateway,
-            jsonDataManager = jsonDataManager,
-            proxyPort = 8081
-        ).run(
+        AutoImporter(requireContext(), smbGateway, jsonDataManager, 8081).run(
             toast = { msg -> activity?.runOnUiThread { Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show() } },
             onDone = { activity?.runOnUiThread { refreshUI() } },
             onError = { err -> activity?.runOnUiThread { Toast.makeText(requireContext(), err, Toast.LENGTH_LONG).show() } }
@@ -708,265 +651,105 @@ class MainFragment : BrowseSupportFragment() {
 
     private fun showDeleteAllDialog() {
         val count = jsonDataManager.getImportedJsons().size
-        if (count == 0) {
-            Toast.makeText(requireContext(), "No hay JSONs para borrar", Toast.LENGTH_SHORT).show()
-            return
-        }
-
+        if (count == 0) return
         AlertDialog.Builder(requireContext())
-            .setTitle("Eliminar TODOS los JSON")
-            .setMessage("Vas a eliminar $count JSON importados. ¿Seguro?")
-            .setPositiveButton("Eliminar todo") { _, _ ->
+            .setTitle("Eliminar TODOS")
+            .setMessage("Se borrarán $count JSONs. ¿Seguro?")
+            .setPositiveButton("Eliminar") { _, _ ->
                 jsonDataManager.removeAll(requireContext())
                 preloadedPosterUrls.clear()
                 refreshUI()
-                Toast.makeText(requireContext(), "JSONs eliminados", Toast.LENGTH_SHORT).show()
             }
-            .setNegativeButton("Cancelar", null)
-            .show()
+            .setNegativeButton("Cancelar", null).show()
     }
 
     private fun openSmbConnectFlow() {
-        Toast.makeText(requireContext(), "Buscando SMBs en la red...", Toast.LENGTH_SHORT).show()
-
+        Toast.makeText(requireContext(), "Buscando...", Toast.LENGTH_SHORT).show()
         val found = LinkedHashMap<String, SmbGateway.SmbServer>()
-
         smbGateway.discoverAll(
             onFound = { server -> found[server.id] = server },
-            onError = { err ->
-                Log.e(TAG, err)
-                Toast.makeText(requireContext(), "No se pudo escanear SMB: $err", Toast.LENGTH_LONG).show()
-                showManualSmbDialog()
-            }
+            onError = { err -> showManualSmbDialog() }
         )
-
         Handler(Looper.getMainLooper()).postDelayed({
             smbGateway.stopDiscovery()
-
-            if (found.isEmpty()) {
-                showManualSmbDialog()
-                return@postDelayed
-            }
-
+            if (found.isEmpty()) { showManualSmbDialog(); return@postDelayed }
             val servers = found.values.toList()
             val labels = servers.map { "${it.name} (${it.host}:${it.port})" }.toTypedArray()
-
             AlertDialog.Builder(requireContext())
                 .setTitle("SMB encontrados")
                 .setItems(labels) { _, which -> showCredentialsDialog(servers[which]) }
-                .setNegativeButton("Cancelar", null)
-                .show()
+                .setNegativeButton("Cancelar", null).show()
         }, 2000)
     }
 
     private fun showManualSmbDialog() {
-        val hostInput = EditText(requireContext()).apply { hint = "IP o hostname (ej: 192.168.1.33)" }
-
+        val hostInput = EditText(requireContext()).apply { hint = "IP (ej: 192.168.1.33)" }
         AlertDialog.Builder(requireContext())
-            .setTitle("Agregar SMB manual")
+            .setTitle("SMB Manual")
             .setView(hostInput)
-            .setPositiveButton("Continuar") { _, _ ->
+            .setPositiveButton("OK") { _, _ ->
                 val host = hostInput.text.toString().trim()
-                if (host.isBlank()) return@setPositiveButton
-
-                val server = SmbGateway.SmbServer(
-                    id = UUID.nameUUIDFromBytes("$host:445".toByteArray()).toString(),
-                    name = host,
-                    host = host,
-                    port = 445
-                )
-                showCredentialsDialog(server)
+                if (host.isNotBlank()) showCredentialsDialog(SmbGateway.SmbServer(UUID.nameUUIDFromBytes("$host:445".toByteArray()).toString(), host, host, 445))
             }
-            .setNegativeButton("Cancelar", null)
-            .show()
+            .setNegativeButton("Cancelar", null).show()
     }
 
     private fun showCredentialsDialog(server: SmbGateway.SmbServer) {
-        val layout = LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(50, 20, 50, 0)
-        }
-
+        val layout = LinearLayout(requireContext()).apply { orientation = LinearLayout.VERTICAL; setPadding(50, 20, 50, 0) }
         val userInput = EditText(requireContext()).apply { hint = "Usuario" }
-        val passInput = EditText(requireContext()).apply {
-            hint = "Contraseña"
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or
-                    android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
-        }
+        val passInput = EditText(requireContext()).apply { hint = "Contraseña"; inputType = 129 }
         val shareInput = EditText(requireContext()).apply { hint = "Share (ej: pelis)" }
+        layout.addView(userInput); layout.addView(passInput); layout.addView(shareInput)
 
-        layout.addView(userInput)
-        layout.addView(passInput)
-        layout.addView(shareInput)
-
-        val dialog = AlertDialog.Builder(requireContext())
-            .setTitle("Login SMB: ${server.host}")
+        AlertDialog.Builder(requireContext())
+            .setTitle("Login: ${server.host}")
             .setView(layout)
-            .setPositiveButton("Conectar", null)
-            .setNegativeButton("Cancelar", null)
-            .create()
-
-        dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            .setPositiveButton("Conectar") { _, _ ->
                 val user = userInput.text.toString().trim()
                 val pass = passInput.text.toString()
-                val domain = null
                 val share = shareInput.text.toString().trim()
-
-                if (user.isBlank()) {
-                    Toast.makeText(requireContext(), "Usuario requerido", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                }
-                if (share.isBlank()) {
-                    Toast.makeText(requireContext(), "Share requerido (ej: pelis)", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                }
-
-                val creds = SmbGateway.SmbCreds(user, pass, domain)
-
+                if (user.isBlank() || share.isBlank()) return@setPositiveButton
                 Thread {
                     try {
+                        val creds = SmbGateway.SmbCreds(user, pass, null)
                         smbGateway.testLogin(server.host, creds)
                         smbGateway.testShareAccess(server.host, creds, share)
-
-                        smbGateway.saveCreds(
-                            serverId = server.id,
-                            host = server.host,
-                            creds = creds,
-                            port = server.port,
-                            serverName = server.name
-                        )
+                        smbGateway.saveCreds(server.id, server.host, creds, server.port, server.name)
                         smbGateway.saveLastShare(server.id, share)
-
-                        activity?.runOnUiThread {
-                            Toast.makeText(requireContext(), "SMB conectado ✅", Toast.LENGTH_LONG).show()
-                            dialog.dismiss()
-                        }
+                        activity?.runOnUiThread { Toast.makeText(requireContext(), "Conectado", Toast.LENGTH_SHORT).show() }
                     } catch (e: Exception) {
-                        Log.e(TAG, "SMB connect FAILED", e)
-                        activity?.runOnUiThread {
-                            Toast.makeText(requireContext(), "Error SMB: ${e.message}", Toast.LENGTH_LONG).show()
-                        }
+                        activity?.runOnUiThread { Toast.makeText(requireContext(), "Error: ${e.message}", Toast.LENGTH_LONG).show() }
                     }
                 }.start()
             }
-        }
-
-        dialog.show()
+            .setNegativeButton("Cancelar", null).show()
     }
 
     private fun showDeleteDialog() {
         val imported = jsonDataManager.getImportedJsons()
-        if (imported.isEmpty()) {
-            Toast.makeText(requireContext(), "No hay JSONs para borrar", Toast.LENGTH_SHORT).show()
-            return
-        }
-
+        if (imported.isEmpty()) return
         val labels = imported.map { prettyTitle(it.fileName) }.toTypedArray()
-
-        AlertDialog.Builder(requireContext()).apply {
-            setTitle("Eliminar JSON")
-            setItems(labels) { _, which ->
-                val realName = imported[which].fileName
-                jsonDataManager.removeJson(requireContext(), realName)
+        AlertDialog.Builder(requireContext())
+            .setTitle("Eliminar JSON")
+            .setItems(labels) { _, which ->
+                jsonDataManager.removeJson(requireContext(), imported[which].fileName)
                 preloadedPosterUrls.clear()
                 refreshUI()
             }
-            setNegativeButton("Cancelar", null)
-            show()
-        }
+            .setNegativeButton("Cancelar", null).show()
     }
 
     private fun refreshUI() {
         jsonDataManager.loadData(requireContext())
         preloadPostersForImportedJsons()
         loadRows()
-
-        // ✅ en refresh normal, volver a acciones
         mHandler.post { focusFirstItemReal() }
-    }
-
-
-    private inner class GridItemPresenter : Presenter() {
-
-        private fun dp(v: Int): Int =
-            TypedValue.applyDimension(
-                TypedValue.COMPLEX_UNIT_DIP,
-                v.toFloat(),
-                requireContext().resources.displayMetrics
-            ).toInt()
-
-        private fun makeBg(focused: Boolean): Drawable {
-            return android.graphics.drawable.GradientDrawable().apply {
-                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
-                cornerRadius = dp(14).toFloat()
-
-                val fill = if (focused) 0xFF0E8A9A.toInt() else 0xFF2C2C2C.toInt()
-                val stroke = if (focused) 0xFFFFFFFF.toInt() else 0x66FFFFFF.toInt()
-
-                setColor(fill)
-                setStroke(dp(2), stroke)
-            }
-        }
-
-        override fun onCreateViewHolder(parent: ViewGroup): ViewHolder {
-            val ctx = parent.context
-
-            val container = FrameLayout(ctx).apply {
-                layoutParams = ViewGroup.LayoutParams(dp(180), dp(180))
-                clipToOutline = true
-                outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
-                background = makeBg(false)
-                isFocusable = true
-                isFocusableInTouchMode = true
-            }
-
-            val tv = TextView(ctx).apply {
-                layoutParams = FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT
-                )
-                setPadding(dp(10), dp(10), dp(10), dp(10))
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                includeFontPadding = false
-                typeface = Typeface.DEFAULT_BOLD
-                gravity = Gravity.CENTER
-                textAlignment = View.TEXT_ALIGNMENT_CENTER
-                maxLines = 2
-                ellipsize = TextUtils.TruncateAt.END
-                setLineSpacing(0f, 1.05f)
-            }
-
-            container.addView(tv)
-
-            container.setOnFocusChangeListener { v, hasFocus ->
-                v.background = makeBg(hasFocus)
-                v.animate()
-                    .scaleX(if (hasFocus) 1.04f else 1f)
-                    .scaleY(if (hasFocus) 1.04f else 1f)
-                    .setDuration(120)
-                    .start()
-            }
-
-            return ViewHolder(container)
-        }
-
-        override fun onBindViewHolder(viewHolder: ViewHolder, item: Any) {
-            val container = viewHolder.view as FrameLayout
-            val tv = container.getChildAt(0) as TextView
-            tv.text = (item as String).uppercase(Locale.getDefault())
-        }
-
-        override fun onUnbindViewHolder(viewHolder: ViewHolder) = Unit
     }
 
     companion object {
         private const val TAG = "MainFragment"
         private const val POSTER_PRELOAD_SIZE_DP = 180
-        private const val DEBUG_LOGS = false
-
         private const val PREFS_NAME = "watchoffline_prefs"
         private const val KEY_LAST_PLAYED = "LAST_PLAYED_VIDEO_URL"
     }
-
 }

@@ -13,86 +13,78 @@ object VideoPlayerHolder {
     var mediaPlayer: MediaPlayer? = null
     var currentUrl: String? = null
 
-    // Variable para controlar que no se acumulen listeners
     private var currentCallback: IVLCVout.Callback? = null
 
     fun reconnect(layout: VLCVideoLayout) {
         val mp = mediaPlayer ?: return
         Log.d("DEBUG_VLC", ">>> Holder: RECONNECT solicitado.")
 
-        // 1. Limpiamos cualquier listener zombie anterior
-        if (currentCallback != null) {
-            mp.vlcVout.removeCallback(currentCallback)
-            currentCallback = null
-        }
+        // Limpiamos listener anterior
+        currentCallback?.let { mp.vlcVout.removeCallback(it) }
+        currentCallback = null
 
-        // 2. Desvinculamos vista anterior
+        // Desvinculamos surface anterior
         mp.detachViews()
 
-        // 3. Creamos el nuevo listener
-        // 3. Creamos el nuevo listener
+        // Creamos nuevo callback
         currentCallback = object : IVLCVout.Callback {
             override fun onSurfacesCreated(vlcVout: IVLCVout?) {
-                Log.d("DEBUG_VLC", "✅ EVENTO: Surface Creada (Pantalla lista).")
+                Log.d("DEBUG_VLC", "✅ Surface Creada.")
 
-                // Si el video está pausado, aplicamos la técnica "Mute & Kick"
-                if (!mp.isPlaying) {
-                    Log.d("DEBUG_VLC", "    -> Video pausado. Iniciando secuencia de pintado...")
+                // Forzamos 'micro-play' para asegurar audio
+                val currentVol = mp.volume
+                val safeVol = if (currentVol > 0) currentVol else 100
 
-                    // A. Guardamos volumen SEGURO (si es 0 por algún bug, asumimos 100)
-                    val currentVol = mp.volume
-                    val safeVolume = if (currentVol > 0) currentVol else 100
+                mp.volume = 0
+                mp.play()
 
-                    // B. Silenciamos
-                    mp.volume = 0
+                Handler(Looper.getMainLooper()).postDelayed({
+                    // Restauramos volumen antes de pausar
+                    mp.volume = safeVol
+                    Log.d("DEBUG_VLC", "Volumen restaurado a $safeVol")
 
-                    // C. Play forzado
-                    mp.play()
-
-                    // D. Esperamos 50ms y RESTAURAMOS INCONDICIONALMENTE
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        // 1. Restaurar volumen PRIMERO (pase lo que pase)
-                        mp.volume = safeVolume
-                        Log.d("DEBUG_VLC", "    -> Volumen restaurado a: $safeVolume")
-
-                        // 2. Si sigue reproduciendo, pausamos
-                        if (mp.isPlaying) {
-                            mp.pause()
-                            Log.d("DEBUG_VLC", "    -> 'Micro-Play' completado. Video repausado.")
-                        }
-                    }, 50)
-                }
+                    if (mp.isPlaying) {
+                        mp.pause()
+                        Log.d("DEBUG_VLC", "Micro-play completado. Video repausado.")
+                    }
+                }, 50)
             }
 
             override fun onSurfacesDestroyed(vlcVout: IVLCVout?) {
-                Log.d("DEBUG_VLC", "❌ EVENTO: Surface Destruida.")
+                Log.d("DEBUG_VLC", "❌ Surface Destruida.")
             }
         }
 
-        // 4. Registramos el listener Y LUEGO adjuntamos la vista
+        // Registramos callback y adjuntamos la vista
         mp.vlcVout.addCallback(currentCallback)
         mp.attachViews(layout, null, false, false)
         mp.videoScale = MediaPlayer.ScaleType.SURFACE_BEST_FIT
 
-        Log.d("DEBUG_VLC", ">>> Holder: AttachViews completado. Esperando callback...")
+        Log.d("DEBUG_VLC", ">>> AttachViews completado.")
     }
 
     fun pause() {
-        try { if (mediaPlayer?.isPlaying == true) mediaPlayer?.pause() } catch (_: Exception) {}
+        mediaPlayer?.let { mp ->
+            try {
+                mp.pause()
+                mp.volume = 0
+                Log.d("DEBUG_VLC", ">>> pause FORZADO")
+            } catch (_: Exception) {}
+        }
     }
 
     fun detach() {
-        // Al salir, limpiamos el callback para no causar memory leaks
-        val mp = mediaPlayer ?: return
-        if (currentCallback != null) {
-            mp.vlcVout.removeCallback(currentCallback)
+        mediaPlayer?.let { mp ->
+            Log.d("DEBUG_VLC", ">>> DETACH")
+            try { mp.pause(); mp.volume = 0 } catch (_: Exception) {}
+            currentCallback?.let { mp.vlcVout.removeCallback(it) }
             currentCallback = null
+            try { mp.detachViews() } catch (_: Exception) {}
         }
-        try { mp.detachViews() } catch (_: Exception) {}
     }
 
     fun release() {
-        detach() // Reusamos la lógica de limpieza
+        detach()
         try { mediaPlayer?.stop() } catch (_: Exception) {}
         try { mediaPlayer?.release() } catch (_: Exception) {}
         mediaPlayer = null

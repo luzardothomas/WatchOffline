@@ -13,6 +13,7 @@ import androidx.leanback.app.SearchSupportFragment
 import androidx.leanback.widget.*
 import java.util.Locale
 import java.util.LinkedHashMap
+import java.util.HashSet
 
 class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResultProvider {
 
@@ -110,12 +111,15 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
     override fun getResultsAdapter(): ObjectAdapter = rowsAdapter
 
     override fun onQueryTextChange(newQuery: String?): Boolean {
-        scheduleSearch(newQuery.orEmpty())
+        // No hacemos nada mientras se escribe
         return true
     }
 
     override fun onQueryTextSubmit(query: String?): Boolean {
-        scheduleSearch(query.orEmpty())
+        val q = query.orEmpty().trim()
+        if (q.isNotBlank()) {
+            scheduleSearch(q)
+        }
         return true
     }
 
@@ -132,17 +136,17 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
 
     private fun performSearch(raw: String) {
         val q = normalize(raw)
-
         if (q == lastExecutedQuery) return
         lastExecutedQuery = q
 
         rowsAdapter.clear()
         if (q.isBlank()) return
 
-        // ✅ mapa videoUrl -> cover REAL (solo JSONs no RANDOM)
         val coverByUrl = buildNonRandomCoverByUrl()
+        val out = mutableListOf<Movie>()
 
-        val out = LinkedHashMap<String, Movie>()
+        // ✅ FIX BUG DUPLICADOS: Set para rastrear URLs ya añadidas
+        val seenUrls = HashSet<String>()
 
         for (json in allImported) {
             val jsonTitle = safePrettyTitle(json.fileName)
@@ -152,6 +156,16 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
                 val titleMatch = normalize(v.title).contains(q)
 
                 if (titleMatch || jsonMatch) {
+
+                    val url = v.videoUrl?.trim().orEmpty()
+
+                    // ✅ SI YA AGREGAMOS ESTA URL, SALTAMOS (Evita repetidos de Random Lists)
+                    if (url.isEmpty() || seenUrls.contains(url)) {
+                        continue
+                    }
+
+                    // Marcar como visto
+                    seenUrls.add(url)
 
                     var movie = Movie(
                         title = v.title,
@@ -163,8 +177,6 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
                         description = jsonTitle
                     )
 
-                    // ✅ FIX CLAVE:
-                    // si viene de RANDOM con cover dados → usar cover real
                     if (isDadosCover(movie.cardImageUrl)) {
                         val realCover = coverByUrl[movie.videoUrl?.trim().orEmpty()]
                         if (!realCover.isNullOrBlank()) {
@@ -172,18 +184,20 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
                         }
                     }
 
-                    val key = movie.videoUrl?.takeIf { it.isNotBlank() }
-                        ?: "${jsonTitle}:${movie.title}"
-
-                    out[key] = movie
+                    out.add(movie)
                 }
             }
         }
 
-        val movies = out.values.toList()
-        val itemsPerRow = 6
+        // ✅ ORDEN explícito: primero coincidencia en título, luego JSON, luego por nombre
+        val sorted = out.sortedWith(
+            compareByDescending<Movie> { normalize(it.title.orEmpty()).contains(q) }
+                .thenBy { it.description.orEmpty() }
+                .thenBy { it.title.orEmpty() }
+        )
 
-        movies.chunked(itemsPerRow).forEach { chunk ->
+        val itemsPerRow = 6
+        sorted.chunked(itemsPerRow).forEach { chunk ->
             val rowAdapter = ArrayObjectAdapter(cardPresenter)
             chunk.forEach { rowAdapter.add(it) }
             rowsAdapter.add(ListRow(null, rowAdapter))
@@ -194,6 +208,7 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
             focusLastPlayedIfAny()
         }
     }
+
 
 
     // =========================
@@ -346,5 +361,3 @@ class SearchFragment : SearchSupportFragment(), SearchSupportFragment.SearchResu
         private const val KEY_LAST_PLAYED = "LAST_PLAYED_VIDEO_URL"
     }
 }
-
-
