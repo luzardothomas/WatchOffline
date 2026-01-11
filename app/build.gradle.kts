@@ -8,6 +8,9 @@ plugins {
 android {
     namespace = "com.example.watchoffline"
     compileSdk = 35
+    viewBinding {
+        enable = true
+    }
 
     defaultConfig {
         applicationId = "com.example.watchoffline"
@@ -51,9 +54,6 @@ dependencies {
     implementation(libs.androidx.media3.exoplayer)
     implementation("androidx.appcompat:appcompat:1.4.0")
     implementation("com.google.code.gson:gson:2.10.1")
-    // ExoPlayer
-    implementation("com.google.android.exoplayer:exoplayer-core:2.19.1")
-    implementation("com.google.android.exoplayer:exoplayer-ui:2.19.1")
 
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
@@ -69,4 +69,6 @@ dependencies {
     implementation("org.videolan.android:libvlc-all:3.6.0")
     implementation(libs.androidx.cardview)
     implementation(libs.androidx.constraintlayout)
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation(libs.material)
 }

@@ -20,9 +20,12 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ArrayAdapter
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.ActivityOptionsCompat
@@ -31,6 +34,8 @@ import androidx.leanback.app.BrowseSupportFragment
 import androidx.leanback.widget.*
 import androidx.recyclerview.widget.RecyclerView
 import com.bumptech.glide.Glide
+import org.json.JSONObject
+import java.io.File
 import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.UUID
@@ -94,6 +99,7 @@ class MainFragment : BrowseSupportFragment() {
         Glide.with(requireContext()).resumeRequests()
     }
 
+
     // ==========================================
     // ✅ OPTIMIZACIÓN DE SCROLL / GLIDE
     // ==========================================
@@ -152,10 +158,11 @@ class MainFragment : BrowseSupportFragment() {
         // =========================
         val actionsAdapter = ArrayObjectAdapter(GridItemPresenter()).apply {
             add("Importar de DISPOSITIVO")
+            add("Actualizar portadas de JSONS")
             add(getString(R.string.erase_json))
             add("Borrar todos los JSON")
         }
-        rowsAdapter.add(ListRow(HeaderItem(0L, "ACCIONES"), actionsAdapter))
+        rowsAdapter.add(ListRow(HeaderItem(0L, "ACCIONES PRINCIPALES"), actionsAdapter))
 
         // =========================
         // ARMADO DE REPRODUCCIÓN
@@ -166,10 +173,10 @@ class MainFragment : BrowseSupportFragment() {
             add("Borrar playlists RANDOM")
             add("Borrar TODAS las playlists RANDOM")
         }
-        rowsAdapter.add(ListRow(HeaderItem(1L, "REPRODUCCIÓN"), playbackBuildAdapter))
+        rowsAdapter.add(ListRow(HeaderItem(1L, "ARMADO DE REPRODUCCIÓN"), playbackBuildAdapter))
 
         // =========================
-        // OPCIONES AVANZADAS
+        // ACCIONES AVANZADAS
         // =========================
         val advancedActions = ArrayObjectAdapter(GridItemPresenter()).apply {
             add("Importar de SMB")
@@ -177,7 +184,7 @@ class MainFragment : BrowseSupportFragment() {
             add("Limpiar credenciales especificas")
             add("Limpiar credenciales")
         }
-        rowsAdapter.add(ListRow(HeaderItem(2L, "AVANZADAS"), advancedActions))
+        rowsAdapter.add(ListRow(HeaderItem(2L, "ACCIONES AVANZADAS"), advancedActions))
 
         // =========================
         // CATALOGO
@@ -543,10 +550,61 @@ class MainFragment : BrowseSupportFragment() {
                 getString(R.string.erase_json) -> showDeleteDialog()
                 "Borrar todos los JSON" -> showDeleteAllDialog()
                 "Importar de DISPOSITIVO" -> requestLocalImportWithPermission()
+                "Actualizar portadas de JSONS" -> {
+                    val importedJsons = jsonDataManager.getImportedJsons()
+                    // Obtenemos nombres, filtramos y ordenamos A-Z
+                    val listForIntent = ArrayList(importedJsons.map { it.fileName }.sorted())
+
+                    if (listForIntent.isEmpty()) {
+                        Toast.makeText(requireContext(), "No hay archivos JSON", Toast.LENGTH_SHORT).show()
+                    } else {
+                        val intent = Intent(requireContext(), ImageSearchActivity::class.java).apply {
+                            putStringArrayListExtra("TARGET_JSONS", listForIntent)
+                        }
+                        startActivityForResult(intent, 100)
+                    }
+                }
                 else -> Toast.makeText(requireContext(), item, Toast.LENGTH_SHORT).show()
             }
         }
     }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == 100 && resultCode == android.app.Activity.RESULT_OK && data != null) {
+            val imageUrl = data.getStringExtra("SELECTED_IMAGE_URL")
+            val selectedJsonNames = data.getStringArrayListExtra("TARGET_JSONS")
+
+            if (imageUrl != null && selectedJsonNames != null) {
+
+                // 1. Obtenemos la lista actual de lo que ya tenemos cargado
+                val currentData = jsonDataManager.getImportedJsons()
+
+                selectedJsonNames.forEach { fileName ->
+                    // 2. Buscamos el JSON original en la memoria
+                    val originalImport = currentData.firstOrNull { it.fileName == fileName }
+
+                    if (originalImport != null) {
+                        // 3. Creamos una NUEVA lista de videos con la URL de imagen cambiada
+                        // Usamos .copy() para cambiar solo la imagen en cada video
+                        val updatedVideos = originalImport.videos.map { video ->
+                            video.copy(cardImageUrl = imageUrl)
+                        }
+
+                        // 4. Usamos tu función UPSERT que ya borra el viejo y guarda el nuevo
+                        jsonDataManager.upsertJson(requireContext(), fileName, updatedVideos)
+                    }
+                }
+
+                // 5. Refrescamos la interfaz para ver los cambios
+                refreshUI()
+
+                Toast.makeText(requireContext(), "Portadas actualizadas", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
 
     // ==========================================
     // Acciones Lógicas (Import, SMB, Dialogs)
@@ -589,7 +647,7 @@ class MainFragment : BrowseSupportFragment() {
             .setMessage("¿Borrar todas las credenciales y shares?")
             .setPositiveButton("Borrar") { _, _ ->
                 smbGateway.clearAllSmbData()
-                Toast.makeText(requireContext(), "Credenciales eliminadas", Toast.LENGTH_LONG).show()
+                Toast.makeText(requireContext(), "Credenciales eliminadas ✅", Toast.LENGTH_LONG).show()
             }
             .setNegativeButton("Cancelar", null).show()
     }
@@ -664,15 +722,15 @@ class MainFragment : BrowseSupportFragment() {
     }
 
     private fun openSmbConnectFlow() {
-        Toast.makeText(requireContext(), "Buscando...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(requireContext(), "Buscando SMBs en la red...", Toast.LENGTH_SHORT).show()
         val found = LinkedHashMap<String, SmbGateway.SmbServer>()
         smbGateway.discoverAll(
             onFound = { server -> found[server.id] = server },
-            onError = { err -> showManualSmbDialog() }
+            onError = { err -> Toast.makeText(requireContext(), "No se pudo escanear SMB: $err", Toast.LENGTH_LONG).show() }
         )
         Handler(Looper.getMainLooper()).postDelayed({
             smbGateway.stopDiscovery()
-            if (found.isEmpty()) { showManualSmbDialog(); return@postDelayed }
+            if (found.isEmpty()) {  return@postDelayed }
             val servers = found.values.toList()
             val labels = servers.map { "${it.name} (${it.host}:${it.port})" }.toTypedArray()
             AlertDialog.Builder(requireContext())
@@ -680,18 +738,6 @@ class MainFragment : BrowseSupportFragment() {
                 .setItems(labels) { _, which -> showCredentialsDialog(servers[which]) }
                 .setNegativeButton("Cancelar", null).show()
         }, 2000)
-    }
-
-    private fun showManualSmbDialog() {
-        val hostInput = EditText(requireContext()).apply { hint = "IP (ej: 192.168.1.33)" }
-        AlertDialog.Builder(requireContext())
-            .setTitle("SMB Manual")
-            .setView(hostInput)
-            .setPositiveButton("OK") { _, _ ->
-                val host = hostInput.text.toString().trim()
-                if (host.isNotBlank()) showCredentialsDialog(SmbGateway.SmbServer(UUID.nameUUIDFromBytes("$host:445".toByteArray()).toString(), host, host, 445))
-            }
-            .setNegativeButton("Cancelar", null).show()
     }
 
     private fun showCredentialsDialog(server: SmbGateway.SmbServer) {
@@ -716,7 +762,7 @@ class MainFragment : BrowseSupportFragment() {
                         smbGateway.testShareAccess(server.host, creds, share)
                         smbGateway.saveCreds(server.id, server.host, creds, server.port, server.name)
                         smbGateway.saveLastShare(server.id, share)
-                        activity?.runOnUiThread { Toast.makeText(requireContext(), "Conectado", Toast.LENGTH_SHORT).show() }
+                        activity?.runOnUiThread { Toast.makeText(requireContext(), "SMB conectado ✅", Toast.LENGTH_SHORT).show() }
                     } catch (e: Exception) {
                         activity?.runOnUiThread { Toast.makeText(requireContext(), "Error: ${e.message}", Toast.LENGTH_LONG).show() }
                     }
@@ -726,17 +772,39 @@ class MainFragment : BrowseSupportFragment() {
     }
 
     private fun showDeleteDialog() {
+        // 1. Obtener y ordenar la lista A-Z por nombre de archivo
         val imported = jsonDataManager.getImportedJsons()
-        if (imported.isEmpty()) return
+            .sortedBy { it.fileName.lowercase(java.util.Locale.ROOT) }
+
+        if (imported.isEmpty()) {
+            Toast.makeText(requireContext(), "No hay archivos para eliminar", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // 2. Generar los títulos "lindos" para mostrar en la lista
         val labels = imported.map { prettyTitle(it.fileName) }.toTypedArray()
+
         AlertDialog.Builder(requireContext())
             .setTitle("Eliminar JSON")
             .setItems(labels) { _, which ->
-                jsonDataManager.removeJson(requireContext(), imported[which].fileName)
-                preloadedPosterUrls.clear()
-                refreshUI()
+                val targetFile = imported[which].fileName
+
+                // 3. Diálogo de confirmación (Seguridad)
+                AlertDialog.Builder(requireContext())
+                    .setTitle("¿Confirmar eliminación?")
+                    .setMessage("Vas a borrar: ${prettyTitle(targetFile)}")
+                    .setNegativeButton("CANCELAR", null)
+                    .setPositiveButton("ELIMINAR") { _, _ ->
+                        // Ejecutar el borrado real
+                        jsonDataManager.removeJson(requireContext(), targetFile)
+                        preloadedPosterUrls.clear()
+                        refreshUI()
+                        Toast.makeText(requireContext(), "Archivo eliminado", Toast.LENGTH_SHORT).show()
+                    }
+                    .show()
             }
-            .setNegativeButton("Cancelar", null).show()
+            .setNegativeButton("CERRAR", null)
+            .show()
     }
 
     private fun refreshUI() {

@@ -77,7 +77,6 @@ class JsonDataManager {
         return importedJsons.any { it.fileName == fileName }
     }
 
-
     private fun saveData(context: Context) {
         val json = Gson().toJson(importedJsons)
         context.getSharedPreferences("json_data", Context.MODE_PRIVATE)
@@ -85,4 +84,5 @@ class JsonDataManager {
             .putString("imported", json)
             .apply()
     }
+
 }

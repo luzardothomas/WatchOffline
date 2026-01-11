@@ -1,0 +1,12 @@
+<resources>
+    <style name="Theme.WatchOffline.Television" parent="Theme.Leanback">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+
+        <item name="imageCardViewStyle">@style/Widget.Leanback.ImageCardView</item>
+        <item name="baseCardViewStyle">@style/Widget.Leanback.BaseCardView</item>
+    </style>
+</resources>

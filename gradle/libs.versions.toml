@@ -10,6 +10,7 @@ media3Ui = "1.5.1"
 leanbackVersion = "1.2.0"
 cardview = "1.0.0"
 constraintlayout = "2.2.1"
+material = "1.13.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -21,6 +22,7 @@ androidx-media3-ui = { group = "androidx.media3", name = "media3-ui", version.re
 leanback = { group = "androidx.leanback", name = "leanback", version.ref = "leanbackVersion" }
 androidx-cardview = { group = "androidx.cardview", name = "cardview", version.ref = "cardview" }
 androidx-constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
+material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

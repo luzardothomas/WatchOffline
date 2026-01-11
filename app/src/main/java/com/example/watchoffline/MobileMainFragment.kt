@@ -392,6 +392,25 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                     "__action_connect_smb__" -> openSmbConnectFlow()
                     "__action_clear_specific_smb__" -> showDeleteSpecificSmbDialog()
                     "__action_clear_smb__" -> showClearSmbDialog()
+                    "__action_web_search__" -> {
+                        // 1. Obtener los archivos y ordenarlos A-Z
+                        val importedJsons = jsonDataManager.getImportedJsons()
+                        val listForIntent = ArrayList(importedJsons.map { it.fileName }.sortedBy { it.lowercase() })
+
+                        if (listForIntent.isEmpty()) {
+                            Toast.makeText(requireContext(), "No hay archivos JSON para editar", Toast.LENGTH_SHORT).show()
+                        } else {
+                            // 2. Crear el Intent con los datos necesarios
+                            val intent = Intent(requireContext(), ImageSearchActivity::class.java).apply {
+                                putStringArrayListExtra("TARGET_JSONS", listForIntent)
+                                // Opcional: Si tienes acceso al objeto 'movie' actual, puedes pasar el título
+                                // putExtra("QUERY", movie.title)
+                            }
+
+                            // 3. Lanzar con el código 100 para que onActivityResult refresque la pantalla al volver
+                            startActivityForResult(intent, 100)
+                        }
+                    }
                     "__action_auto_import__" -> runAutoImport()
                     "__action_auto_import_local_folder__" -> showLocalFolderImportDialog()
                     else -> {
@@ -416,6 +435,37 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         )
 
         rootView.post { focusLastPlayedIfAnyMobile() }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == 100 && resultCode == android.app.Activity.RESULT_OK && data != null) {
+            val imageUrl = data.getStringExtra("SELECTED_IMAGE_URL")
+            val selectedJsons = data.getStringArrayListExtra("TARGET_JSONS")
+
+            if (imageUrl != null && selectedJsons != null) {
+                // 1. Obtenemos la data actual
+                val currentData = jsonDataManager.getImportedJsons()
+
+                selectedJsons.forEach { fileName ->
+                    val originalImport = currentData.firstOrNull { it.fileName == fileName }
+                    if (originalImport != null) {
+                        // 2. Mapeamos y copiamos con la nueva URL
+                        val updatedVideos = originalImport.videos.map { video ->
+                            video.copy(cardImageUrl = imageUrl)
+                        }
+                        // 3. Guardamos en SharedPreferences
+                        jsonDataManager.upsertJson(requireContext(), fileName, updatedVideos)
+                    }
+                }
+
+                // 4. Refrescamos la lista de Mobile
+                refreshUI() // O la función que uses en Mobile para recargar la lista
+
+                Toast.makeText(requireContext(), "Portadas actualizadas", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
 
@@ -454,6 +504,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             title = "ACCIONES PRINCIPALES",
             items = listOf(
                 actionCard("Importar de una RUTA del DISPOSITIVO", "__action_auto_import_local_folder__"),
+                actionCard("Actualizar portadas de JSONS", "__action_web_search__"),
                 actionCard("Borrar JSON", "__action_erase_json__"),
                 actionCard("Borrar todos los JSON", "__action_erase_all_json__"),
             )
@@ -618,7 +669,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     private fun showClearSmbDialog() {
         AlertDialog.Builder(requireContext())
             .setTitle("Reset SMB")
-            .setMessage("Esto borra credenciales y shares guardados. Vas a tener que reconectar el SMB. ¿Continuar?")
+            .setMessage("¿Borrar todas las credenciales y shares?")
             .setPositiveButton("Borrar") { _, _ ->
                 smbGateway.clearAllSmbData()
                 Toast.makeText(requireContext(), "Credenciales eliminadas ✅", Toast.LENGTH_LONG).show()
@@ -795,22 +846,38 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     // =========================
 
     private fun showDeleteDialog() {
+        // 1. Obtener y ordenar la lista A-Z por nombre de archivo (Ignorando mayúsculas)
         val imported = jsonDataManager.getImportedJsons()
+            .sortedBy { it.fileName.lowercase(java.util.Locale.ROOT) }
+
         if (imported.isEmpty()) {
             Toast.makeText(requireContext(), "No hay JSONs para borrar", Toast.LENGTH_SHORT).show()
             return
         }
 
+        // 2. Generar los nombres "limpios" para la lista
         val labels = imported.map { prettyTitle(it.fileName) }.toTypedArray()
 
         AlertDialog.Builder(requireContext()).apply {
             setTitle("Borrar JSON")
             setItems(labels) { _, which ->
+                // Recuperamos el nombre real del archivo basado en el orden de la lista
                 val realName = imported[which].fileName
-                jsonDataManager.removeJson(requireContext(), realName)
-                refreshUI()
+
+                // 3. Diálogo de confirmación para Mobile
+                AlertDialog.Builder(requireContext()).apply {
+                    setTitle("¿Confirmar borrado?")
+                    setMessage("¿Estás seguro de que quieres eliminar \"${prettyTitle(realName)}\"?")
+                    setNegativeButton("CANCELAR", null)
+                    setPositiveButton("BORRAR") { _, _ ->
+                        jsonDataManager.removeJson(requireContext(), realName)
+                        Toast.makeText(requireContext(), "Archivo eliminado", Toast.LENGTH_SHORT).show()
+                        refreshUI()
+                    }
+                    show()
+                }
             }
-            setNegativeButton("Cancelar", null)
+            setNegativeButton("Cerrar", null)
             show()
         }
     }
@@ -845,18 +912,13 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
         smbGateway.discoverAll(
             onFound = { server -> found[server.id] = server },
-            onError = { err ->
-                Log.e(TAG, err)
-                Toast.makeText(requireContext(), "No se pudo escanear SMB: $err", Toast.LENGTH_LONG).show()
-                showManualSmbDialog()
-            }
+            onError = { err -> Toast.makeText(requireContext(), "No se pudo escanear SMB: $err", Toast.LENGTH_LONG).show() }
         )
 
         Handler(Looper.getMainLooper()).postDelayed({
             smbGateway.stopDiscovery()
 
             if (found.isEmpty()) {
-                showManualSmbDialog()
                 return@postDelayed
             }
 
@@ -873,29 +935,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         }, 2000)
     }
 
-    private fun showManualSmbDialog() {
-        val hostInput = EditText(requireContext()).apply {
-            hint = "IP o hostname (ej: 192.168.1.33)"
-        }
-
-        AlertDialog.Builder(requireContext())
-            .setTitle("Agregar SMB manual")
-            .setView(hostInput)
-            .setPositiveButton("Continuar") { _, _ ->
-                val host = hostInput.text.toString().trim()
-                if (host.isBlank()) return@setPositiveButton
-
-                val server = SmbGateway.SmbServer(
-                    id = UUID.nameUUIDFromBytes("$host:445".toByteArray()).toString(),
-                    name = host,
-                    host = host,
-                    port = 445
-                )
-                showCredentialsDialog(server)
-            }
-            .setNegativeButton("Cancelar", null)
-            .show()
-    }
 
     private fun showCredentialsDialog(server: SmbGateway.SmbServer) {
         val layout = LinearLayout(requireContext()).apply {
