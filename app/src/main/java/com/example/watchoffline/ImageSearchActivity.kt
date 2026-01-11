@@ -169,8 +169,22 @@ class ImageSearchActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val urls = ImageImporter.searchImages(query, first = currentFirst)
+
+                // --- LÓGICA DE FILAS COMPLETAS (Múltiplo de 3) ---
+                // Si llegan 10 items: 10/3 = 3 enteros. 3*3 = 9. Tomamos los primeros 9.
+                // El item 10 se descarta para no dejar la fila incompleta.
+                val validSize = (urls.size / 3) * 3
+                val filteredUrls = urls.take(validSize)
+
                 withContext(Dispatchers.Main) {
-                    imageAdapter.updateList(urls)
+                    // Importante: Chequear si tras el filtro quedó vacía
+                    if (urls.isNotEmpty() && filteredUrls.isEmpty()) {
+                        Toast.makeText(this@ImageSearchActivity, "Resultados insuficientes para llenar una fila.", Toast.LENGTH_SHORT).show()
+                        imageAdapter.updateList(emptyList()) // Opcional: limpiar si quieres
+                    } else {
+                        imageAdapter.updateList(filteredUrls)
+                    }
+
                     setLoading(false)
                     binding.recyclerImages.scrollToPosition(0)
                 }
@@ -184,15 +198,28 @@ class ImageSearchActivity : AppCompatActivity() {
     }
 
     private fun loadMoreMobile() {
+        // Aumentamos el puntero para la siguiente página
+        // Nota: Como descartamos visualmente algunos items, puede que veas un "salto" de imagen,
+        // pero es necesario para mantener la estética estricta de 3 columnas.
         currentFirst += 10
+
         setLoading(true, "Cargando más...")
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val newUrls = ImageImporter.searchImages(currentQuery, first = currentFirst)
+
+                // --- LÓGICA DE FILAS COMPLETAS (Múltiplo de 3) ---
+                val validSize = (newUrls.size / 3) * 3
+                val filteredNewUrls = newUrls.take(validSize)
+
                 withContext(Dispatchers.Main) {
-                    if (newUrls.isNotEmpty()) {
-                        imageAdapter.addUrls(newUrls)
+                    if (filteredNewUrls.isNotEmpty()) {
+                        imageAdapter.addUrls(filteredNewUrls)
+                    } else {
+                        // Opcional: Si tras filtrar no queda nada (ej: llegaron 2 fotos),
+                        // podrías intentar cargar la siguiente página automáticamente o avisar.
+                        // Por ahora simplemente quitamos el loading.
                     }
                     setLoading(false)
                 }
