@@ -540,7 +540,7 @@ class MainFragment : BrowseSupportFragment() {
         private fun handleStringAction(item: String) {
             when (item) {
                 "Conectarse a un SMB" -> openSmbConnectFlow()
-                "Limpiar credenciales especificas" -> showDeleteSpecificSmbDialog()
+                "Limpiar credenciales especificas" -> showSelectServerToDeleteDialog()
                 "Limpiar credenciales" -> showClearSmbDialog()
                 "Importar de SMB" -> runAutoImport()
                 "Generar playlist RANDOM" -> runRandomGenerate()
@@ -652,28 +652,97 @@ class MainFragment : BrowseSupportFragment() {
             .setNegativeButton("Cancelar", null).show()
     }
 
-    private fun showDeleteSpecificSmbDialog() {
-        val servers = smbGateway.listCachedServers()
-        if (servers.isEmpty()) {
-            Toast.makeText(requireContext(), "No hay servidores guardados", Toast.LENGTH_SHORT).show()
+    private fun showSelectServerToDeleteDialog() {
+        val savedServers = smbGateway.listCachedServers()
+
+        if (savedServers.isEmpty()) {
+            Toast.makeText(requireContext(), "No hay credenciales guardadas", Toast.LENGTH_SHORT).show()
             return
         }
-        val labels = servers.map { if (it.name == it.host || it.name.isBlank()) it.host else "${it.name} (${it.host})" }.toTypedArray()
-        AlertDialog.Builder(requireContext())
-            .setTitle("Seleccionar SMB para eliminar")
-            .setItems(labels) { _, which ->
-                val selectedServer = servers[which]
-                AlertDialog.Builder(requireContext())
-                    .setTitle("Confirmar")
-                    .setMessage("¿Borrar ${labels[which]}?")
-                    .setPositiveButton("Borrar") { _, _ ->
-                        smbGateway.deleteSpecificSmbData(selectedServer.id)
-                        refreshUI()
-                        Toast.makeText(requireContext(), "Eliminado", Toast.LENGTH_SHORT).show()
-                    }
-                    .setNegativeButton("Cancelar", null).show()
+
+        val options = savedServers.map { "${it.host} (${it.name})" }.toTypedArray()
+
+        // CAMBIO: Añadimos R.style.Theme_AppCompat_Dialog_Alert explícitamente
+        androidx.appcompat.app.AlertDialog.Builder(requireContext(), androidx.appcompat.R.style.Theme_AppCompat_Dialog_Alert)
+            .setTitle("Selecciona el servidor")
+            .setItems(options) { _, which ->
+                val selectedServer = savedServers[which]
+                onDeleteServerClicked(selectedServer.id, selectedServer.name)
             }
-            .setNegativeButton("Cerrar", null).show()
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    fun onDeleteServerClicked(serverId: String, serverName: String) {
+        val savedShares = smbGateway.getSavedShares(serverId).toList()
+
+        if (savedShares.isEmpty()) {
+            smbGateway.deleteSpecificSmbData(serverId)
+            refreshUI()
+            return
+        }
+
+        val options = savedShares.toTypedArray()
+        val selectedIndices = mutableSetOf<Int>()
+
+        val builder = androidx.appcompat.app.AlertDialog.Builder(requireContext(), androidx.appcompat.R.style.Theme_AppCompat_Dialog_Alert)
+            .setTitle("Administrar shares de $serverName")
+            .setMultiChoiceItems(options, null) { _, which, isChecked ->
+                if (isChecked) selectedIndices.add(which) else selectedIndices.remove(which)
+            }
+            // Asignamos los roles, pero los reubicaremos programáticamente
+            .setNegativeButton("Cancelar", null)
+            .setNeutralButton("Eliminar seleccionados") { _, _ ->
+                if (selectedIndices.isNotEmpty()) {
+                    val sharesToDelete = selectedIndices.map { options[it] }
+                    showConfirmationDialog("Borrar shares", "¿Eliminar ${sharesToDelete.size} share(s)?") {
+                        smbGateway.removeMultipleShares(serverId, sharesToDelete)
+                        refreshUI()
+                    }
+                }
+            }
+            .setPositiveButton("BORRAR TODO EL SMB") { _, _ ->
+                showConfirmationDialog("Borrar todo", "¿Eliminar todo el SMB?") {
+                    smbGateway.deleteSpecificSmbData(serverId)
+                    refreshUI()
+                }
+            }
+
+        val dialog = builder.create()
+        dialog.show()
+
+        // --- REORDENAMIENTO FORZADO POST-SHOW ---
+        val btnPositive = dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)
+        val btnNeutral = dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL)
+        val btnNegative = dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)
+
+        // 1. Obtenemos el contenedor de los botones (el parent)
+        val buttonParent = btnPositive.parent as? android.view.ViewGroup
+        if (buttonParent != null) {
+            // 2. Limpiamos el orden actual
+            buttonParent.removeAllViews()
+
+            // 3. Los agregamos en tu orden exacto: Izquierda -> Medio -> Derecha
+            buttonParent.addView(btnNegative) // Cancelar
+            buttonParent.addView(btnNeutral)  // Eliminar Seleccionados
+            buttonParent.addView(btnPositive) // Borrar Todo el Server
+        }
+    }
+
+    // También actualizamos esta para que use el mismo estilo y no de error
+    private fun showConfirmationDialog(title: String, msg: String, onConfirm: () -> Unit) {
+        androidx.appcompat.app.AlertDialog.Builder(requireContext(), androidx.appcompat.R.style.Theme_AppCompat_Dialog_Alert)
+            .setTitle(title)
+            .setMessage(msg)
+            .setIcon(android.R.drawable.ic_dialog_alert)
+            .setPositiveButton("Eliminar") { dialog, _ ->
+                onConfirm()
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancelar") { dialog, _ ->
+                dialog.dismiss()
+            }
+            .show()
     }
 
     private fun ensureAllFilesAccessTv(): Boolean {

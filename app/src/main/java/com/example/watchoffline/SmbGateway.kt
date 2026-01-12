@@ -30,7 +30,6 @@ import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
-import kotlin.math.min
 
 class SmbGateway(private val context: Context) {
 
@@ -42,6 +41,8 @@ class SmbGateway(private val context: Context) {
     // ✅ LOCK: Objeto de bloqueo estricto para operaciones de escritura en SharedPreferences
     // Esto evita que dos hilos escriban al mismo tiempo y corrompan la lista.
     private val prefsLock = Any()
+
+    private fun keySharesSetFor(serverId: String) = "shares_set_$serverId"
 
     // =========================
     // ✅ LIMPIEZA DE CREDENCIALES SMB (Transaccional)
@@ -95,6 +96,7 @@ class SmbGateway(private val context: Context) {
                 editor.remove(keyNameFor(id))
                 editor.remove(keyPortFor(id))
                 editor.remove(keyShareFor(id))
+                editor.remove(keySharesSetFor(id))
             }
 
             editor.remove(KEY_SERVER_IDS)
@@ -106,8 +108,52 @@ class SmbGateway(private val context: Context) {
         }
     }
 
-    /** Borra un SMB especifico para resetearlo */
+    /**
+     * Borra solo UN share específico de la lista.
+     * - Si al borrarlo la lista queda vacía -> Borra todo el servidor.
+     * - Si al borrarlo era el "share actual" -> Asigna otro share de la lista como actual.
+     */
+    fun removeShare(serverId: String, shareToRemove: String) {
+        synchronized(prefsLock) {
+            // Obtenemos el set actual (Mutable para poder editar)
+            val currentSet = HashSet(getSavedShares(serverId))
 
+            // Intentamos borrar
+            if (currentSet.remove(shareToRemove)) {
+
+                // CASO 1: Si ya no quedan shares, borramos el servidor entero
+                if (currentSet.isEmpty()) {
+                    Log.i(tag, "Al borrar share '$shareToRemove', el server quedó vacío. Borrando server completo.")
+                    deleteSpecificSmbData(serverId)
+                    return
+                }
+
+                // CASO 2: Quedan shares. Guardamos el nuevo set actualizado.
+                val editor = prefs.edit()
+                editor.putStringSet(keySharesSetFor(serverId), currentSet)
+
+                // Verificar si el share que borramos era el que estaba marcado como "último usado"
+                val lastUsedShare = prefs.getString(keyShareFor(serverId), null)
+                if (lastUsedShare == shareToRemove) {
+                    // Si borramos el activo, promovemos al primero que encontremos en la lista sobrante
+                    val newDefault = currentSet.first()
+                    editor.putString(keyShareFor(serverId), newDefault)
+
+                    // Si además este server es el activo globalmente, actualizamos global
+                    val globalLastId = prefs.getString(KEY_LAST_SERVER_ID, null)
+                    if (globalLastId == serverId) {
+                        editor.putString(KEY_LAST_SHARE, newDefault)
+                    }
+                }
+
+                editor.apply()
+                Log.i(tag, "Share eliminado: $shareToRemove. Quedan: ${currentSet.size}")
+            }
+        }
+    }
+
+    /** * Borra DE RAÍZ todo lo asociado a un Server ID (Credenciales, Shares, Puertos, Metadatos).
+     */
     fun deleteSpecificSmbData(serverId: String) {
         synchronized(prefsLock) {
             val ids = prefs.getStringSet(KEY_SERVER_IDS, emptySet())?.toMutableSet() ?: mutableSetOf()
@@ -115,25 +161,58 @@ class SmbGateway(private val context: Context) {
             if (ids.contains(serverId)) {
                 val editor = prefs.edit()
 
-                // Eliminamos los datos asociados a este ID
+                // 1. Eliminamos los datos básicos
                 editor.remove("creds_$serverId")
                 editor.remove(keyNameFor(serverId))
-                editor.remove(keyPortFor(serverId) ?: "port_$serverId") // Ajusta según tus helpers
-                editor.remove(keyShareFor(serverId) ?: "share_$serverId")
+                editor.remove(keyPortFor(serverId))
 
-                // Lo quitamos del set de IDs
+                // 2. Eliminamos los datos de Shares (IMPORTANTE: Borrar ambas keys)
+                editor.remove(keyShareFor(serverId))      // El último share visitado
+                editor.remove(keySharesSetFor(serverId))  // El Set de todos los shares <--- NUEVO
+
+                // 3. Lo quitamos del índice global de IDs
                 ids.remove(serverId)
                 editor.putStringSet(KEY_SERVER_IDS, ids)
 
-                // Si era el último servidor seleccionado, limpiamos los punteros globales
+                // 4. Limpieza de punteros globales si era el server activo
                 val lastId = prefs.getString(KEY_LAST_SERVER_ID, null)
                 if (lastId == serverId) {
                     editor.remove(KEY_LAST_SERVER_ID)
                     editor.remove(KEY_LAST_SHARE)
                 }
 
-                editor.apply()
-                Log.i(tag, "Deleted SMB data for ID: $serverId")
+                editor.commit() // Usamos commit para asegurar que se borre antes de actualizar UI
+                Log.i(tag, "Deleted COMPLETELY SMB data for ID: $serverId")
+            }
+        }
+    }
+
+    fun removeMultipleShares(serverId: String, sharesToRemove: List<String>) {
+        synchronized(prefsLock) {
+            val currentSet = HashSet(getSavedShares(serverId))
+            var changed = false
+
+            sharesToRemove.forEach { share ->
+                if (currentSet.remove(share)) {
+                    changed = true
+                }
+            }
+
+            if (changed) {
+                if (currentSet.isEmpty()) {
+                    deleteSpecificSmbData(serverId)
+                } else {
+                    val editor = prefs.edit()
+                    editor.putStringSet(keySharesSetFor(serverId), currentSet)
+
+                    // Si el share activo estaba entre los borrados, ponemos el primero que quede
+                    val lastUsed = prefs.getString(keyShareFor(serverId), null)
+                    if (sharesToRemove.contains(lastUsed)) {
+                        val newDefault = currentSet.first()
+                        editor.putString(keyShareFor(serverId), newDefault)
+                    }
+                    editor.apply()
+                }
             }
         }
     }
@@ -229,10 +308,47 @@ class SmbGateway(private val context: Context) {
     fun getLastServerId(): String? = prefs.getString(KEY_LAST_SERVER_ID, null)
 
     fun saveLastShare(serverId: String, share: String) {
-        prefs.edit()
-            .putString(KEY_LAST_SHARE, share)
-            .putString(keyShareFor(serverId), share)
-            .apply()
+        if (share.isBlank()) return
+
+        synchronized(prefsLock) {
+            // 1. Obtener el Set actual de shares para este server
+            val currentSet = HashSet(prefs.getStringSet(keySharesSetFor(serverId), emptySet()) ?: emptySet())
+
+            // 2. Agregar el nuevo share
+            currentSet.add(share)
+
+            // 3. Guardar todo atómicamente
+            val editor = prefs.edit()
+
+            // Punteros globales y de "última vez visto" (Mantienen comportamiento actual de UI)
+            editor.putString(KEY_LAST_SHARE, share)
+            editor.putString(keyShareFor(serverId), share)
+
+            // NUEVO: Guardamos el set acumulativo
+            editor.putStringSet(keySharesSetFor(serverId), currentSet)
+
+            editor.apply()
+        }
+    }
+
+    /**
+     * NUEVO MÉTODO: Obtiene TODOS los shares guardados para un servidor.
+     * Incluye lógica de migración para no perder el dato si venías del sistema viejo.
+     */
+    fun getSavedShares(serverId: String): Set<String> {
+        synchronized(prefsLock) {
+            val set = prefs.getStringSet(keySharesSetFor(serverId), emptySet()) ?: emptySet()
+
+            // Migración "On-the-fly":
+            // Si el set está vacío, pero existe un "último share" del sistema viejo, lo devolvemos
+            if (set.isEmpty()) {
+                val oldSingleShare = prefs.getString(keyShareFor(serverId), null)
+                if (!oldSingleShare.isNullOrBlank()) {
+                    return setOf(oldSingleShare)
+                }
+            }
+            return set
+        }
     }
 
     fun getLastShare(serverId: String? = null): String? {

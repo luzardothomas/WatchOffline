@@ -118,6 +118,8 @@ class AutoImporter(
             try {
                 val startTime = System.nanoTime()
                 toast("Importando de SMBs")
+
+                // ... (Validaciones de proxy e IDs se mantienen igual) ...
                 val proxyOk = smbGateway.ensureProxyStarted(proxyPort)
                 if (!proxyOk) { onError("Error Proxy SMB."); return@Thread }
 
@@ -127,12 +129,31 @@ class AutoImporter(
                 val allRawItems = CopyOnWriteArrayList<RawItem>()
                 val scanFutures = ArrayList<java.util.concurrent.Future<*>>()
 
+                // === BUCLE CORREGIDO MULTI-SHARE ===
                 for (serverId in serverIds) {
-                    scanFutures.add(scanPool.submit {
-                        val share = smbGateway.getLastShare(serverId)
-                        if (!share.isNullOrBlank()) processServer(serverId, share, allRawItems)
-                    })
+                    // 1. Obtenemos TODOS los shares registrados para esa IP
+                    val shares = smbGateway.getSavedShares(serverId)
+
+                    if (shares.isEmpty()) {
+                        Log.w("AutoImporter", "Server $serverId no tiene shares guardados.")
+                        continue
+                    }
+
+                    // 2. Lanzamos un hilo de escaneo por CADA share
+                    for (share in shares) {
+                        scanFutures.add(scanPool.submit {
+                            try {
+                                Log.d("AutoImporter", "Escaneando Server: $serverId | Share: $share")
+                                processServer(serverId, share, allRawItems)
+                            } catch (e: Exception) {
+                                Log.e("AutoImporter", "Error escaneando $serverId/$share", e)
+                            }
+                        })
+                    }
                 }
+                // ===================================
+
+                // Esperar a que terminen todos los escaneos
                 for (f in scanFutures) try { f.get() } catch (_: Exception) {}
 
                 if (allRawItems.isEmpty()) { onDone(0); return@Thread }
