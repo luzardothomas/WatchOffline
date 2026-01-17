@@ -2,9 +2,7 @@ package com.example.watchoffline
 
 import android.content.Context
 import android.graphics.Color
-import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
-import android.text.TextUtils
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
@@ -12,6 +10,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.leanback.widget.ImageCardView
@@ -27,17 +26,18 @@ class CardPresenter : Presenter() {
     private var sSelectedBackgroundColor: Int by Delegates.notNull()
     private var sDefaultBackgroundColor: Int by Delegates.notNull()
 
-    // cache interno
+    // Cache interno de medidas
     private var cachedDensity = -1f
     private var cachedSizePx = 0
     private var cachedPadH = 0
     private var cachedPadV = 0
 
-    private var overlayBg: Drawable? = null
-
+    // MODIFICADO: ViewHolder ahora guarda referencia al Contenedor (la cinta)
     private class CardViewHolder(
         root: View,
         val cardView: ImageCardView,
+        val textContainer: LinearLayout, // <--- NUEVO: Referencia a la cinta
+        val metaView: TextView,
         val titleView: TextView
     ) : Presenter.ViewHolder(root)
 
@@ -50,76 +50,93 @@ class CardPresenter : Presenter() {
             sDefaultBackgroundColor = ContextCompat.getColor(ctx, R.color.default_background)
             sSelectedBackgroundColor = ContextCompat.getColor(ctx, R.color.selected_background)
             mDefaultCardImage = ContextCompat.getDrawable(ctx, R.drawable.movie)
-            overlayBg = ColorDrawable(0x99000000.toInt())
         }
 
         ensurePxCache(ctx)
         val sizePx = cachedSizePx
 
-        // 1. EL ROOT AHORA ES EL QUE MANDA EL FOCO
+        // 1. ROOT
         val root = FrameLayout(ctx).apply {
             layoutParams = ViewGroup.LayoutParams(sizePx, sizePx)
             clipToPadding = true
             clipChildren = true
-
-            // PROPIEDADES CRÍTICAS PARA TV BOXES GENÉRICOS
             isFocusable = true
             isFocusableInTouchMode = true
             descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         }
 
+        // 2. CARD VIEW (IMAGEN)
         val cardView = object : ImageCardView(ctx) {
             override fun setSelected(selected: Boolean) {
                 updateCardBackgroundColor(this, selected)
                 super.setSelected(selected)
             }
         }.apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-
+            layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             setMainImageDimensions(sizePx, sizePx)
             setMainImageScaleType(ImageView.ScaleType.CENTER_CROP)
-
             titleText = null
             contentText = null
-
-            // 2. EL HIJO YA NO ES FOCUSABLE (El padre lo controla)
             isFocusable = false
             isFocusableInTouchMode = false
-
             updateCardBackgroundColor(this, false)
         }
 
-        val titleOverlay = TextView(ctx).apply {
+        // 3. CONTENEDOR DE TEXTO (LA CINTA)
+        val textContainer = LinearLayout(ctx).apply {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.BOTTOM
             )
-            setPadding(cachedPadH, cachedPadV, cachedPadH, cachedPadV)
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, TITLE_SP)
-            maxLines = 2
-            ellipsize = TextUtils.TruncateAt.END
-            setLineSpacing(0f, 1.05f)
-            background = overlayBg
+            orientation = LinearLayout.VERTICAL
 
+            // FIX 1: Usar color directo, no un Drawable compartido
+            setBackgroundColor(0xFF212121.toInt())
+
+            setPadding(cachedPadH, cachedPadV, cachedPadH, cachedPadV)
             isFocusable = false
             isFocusableInTouchMode = false
         }
 
-        root.addView(cardView)
-        root.addView(titleOverlay)
+        // 4. METADATA (T01 Cap 01)
+        val metaView = TextView(ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            gravity = Gravity.CENTER
+            setTextColor(Color.LTGRAY)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            (layoutParams as LinearLayout.LayoutParams).bottomMargin = (2 * cachedDensity).toInt()
+        }
 
-        // 3. PUENTE DE FOCO: Cuando el root recibe foco, activamos la card visualmente
+        // 5. TÍTULO REAL
+        val titleView = TextView(ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+
+        textContainer.addView(metaView)
+        textContainer.addView(titleView)
+
+        root.addView(cardView)
+        root.addView(textContainer)
+
         root.onFocusChangeListener = View.OnFocusChangeListener { _, hasFocus ->
-            // Esto dispara el setSelected del ImageCardView (animación + color)
             cardView.isSelected = hasFocus
         }
 
-        return CardViewHolder(root, cardView, titleOverlay)
+        return CardViewHolder(root, cardView, textContainer, metaView, titleView)
     }
 
     override fun onBindViewHolder(viewHolder: Presenter.ViewHolder, item: Any) {
@@ -127,18 +144,32 @@ class CardPresenter : Presenter() {
         val movie = item as Movie
 
         val url = movie.cardImageUrl?.trim().orEmpty()
-        val title = movie.title?.trim().orEmpty()
+        val fullTitle = movie.title?.trim().orEmpty()
 
-        if (BuildConfig.DEBUG) {
-            Log.d(TAG, "bind title=$title url=${if (url.isNotEmpty()) "yes" else "no"} skip=${movie.skipToSecond}")
+        val splitIndex = fullTitle.indexOf(" - ")
+
+        if (splitIndex != -1) {
+            val metaText = fullTitle.substring(0, splitIndex)
+            val titleText = fullTitle.substring(splitIndex + 3)
+
+            holder.metaView.text = metaText
+            holder.metaView.visibility = View.VISIBLE
+
+            holder.titleView.text = titleText
+        } else {
+            holder.metaView.text = ""
+            holder.metaView.visibility = View.GONE
+            holder.titleView.text = fullTitle
         }
 
-        holder.titleView.text = title
-        holder.titleView.visibility = if (title.isNotEmpty()) View.VISIBLE else View.GONE
+        holder.titleView.visibility = if (fullTitle.isNotEmpty()) View.VISIBLE else View.GONE
+
+        // FIX 2: Forzar recalculado de altura (Solución al bug visual)
+        // Esto obliga a la cinta a medirse de nuevo según si el texto ocupa 1 o 2 líneas
+        holder.textContainer.requestLayout()
 
         val ctx = holder.cardView.context
         ensurePxCache(ctx)
-
         val sizePx = cachedSizePx
         val model: Any? = if (url.isNotEmpty()) url else mDefaultCardImage
 
@@ -161,8 +192,8 @@ class CardPresenter : Presenter() {
         } catch (_: Exception) {}
 
         holder.cardView.mainImageView.setImageDrawable(null)
+        holder.metaView.text = ""
         holder.titleView.text = ""
-        holder.titleView.visibility = View.GONE
     }
 
     private fun updateCardBackgroundColor(view: ImageCardView, selected: Boolean) {
@@ -186,6 +217,5 @@ class CardPresenter : Presenter() {
         private const val SIZE_DP = 180
         private const val PAD_H_DP = 10
         private const val PAD_V_DP = 8
-        private const val TITLE_SP = 14f
     }
 }

@@ -14,18 +14,14 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.text.TextUtils
-import android.util.Log
 import android.util.StateSet
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.ArrayAdapter
-import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.ActivityOptionsCompat
@@ -34,11 +30,8 @@ import androidx.leanback.app.BrowseSupportFragment
 import androidx.leanback.widget.*
 import androidx.recyclerview.widget.RecyclerView
 import com.bumptech.glide.Glide
-import org.json.JSONObject
-import java.io.File
 import java.util.LinkedHashMap
 import java.util.Locale
-import java.util.UUID
 
 class MainFragment : BrowseSupportFragment() {
 
@@ -786,6 +779,7 @@ class MainFragment : BrowseSupportFragment() {
                 jsonDataManager.removeAll(requireContext())
                 preloadedPosterUrls.clear()
                 refreshUI()
+                Toast.makeText(requireContext(), "JSONs eliminados", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Cancelar", null).show()
     }
@@ -810,13 +804,39 @@ class MainFragment : BrowseSupportFragment() {
     }
 
     private fun showCredentialsDialog(server: SmbGateway.SmbServer) {
-        val layout = LinearLayout(requireContext()).apply { orientation = LinearLayout.VERTICAL; setPadding(50, 20, 50, 0) }
-        val userInput = EditText(requireContext()).apply { hint = "Usuario" }
-        val passInput = EditText(requireContext()).apply { hint = "Contraseña"; inputType = 129 }
-        val shareInput = EditText(requireContext()).apply { hint = "Share (ej: pelis)" }
-        layout.addView(userInput); layout.addView(passInput); layout.addView(shareInput)
+        val layout = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(50, 20, 50, 0)
+        }
 
-        AlertDialog.Builder(requireContext())
+        // Campo Usuario
+        val userInput = EditText(requireContext()).apply {
+            hint = "Usuario"
+            isSingleLine = true
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_NEXT
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+        }
+
+        // Campo Contraseña
+        val passInput = EditText(requireContext()).apply {
+            hint = "Contraseña"
+            isSingleLine = true
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_NEXT
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+
+        // Campo Share
+        val shareInput = EditText(requireContext()).apply {
+            hint = "Share (ej: pelis)"
+            isSingleLine = true
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+        }
+
+        layout.addView(userInput)
+        layout.addView(passInput)
+        layout.addView(shareInput)
+
+        val dialog = AlertDialog.Builder(requireContext())
             .setTitle("Login: ${server.host}")
             .setView(layout)
             .setPositiveButton("Conectar") { _, _ ->
@@ -824,6 +844,7 @@ class MainFragment : BrowseSupportFragment() {
                 val pass = passInput.text.toString()
                 val share = shareInput.text.toString().trim()
                 if (user.isBlank() || share.isBlank()) return@setPositiveButton
+
                 Thread {
                     try {
                         val creds = SmbGateway.SmbCreds(user, pass, null)
@@ -837,7 +858,18 @@ class MainFragment : BrowseSupportFragment() {
                     }
                 }.start()
             }
-            .setNegativeButton("Cancelar", null).show()
+            .setNegativeButton("Cancelar", null)
+            .create()
+
+        // Opcional: Para que al darle a "Done" en el último campo se ejecute el botón positivo
+        shareInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+                true
+            } else false
+        }
+
+        dialog.show()
     }
 
     private fun showDeleteDialog() {
@@ -868,7 +900,7 @@ class MainFragment : BrowseSupportFragment() {
                         jsonDataManager.removeJson(requireContext(), targetFile)
                         preloadedPosterUrls.clear()
                         refreshUI()
-                        Toast.makeText(requireContext(), "Archivo eliminado", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(requireContext(), "JSON eliminado", Toast.LENGTH_SHORT).show()
                     }
                     .show()
             }

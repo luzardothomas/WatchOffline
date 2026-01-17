@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -20,10 +21,26 @@ import kotlinx.coroutines.launch
 class MainActivity : FragmentActivity() {
 
     private lateinit var server: BackgroundServer
+    private var backPressedTime: Long = 0
+    private var backToast: Toast? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        // === LÓGICA DE DOBLE CLICK PARA SALIR ===
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (backPressedTime + 2000 > System.currentTimeMillis()) {
+                    backToast?.cancel()
+                    finish()
+                } else {
+                    backToast = Toast.makeText(baseContext, "Para salir vuelva a retroceder", Toast.LENGTH_SHORT)
+                    backToast?.show()
+                    backPressedTime = System.currentTimeMillis()
+                }
+            }
+        })
 
         startServer()
 

@@ -40,7 +40,9 @@ class LocalAutoImporter(
 
     private data class RawItem(
         val path: String, val title: String, val img: String,
-        val skip: Int, val delay: Int, val videoSrc: String
+        val skip: Int, val delay: Int, val videoSrc: String,
+        val groupSeries: String? = null,
+        val groupSeason: Int? = null
     )
 
     private data class PreviewJson(val fileName: String, val videos: List<VideoItem>, val debug: String)
@@ -116,26 +118,50 @@ class LocalAutoImporter(
                     val imgUrl = cover?.url?.trim().orEmpty().ifBlank { placeholder }
                     val displayTitle = buildDisplayTitleForItem(absPath, cover)
 
-                    // Lógica de validación de Serie
-                    val isSeries = cover?.type.equals("series", ignoreCase = true)
+                    // ==========================================================
+                    // 1. CÁLCULO CENTRALIZADO (Movido arriba para evitar duplicados)
+                    // ==========================================================
+                    val parts = splitPathParts(absPath)
 
-                    // 🔍 LOG DE DEPURACIÓN LOCAL (Espejo del AutoImporter)
+                    // Detectar Temporada (Carpeta > Archivo > API)
+                    val seasonFromFolder = if (parts.size >= 2) parseSeasonFromFolderOrName(parts[parts.size - 2]) else null
+                    val seFile = parseSeasonEpisodeFromFilename(absPath)
+                    val finalSeason = seasonFromFolder ?: seFile?.first ?: cover?.season
+
+                    // Decidir si es Serie (Esta es la variable ÚNICA que usaremos)
+                    val isSeries = cover?.type.equals("series", ignoreCase = true) || finalSeason != null
+                    // ==========================================================
+
+
+                    // 🔍 LOG DE DEPURACIÓN LOCAL
                     if (cover != null) {
                         Log.d("DEBUG_DATA_LOCAL", "--- Analizando Archivo Local ---")
                         Log.d("DEBUG_DATA_LOCAL", "Path: $absPath")
                         Log.d("DEBUG_DATA_LOCAL", "Query usada: $q")
-                        Log.d("DEBUG_DATA_LOCAL", "API skipSeconds: ${cover.skipToSecond}")
-                        Log.d("DEBUG_DATA_LOCAL", "API delaySeconds: ${cover.delaySkip}")
-                        Log.d("DEBUG_DATA_LOCAL", "Tipo detectado: ${cover.type}")
+                        Log.d("DEBUG_DATA_LOCAL", "Tipo detectado (API): ${cover.type}")
                     } else {
                         Log.w("DEBUG_DATA_LOCAL", "⚠️ Sin respuesta de API para archivo: ${absPath.substringAfterLast("/")}")
                     }
 
-                    // Asignación de valores finales (Respetando el flag isSeries)
+                    // Asignación de valores finales (Usando la variable isSeries ya calculada)
                     val finalSkip = if (isSeries) (cover?.skipToSecond ?: 0) else 0
                     val finalDelay = if (isSeries) (cover?.delaySkip ?: 0) else 0
 
                     Log.d("DEBUG_DATA_LOCAL", "Resultado Final -> isSeries: $isSeries | Skip: $finalSkip | Delay: $finalDelay")
+
+                    // === LÓGICA PARA EL NOMBRE DEL GRUPO (JSON) ===
+                    val seriesNameForGroup = if (isSeries) {
+                        // Si viene de una carpeta "Temporada X", la serie es la carpeta padre
+                        if (seasonFromFolder != null && parts.size >= 3) {
+                            parts[parts.size - 3]
+                        } else {
+                            // Si no, usamos el ID de la API o el nombre limpio del archivo
+                            cover?.id ?: fileBaseName(absPath).replace(Regex("""\d+.*"""), "").trim()
+                        }
+                    } else null
+
+                    val seasonForGroup = if (isSeries) (finalSeason ?: 1) else null
+                    // ============================================
 
                     rawItems.add(RawItem(
                         path = absPath,
@@ -143,7 +169,9 @@ class LocalAutoImporter(
                         img = imgUrl,
                         skip = finalSkip,
                         delay = finalDelay,
-                        videoSrc = "http://127.0.0.1:$serverPort${encodePathForUrl(absPath)}"
+                        videoSrc = "http://127.0.0.1:$serverPort${encodePathForUrl(absPath)}",
+                        groupSeries = seriesNameForGroup,
+                        groupSeason = seasonForGroup
                     ))
                 }
 
@@ -155,17 +183,13 @@ class LocalAutoImporter(
                 val movies = ArrayList<RawItem>()
 
                 for (ri in rawItemsUnique) {
-                    val parts = ri.path.replace("\\", "/").split("/").filter { it.isNotBlank() }
-                    var addedToSeries = false
-                    if (parts.size >= 3) {
-                        val series = parts[parts.size - 3]
-                        val season = parseSeasonFromFolderOrName(parts[parts.size - 2])
-                        if (season != null) {
-                            seriesMap.getOrPut(series to season) { ArrayList() }.add(ri)
-                            addedToSeries = true
-                        }
+                    // Si tiene etiqueta de serie, VA A SERIES
+                    if (ri.groupSeries != null && ri.groupSeason != null) {
+                        seriesMap.getOrPut(ri.groupSeries to ri.groupSeason) { ArrayList() }.add(ri)
+                    } else {
+                        // Solo si no es serie, va a películas
+                        movies.add(ri)
                     }
-                    if (!addedToSeries) movies.add(ri)
                 }
 
                 val previews = ArrayList<PreviewJson>()
@@ -173,7 +197,7 @@ class LocalAutoImporter(
                 for ((key, items) in seriesEntries) {
                     items.sortWith(compareBy({ parseEpisodeForSort(it.path) ?: Int.MAX_VALUE }, { it.path.lowercase() }))
                     val videos = items.map { VideoItem(it.title, it.skip, it.delay, it.img, it.img, it.videoSrc) }
-                    previews.add(PreviewJson("${normalizeName(key.first)}_s${pad2(key.second)}.json", videos, "LOCAL SERIES"))
+                    previews.add(PreviewJson("${normalizeName(key.first)}_s${pad2(key.second)}_local.json", videos, "LOCAL SERIES"))
                 }
 
                 val sagaMap = HashMap<String, ArrayList<RawItem>>()
@@ -183,8 +207,8 @@ class LocalAutoImporter(
                 for ((saga, items) in sagaEntries) {
                     items.sortWith(compareBy({ extractMovieSortKey(it.path, it.title) }, { normalizeName(it.title) }))
                     val videos = items.map { VideoItem(it.title, it.skip, it.delay, it.img, it.img, it.videoSrc) }
-                    val fName = if (items.size > 1) "saga_${normalizeName(saga).replace(" ", "_")}.json"
-                    else "${normalizeName(items.first().title).replace(" ", "_")}.json"
+                    val fName = if (items.size > 1) "saga_${normalizeName(saga).replace(" ", "_")}_local.json"
+                    else "${normalizeName(items.first().title).replace(" ", "_")}_local.json"
                     previews.add(PreviewJson(fName, videos, "LOCAL MOVIES"))
                 }
 
@@ -200,6 +224,7 @@ class LocalAutoImporter(
 
                 val ms = (System.nanoTime() - startTime) / 1_000_000
                 toast("JSONs: $imported\nVIDEOS: ${uniquePaths.size}")
+                toast("Importado en ${ms/1000.0}s")
                 onDone(imported)
 
             } catch (e: Exception) {
@@ -298,6 +323,23 @@ class LocalAutoImporter(
         val se = parseSeasonEpisodeFromFilename(path)
         val epOnly = parseEpisodeOnlyFromFilename(path)
 
+        // Si tenemos Serie/Temporada X/Archivo
+        if (parts.size >= 3) {
+            val seasonFolder = parts[parts.size - 2]
+            val seasonNum = parseSeasonFromFolderOrName(seasonFolder) // Usamos tu parser existente
+
+            // A veces el archivo es solo un numero "9.mp4", el regex epOnly puede fallar si espera "ep 9"
+            // Así que chequeamos si el nombre sin extensión es puramente numérico
+            val epNum = epOnly ?: fileNoExt.toIntOrNull()
+
+            if (seasonNum != null && epNum != null) {
+                val seriesFolderName = parts[parts.size - 3]
+                // Generamos una query explicita: "malcolm s07e09"
+                // La API entenderá esto perfectamente y buscará en la carpeta s07
+                return "${normalizeName(seriesFolderName)} s${pad2(seasonNum)}e${pad2(epNum)}"
+            }
+        }
+
         // 1. REGLA ANIME / EPISODIOS CONTINUOS
         // Solo usamos la carpeta abuela si la ruta es profunda (mínimo 3 niveles)
         // Ejemplo: /Animes/Evangelion/01.mkv -> parts.size es 3
@@ -346,7 +388,7 @@ class LocalAutoImporter(
         val name = fileBaseName(path)
         reEpWords.findAll(name).lastOrNull()?.let { return it.groupValues[1].toInt() }
         reEpTail.find(name)?.let { return it.groupValues[1].toInt() }
-        return null
+        return name.toIntOrNull()
     }
 
     private fun parseEpisodeForSort(path: String) = parseSeasonEpisodeFromFilename(path)?.second ?: parseEpisodeOnlyFromFilename(path)
@@ -379,31 +421,61 @@ class LocalAutoImporter(
         }
     }
 
-    private fun buildDisplayTitleForItem(absPath: String, cover: ApiCover?): String {
-        val fallback = fileBaseName(absPath)
-        val seriesName = cover?.id ?: fallback
+    private fun prettyCap(ep: Int?): String? =
+        if (ep == null || ep <= 0) null else "Cap ${pad2(ep)}"
 
+    private fun prettyTemp(season: Int?): String? =
+        if (season == null || season <= 0) null else "T${pad2(season)}"
+
+    private fun buildDisplayTitleForItem(absPath: String, cover: ApiCover?): String {
+        // 1. Nombre base del archivo como último recurso
+        val fallbackName = fileBaseName(absPath)
+
+        // 2. Prioridad al ID de la API (si existe), sino el nombre del archivo
+        val seriesName = cover?.id ?: fallbackName
+
+        // 3. Extracción de metadatos del archivo
         val seFile = parseSeasonEpisodeFromFilename(absPath)
         val epFileOnly = parseEpisodeOnlyFromFilename(absPath)
 
-        val season = seFile?.first
-        val ep = seFile?.second ?: epFileOnly ?: cover?.episode
+        // ==============================================================
+        // LÓGICA DE TEMPORADA MEJORADA
+        // ==============================================================
+        val seasonFromFile = seFile?.first
 
-        // Verificamos si es serie por tags de la API o por detección de temporada/episodio
-        val isSeries = season != null || ep != null || cover?.type?.lowercase() == "series"
+        // Buscamos en la carpeta (ej: Temporada_7)
+        val parts = splitPathParts(absPath)
+        val seasonFromFolder = if (parts.size >= 2) {
+            parseSeasonFromFolderOrName(parts[parts.size - 2])
+        } else null
 
+        // Consolidación: Archivo > Carpeta > API
+        val finalSeason = seasonFromFile ?: seasonFromFolder ?: cover?.season
+        // ==============================================================
+
+        val epFromFile = seFile?.second ?: epFileOnly
+        val epFinal = epFromFile ?: cover?.episode
+
+        // 5. Verificación de si es una serie
+        // Usamos finalSeason en lugar de seasonFromFile
+        val isSeries = cover?.type.equals("series", ignoreCase = true) ||
+                (finalSeason != null) || (epFromFile != null) || (epFinal != null)
+
+        // Si no es serie (es película o especial único), devolvemos solo el nombre
         if (!isSeries) return seriesName
 
-        val capStr = if (ep != null) "Cap ${pad2(ep)}" else ""
-        val tempStr = if (season != null) "T${pad2(season)}" else ""
+        // 6. Formateo de las etiquetas
+        val cap = prettyCap(epFinal)
+        val temp = prettyTemp(finalSeason) // <--- AQUI USAMOS EL DATO CONSOLIDADO
 
-        // Resultado: T04 Cap06 - Malcolm
+        // 7. Construcción de la cadena final
         return when {
-            tempStr.isNotEmpty() && capStr.isNotEmpty() -> "$tempStr $capStr - $seriesName"
-            capStr.isNotEmpty() -> "$capStr - $seriesName"
+            temp != null && cap != null -> "$temp $cap - $seriesName"
+            cap != null -> "$cap - $seriesName"
             else -> seriesName
-        }.trim()
+        }
     }
+
 
     // =========================
     // 🛠 HELPERS ADAPTADOS
@@ -419,8 +491,17 @@ class LocalAutoImporter(
         return path.replace("\\", "/").substringAfterLast("/").substringBeforeLast(".")
     }
 
+    private fun uniqueJsonNameFast(base: String, existing: MutableSet<String>): String {
+        if (!existing.contains(base)) return base
+        val prefix = base.removeSuffix(".json")
+        var i = 2
+        while (true) {
+            val cand = "${prefix}_$i.json"; if (!existing.contains(cand)) return cand; i++
+        }
+    }
+
     private fun pad2(n: Int): String = n.toString().padStart(2, '0')
-    private fun pad3(n: Int): String = n.toString().padStart(3, '0')
+    private fun splitPathParts(path: String) = path.replace("\\", "/").trim('/').split("/").filter { it.isNotBlank() }
 
     private fun normalizeName(s: String): String =
         s.trim().replace('_', ' ').replace(Regex("""\s+"""), " ").lowercase()

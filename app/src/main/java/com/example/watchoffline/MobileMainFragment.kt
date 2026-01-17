@@ -21,7 +21,6 @@ import androidx.recyclerview.widget.RecyclerView
 import java.io.File
 import java.util.LinkedHashMap
 import java.util.Locale
-import java.util.UUID
 import android.content.Context
 
 class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
@@ -920,7 +919,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                     setNegativeButton("CANCELAR", null)
                     setPositiveButton("BORRAR") { _, _ ->
                         jsonDataManager.removeJson(requireContext(), realName)
-                        Toast.makeText(requireContext(), "Archivo eliminado", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(requireContext(), "JSON eliminado", Toast.LENGTH_SHORT).show()
                         refreshUI()
                     }
                     show()
@@ -944,7 +943,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             .setPositiveButton("Borrar todo") { _, _ ->
                 jsonDataManager.removeAll(requireContext())
                 refreshUI()
-                Toast.makeText(requireContext(), "JSONs borrados", Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), "JSONs eliminados", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Cancelar", null)
             .show()
