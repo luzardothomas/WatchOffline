@@ -62,6 +62,7 @@ class LocalAutoImporter(
     private val reSeason4 = Regex("""(?i)\bs(\d{1,2})\b""")
     private val reSE1 = Regex("""(?i)\bs(\d{1,2})\s*[._\- ]*\s*e(\d{1,3})\b""")
     private val reSE2 = Regex("""(?i)\b(\d{1,2})\s*x\s*(\d{1,3})\b""")
+    private val reSE_Underscore = Regex("""(?i)\b[st](\d{1,2})_e(\d{1,3})\b""")
     private val reEpWords = Regex("""(?i)\b(?:ep|e|cap|c|episode)\s*0*(\d{1,3})\b""")
     private val reEpTail = Regex("""(?i)(?:[_\-\s])0*(\d{1,3})\s*$""")
     private val reSagaLooksLikePart = Regex(""".*\b(\d{1,2}|i{1,6}|iv|v|vi)\b.*""", RegexOption.IGNORE_CASE)
@@ -222,9 +223,15 @@ class LocalAutoImporter(
                     imported++
                 }
 
-                val ms = (System.nanoTime() - startTime) / 1_000_000
-                toast("JSONs: $imported\nVIDEOS: ${uniquePaths.size}")
-                toast("Importado en ${ms/1000.0}s")
+                if(imported != 0) {
+                    val ms = (System.nanoTime() - startTime) / 1_000_000
+                    toast("JSONs: $imported\nVIDEOS: ${uniquePaths.size}")
+                    toast("Importado en ${ms/1000.0}s")
+                }
+                else {
+                    toast("No se encontraron nuevos videos")
+                }
+
                 onDone(imported)
 
             } catch (e: Exception) {
@@ -380,6 +387,7 @@ class LocalAutoImporter(
     private fun parseSeasonEpisodeFromFilename(path: String): Pair<Int, Int>? {
         val name = fileBaseName(path)
         reSE1.find(name)?.let { return it.groupValues[1].toInt() to it.groupValues[2].toInt() }
+        reSE_Underscore.find(name)?.let { return it.groupValues[1].toInt() to it.groupValues[2].toInt() }
         reSE2.find(name)?.let { return it.groupValues[1].toInt() to it.groupValues[2].toInt() }
         return null
     }
@@ -481,23 +489,12 @@ class LocalAutoImporter(
     // 🛠 HELPERS ADAPTADOS
     // =========================
 
-    private fun filterAlreadyImported(previews: List<PreviewJson>): List<PreviewJson> {
-        // Optimizamos creando el Set una sola vez para la comparación
-        val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toSet()
-        return previews.filter { it.fileName !in existing }
-    }
+    private fun filterAlreadyImported(previews: List<PreviewJson>) =
+        previews.filter { it.fileName !in jsonDataManager.getImportedJsons().map { j -> j.fileName }.toHashSet() }
+
 
     private fun fileBaseName(path: String): String {
         return path.replace("\\", "/").substringAfterLast("/").substringBeforeLast(".")
-    }
-
-    private fun uniqueJsonNameFast(base: String, existing: MutableSet<String>): String {
-        if (!existing.contains(base)) return base
-        val prefix = base.removeSuffix(".json")
-        var i = 2
-        while (true) {
-            val cand = "${prefix}_$i.json"; if (!existing.contains(cand)) return cand; i++
-        }
     }
 
     private fun pad2(n: Int): String = n.toString().padStart(2, '0')

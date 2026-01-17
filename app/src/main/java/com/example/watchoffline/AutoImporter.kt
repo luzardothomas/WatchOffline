@@ -72,8 +72,9 @@ class AutoImporter(
     private val reSeason2 = Regex("""(?i)\btemp\s*(\d{1,2})""")
     private val reSeason3 = Regex("""(?i)\bseason\s*(\d{1,2})""")
     private val reSeason4 = Regex("""(?i)\bs(\d{1,2})\b""")
-    private val reSE1 = Regex("""(?i)\bs(\d{1,2})\s*[._\- ]*\s*e(\d{1,3})\b""")
+    private val reSE1 = Regex("""(?i)\b[st](\d{1,2})\s*[._\- ]*\s*e(\d{1,3})\b""")
     private val reSE2 = Regex("""(?i)\b(\d{1,2})\s*x\s*(\d{1,3})\b""")
+    private val reSE_Underscore = Regex("""(?i)\b[st](\d{1,2})_e(\d{1,3})\b""")
     private val reEpWords = Regex("""(?i)\b(?:ep|e|cap|c|episode)\s*0*(\d{1,3})\b""")
     private val reEpTail = Regex("""(?i)(?:[_\-\s])0*(\d{1,3})\s*$""")
     private val reSagaLooksLikePart = Regex(""".*\b(\d{1,2}|i{1,6}|iv|v|vi)\b.*""", RegexOption.IGNORE_CASE)
@@ -177,7 +178,7 @@ class AutoImporter(
                 val previews = ArrayList<PreviewJson>()
                 for ((key, list) in seriesMap) {
                     list.sortWith(compareBy({ parseEpisodeForSort(it.smbPath) ?: Int.MAX_VALUE }, { it.smbPath }))
-                    previews.add(PreviewJson("${normalizeName(key.first)}_s${pad2(key.second)}.json",
+                    previews.add(PreviewJson("${normalizeName(key.first)}_s${pad2(key.second)}_servidor.json",
                         list.map { VideoItem(it.title, it.skip, it.delay, it.img, it.img, it.videoSrc) }, "SERIES"))
                 }
 
@@ -185,7 +186,7 @@ class AutoImporter(
                 for (m in movies) sagaMap.getOrPut(inferSagaNameFromPath(m.smbPath)) { ArrayList() }.add(m)
                 for ((saga, list) in sagaMap) {
                     list.sortWith(compareBy({ extractMovieSortKey(it.smbPath, it.title) }, { it.title }))
-                    val fName = if (list.size > 1) "saga_${normalizeName(saga).replace(" ", "_")}.json" else "${normalizeName(list.first().title).replace(" ", "_")}.json"
+                    val fName = if (list.size > 1) "saga_${normalizeName(saga).replace(" ", "_")}_servidor.json" else "${normalizeName(list.first().title).replace(" ", "_")}_servidor.json"
                     previews.add(PreviewJson(fName, list.map { VideoItem(it.title, it.skip, it.delay, it.img, it.img, it.videoSrc) }, "MOVIES"))
                 }
 
@@ -199,9 +200,15 @@ class AutoImporter(
                     count++
                 }
 
-                val ms = (System.nanoTime() - startTime) / 1_000_000
-                toast("JSONs: $count\nVIDEOS: ${uniqueItems.size}")
-                toast("Importado en ${ms/1000.0}s")
+                if (count != 0) {
+                    val ms = (System.nanoTime() - startTime) / 1_000_000
+                    toast("JSONs: $count\nVIDEOS: ${uniqueItems.size}")
+                    toast("Importado en ${ms/1000.0}s")
+                }
+                else {
+                    toast("No se encontraron nuevos videos")
+                }
+
                 onDone(count)
             } catch (e: Exception) { onError(e.message ?: "Error desconocido") }
         }.start()
@@ -412,6 +419,7 @@ class AutoImporter(
     private fun parseSeasonEpisodeFromFilename(path: String): Pair<Int, Int>? {
         val name = fileBaseName(path)
         reSE1.find(name)?.let { return it.groupValues[1].toInt() to it.groupValues[2].toInt() }
+        reSE_Underscore.find(name)?.let { return it.groupValues[1].toInt() to it.groupValues[2].toInt() }
         reSE2.find(name)?.let { return it.groupValues[1].toInt() to it.groupValues[2].toInt() }
         return null
     }
