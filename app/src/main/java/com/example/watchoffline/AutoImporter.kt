@@ -62,7 +62,7 @@ class AutoImporter(
     private val gson = Gson()
     private val coverCache = ConcurrentHashMap<String, ApiCover?>()
     private val coverPool = Executors.newFixedThreadPool(96)
-    private val scanPool = Executors.newFixedThreadPool(8)
+    private val scanPool = Executors.newFixedThreadPool(24)
     private val COVER_TIMEOUT_MS = 3500
     private val API_HOST = "api-watchoffline.luzardo-thomas.workers.dev"
     private val videoExt = hashSetOf("mp4", "mkv", "avi", "webm", "mov", "flv", "mpg", "mpeg", "m4v", "ts", "3gp", "wmv")
@@ -190,13 +190,26 @@ class AutoImporter(
                     previews.add(PreviewJson(fName, list.map { VideoItem(it.title, it.skip, it.delay, it.img, it.img, it.videoSrc) }, "MOVIES"))
                 }
 
-                val toImport = filterAlreadyImported(previews)
-                val existing = jsonDataManager.getImportedJsons().map { it.fileName }.toHashSet()
+                // 1. Leemos la "Base de Datos" UNA sola vez y la cargamos en RAM (HashSet)
+                // Esto hace que buscar duplicados sea instantáneo (0ms)
+                val existingNames = jsonDataManager.getImportedJsons()
+                    .map { it.fileName }
+                    .toHashSet()
+
+                // 2. Filtramos en memoria: Si el nombre ya existe, lo descartamos.
+                // Sin lecturas a disco adicionales.
+                val toImport = previews.filter { it.fileName !in existingNames }
+
                 var count = 0
                 for (p in toImport) {
-                    val safeName = uniqueJsonNameFast(p.fileName, existing)
+                    // Usamos uniqueJsonName pasándole el Set que ya tenemos en RAM.
+                    // Esto protege contra colisiones dentro del mismo lote nuevo.
+                    val safeName = uniqueJsonName(p.fileName, existingNames)
+
                     jsonDataManager.addJson(context, safeName, p.videos)
-                    existing.add(safeName)
+
+                    // Actualizamos el Set en memoria para el siguiente del bucle
+                    existingNames.add(safeName)
                     count++
                 }
 
@@ -264,9 +277,15 @@ class AutoImporter(
             val finalSkip = if (isSeries) (cover?.skipToSecond ?: 0) else 0
             val finalDelay = if (isSeries) (cover?.delaySkip ?: 0) else 0
 
-            // LOG ACTUALIZADO
             if (cover != null) {
-                Log.d("DEBUG_DATA", "Path: $p -> isSeries: $isSeries, Group: $seriesNameForGroup, Season: $seasonForGroup")
+                Log.d("DEBUG_DATA", "--- Analizando Cover ---")
+                Log.d("DEBUG_DATA", "Path: $p")
+                Log.d("DEBUG_DATA", "Query usada: $q")
+                Log.d("DEBUG_DATA", "API skipSeconds: ${cover.skipToSecond}")
+                Log.d("DEBUG_DATA", "API delaySeconds: ${cover.delaySkip}")
+                Log.d("DEBUG_DATA", "Tipo detectado por API: ${cover.type}")
+            } else {
+                Log.w("DEBUG_DATA", "⚠️ Sin respuesta de API para query: $q")
             }
 
             destList.add(RawItem(serverId, share, p, title, img,
@@ -367,7 +386,6 @@ class AutoImporter(
         } catch (e: Exception) { null }
     }
 
-    // Helpers de soporte
     private fun listSmbVideos(serverId: String, shareName: String): List<String> {
         val out = ArrayList<String>()
         smbGateway.withDiskShare(serverId, shareName) { share ->
@@ -504,10 +522,7 @@ class AutoImporter(
         }
     }
 
-    private fun filterAlreadyImported(previews: List<PreviewJson>) =
-        previews.filter { it.fileName !in jsonDataManager.getImportedJsons().map { j -> j.fileName }.toHashSet() }
-
-    private fun uniqueJsonNameFast(base: String, existing: MutableSet<String>): String {
+    private fun uniqueJsonName(base: String, existing: MutableSet<String>): String {
         if (!existing.contains(base)) return base
         val prefix = base.removeSuffix(".json")
         var i = 2

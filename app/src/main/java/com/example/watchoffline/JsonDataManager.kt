@@ -1,7 +1,7 @@
 package com.example.watchoffline
 
 import android.content.Context
-import com.google.common.reflect.TypeToken
+import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 
@@ -36,53 +36,69 @@ data class ImportedJson(
 )
 
 class JsonDataManager {
-    private val importedJsons = mutableListOf<ImportedJson>()
+    // Usamos ConcurrentHashMap para que sea ultra rápido buscar (exists) y seguro entre hilos
+    private val importedJsons = java.util.concurrent.ConcurrentHashMap<String, ImportedJson>()
+
+    // Carpeta donde se guardarán los archivos individuales
+    private fun getImportsFolder(context: Context): java.io.File {
+        val folder = java.io.File(context.filesDir, "json_imports")
+        if (!folder.exists()) folder.mkdirs()
+        return folder
+    }
+
+    fun getImportedJsons(): List<ImportedJson> = importedJsons.values.toList()
+
+    fun exists(fileName: String): Boolean = importedJsons.containsKey(fileName)
 
     fun addJson(context: Context, fileName: String, videos: List<VideoItem>) {
-        if (importedJsons.none { it.fileName == fileName }) {
-            importedJsons.add(ImportedJson(fileName, videos))
-            saveData(context)
+        if (!importedJsons.containsKey(fileName)) {
+            val newItem = ImportedJson(fileName, videos)
+            importedJsons[fileName] = newItem
+            saveSingleFile(context, newItem)
         }
     }
 
+    fun upsertJson(context: Context, fileName: String, videos: List<VideoItem>) {
+        val newItem = ImportedJson(fileName, videos)
+        importedJsons[fileName] = newItem
+        saveSingleFile(context, newItem)
+    }
+
     fun removeJson(context: Context, fileName: String) {
-        importedJsons.removeAll { it.fileName == fileName }
-        saveData(context)
+        importedJsons.remove(fileName)
+        java.io.File(getImportsFolder(context), fileName).delete()
     }
 
     fun removeAll(context: Context) {
         importedJsons.clear()
-        saveData(context)
+        getImportsFolder(context).listFiles()?.forEach { it.delete() }
     }
 
-    fun getImportedJsons(): List<ImportedJson> = importedJsons.toList()
+    private val gson = Gson()
+
+    private fun saveSingleFile(context: Context, item: ImportedJson) {
+        try {
+            java.io.File(getImportsFolder(context), item.fileName).writeText(gson.toJson(item))
+        } catch (e: Exception) {
+            Log.e("JsonDataManager", "Error guardando ${item.fileName}", e)
+        }
+    }
 
     fun loadData(context: Context) {
-        val json = context
-            .getSharedPreferences("json_data", Context.MODE_PRIVATE)
-            .getString("imported", null) ?: return
+        val folder = getImportsFolder(context)
+        val files = folder.listFiles() ?: return
 
-        val type = object : TypeToken<List<ImportedJson>>() {}.type
         importedJsons.clear()
-        importedJsons.addAll(Gson().fromJson(json, type))
-    }
 
-    fun upsertJson(context: Context, fileName: String, videos: List<VideoItem>) {
-        importedJsons.removeAll { it.fileName == fileName }
-        importedJsons.add(ImportedJson(fileName, videos))
-        saveData(context)
-    }
-
-    fun exists(fileName: String): Boolean {
-        return importedJsons.any { it.fileName == fileName }
-    }
-
-    private fun saveData(context: Context) {
-        val json = Gson().toJson(importedJsons)
-        context.getSharedPreferences("json_data", Context.MODE_PRIVATE)
-            .edit()
-            .putString("imported", json)
-            .apply()
+        for (file in files) {
+            try {
+                val content = file.readText()
+                val item = gson.fromJson(content, ImportedJson::class.java)
+                importedJsons[file.name] = item
+            } catch (e: Exception) {
+                Log.e("JsonDataManager", "Error cargando archivo: ${file.name}")
+            }
+        }
     }
 
 }

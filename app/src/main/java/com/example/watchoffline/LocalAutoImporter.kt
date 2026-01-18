@@ -51,7 +51,7 @@ class LocalAutoImporter(
     private val coverCache = ConcurrentHashMap<String, ApiCover?>()
 
     private val apiPool = Executors.newFixedThreadPool(96)
-    private val diskPool = Executors.newFixedThreadPool(4)
+    private val diskPool = Executors.newFixedThreadPool(24)
 
     private val COVER_TIMEOUT_MS = 3500
     private val videoExt = hashSetOf("mp4", "mkv", "avi", "webm", "mov", "flv", "mpg", "mpeg", "m4v", "ts", "3gp", "wmv")
@@ -133,8 +133,6 @@ class LocalAutoImporter(
                     val isSeries = cover?.type.equals("series", ignoreCase = true) || finalSeason != null
                     // ==========================================================
 
-
-                    // 🔍 LOG DE DEPURACIÓN LOCAL
                     if (cover != null) {
                         Log.d("DEBUG_DATA_LOCAL", "--- Analizando Archivo Local ---")
                         Log.d("DEBUG_DATA_LOCAL", "Path: $absPath")
@@ -213,26 +211,38 @@ class LocalAutoImporter(
                     previews.add(PreviewJson(fName, videos, "LOCAL MOVIES"))
                 }
 
-                val toImport = filterAlreadyImported(previews)
-                val existingNames = jsonDataManager.getImportedJsons().map { it.fileName }.toHashSet()
-                var imported = 0
+                // 1. Leemos la "Base de Datos" UNA sola vez y la cargamos en RAM (HashSet)
+                // Esto hace que buscar duplicados sea instantáneo (0ms)
+                val existingNames = jsonDataManager.getImportedJsons()
+                    .map { it.fileName }
+                    .toHashSet()
+
+                // 2. Filtramos en memoria: Si el nombre ya existe, lo descartamos.
+                // Sin lecturas a disco adicionales.
+                val toImport = previews.filter { it.fileName !in existingNames }
+                var count = 0
                 for (p in toImport) {
+                    // Usamos uniqueJsonNameFast pasándole el Set que ya tenemos en RAM.
+                    // Esto protege contra colisiones dentro del mismo lote nuevo.
                     val safeName = uniqueJsonName(p.fileName, existingNames)
+
                     jsonDataManager.addJson(context, safeName, p.videos)
+
+                    // Actualizamos el Set en memoria para el siguiente del bucle
                     existingNames.add(safeName)
-                    imported++
+                    count++
                 }
 
-                if(imported != 0) {
+                if(count != 0) {
                     val ms = (System.nanoTime() - startTime) / 1_000_000
-                    toast("JSONs: $imported\nVIDEOS: ${uniquePaths.size}")
+                    toast("JSONs: $count\nVIDEOS: ${uniquePaths.size}")
                     toast("Importado en ${ms/1000.0}s")
                 }
                 else {
                     toast("No se encontraron nuevos videos")
                 }
 
-                onDone(imported)
+                onDone(count)
 
             } catch (e: Exception) {
                 onError("Error: ${e.message}")
@@ -483,15 +493,6 @@ class LocalAutoImporter(
             else -> seriesName
         }
     }
-
-
-    // =========================
-    // 🛠 HELPERS ADAPTADOS
-    // =========================
-
-    private fun filterAlreadyImported(previews: List<PreviewJson>) =
-        previews.filter { it.fileName !in jsonDataManager.getImportedJsons().map { j -> j.fileName }.toHashSet() }
-
 
     private fun fileBaseName(path: String): String {
         return path.replace("\\", "/").substringAfterLast("/").substringBeforeLast(".")
