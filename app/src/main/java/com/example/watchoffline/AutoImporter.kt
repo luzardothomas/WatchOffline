@@ -1,7 +1,17 @@
 package com.example.watchoffline
 
+import android.app.Activity
+import android.app.Dialog
 import android.content.Context
+import android.graphics.Color
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.util.Log
+import android.view.Gravity
+import android.view.Window
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.TextView
 import androidx.annotation.Keep
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
@@ -112,17 +122,79 @@ class AutoImporter(
         return conn
     }
 
+    private fun isNetworkAvailable(context: Context?): Boolean {
+        val connectivityManager = context?.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val network = connectivityManager?.activeNetwork ?: return false
+        val activeNetwork = connectivityManager.getNetworkCapabilities(network) ?: return false
+
+        return when {
+            activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> true
+            activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> true
+            activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> true
+            else -> false
+        }
+    }
+
     // =========================
     // Core Logic
     // =========================
 
     fun run(toast: (String) -> Unit, onDone: (Int) -> Unit, onError: (String) -> Unit) {
-        Thread {
-            try {
-                val startTime = System.nanoTime()
-                toast("Importando de SMBs")
 
-                // ... (Validaciones de proxy e IDs se mantienen igual) ...
+        val activity = context as? Activity ?: return // Si no hay activity, salimos
+
+        if (!isNetworkAvailable(context)) {
+            // Ejecutamos el toast en el hilo principal por seguridad
+            activity.runOnUiThread {
+                toast("No hay conexión para importar de SMB")
+            }
+            // Cancelamos todo el proceso aquí mismo
+            return
+        }
+
+        // Usamos un array de 1 elemento como contenedor seguro para la variable entre hilos
+        val dialogRef = arrayOf<Dialog?>(null)
+
+        // 1. MOSTRAR DIÁLOGO (HILO PRINCIPAL)
+        activity.runOnUiThread {
+            // Diseño visual (Caja gris oscura)
+            val layout = LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(50, 50, 50, 50)
+                gravity = Gravity.CENTER_VERTICAL
+                setBackgroundColor(Color.parseColor("#303030"))
+            }
+
+            layout.addView(ProgressBar(activity).apply { isIndeterminate = true })
+            layout.addView(TextView(activity).apply {
+                text = "Importando de SMBs..."
+                setTextColor(Color.WHITE)
+                textSize = 18f
+                setPadding(40, 0, 0, 0)
+            })
+
+            // Crear y mostrar el diálogo "crudo"
+            val rawDialog = Dialog(activity)
+            rawDialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+            rawDialog.setContentView(layout)
+            rawDialog.setCancelable(false) // Bloquea toques y botón atrás
+            rawDialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+
+            try {
+                rawDialog.show()
+                // Guardamos la referencia para que el otro hilo la pueda cerrar
+                dialogRef[0] = rawDialog
+            } catch (e: Exception) {
+                // Ignorar si falla al mostrar
+            }
+        }
+
+        Thread {
+
+            try {
+
+                val startTime = System.nanoTime()
+
                 val proxyOk = smbGateway.ensureProxyStarted(proxyPort)
                 if (!proxyOk) { onError("Error Proxy SMB."); return@Thread }
 
@@ -223,7 +295,20 @@ class AutoImporter(
                 }
 
                 onDone(count)
-            } catch (e: Exception) { onError(e.message ?: "Error desconocido") }
+            } catch (e: Exception) {
+                onError(e.message ?: "Error desconocido")
+            }
+            finally {
+                // 3. CERRAR EL DIÁLOGO (SIEMPRE)
+                activity.runOnUiThread {
+                    try {
+                        // Cerramos sin preguntar, forzado
+                        dialogRef[0]?.dismiss()
+                    } catch (e: Exception) {
+                        // Ignorar errores al cerrar (ej. activity destruida)
+                    }
+                }
+            }
         }.start()
     }
 
