@@ -793,7 +793,10 @@ class MainFragment : BrowseSupportFragment() {
         )
         Handler(Looper.getMainLooper()).postDelayed({
             smbGateway.stopDiscovery()
-            if (found.isEmpty()) {  return@postDelayed }
+            if (found.isEmpty()) {
+                Toast.makeText(requireContext(), "No se encontraron servidores SMB", Toast.LENGTH_SHORT).show()
+                return@postDelayed
+            }
             val servers = found.values.toList()
             val labels = servers.map { "${it.name} (${it.host}:${it.port})" }.toTypedArray()
             AlertDialog.Builder(requireContext())

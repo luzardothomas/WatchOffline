@@ -966,6 +966,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             smbGateway.stopDiscovery()
 
             if (found.isEmpty()) {
+                Toast.makeText(requireContext(), "No se encontraron servidores SMB", Toast.LENGTH_SHORT).show()
                 return@postDelayed
             }
 
