@@ -58,7 +58,9 @@ class RandomizeImporter(
         onError: (String) -> Unit
     ) {
         try {
-            val randoms = jsonDataManager.getImportedJsons().filter { isRandomName(it.fileName) }
+            val randoms = jsonDataManager.getImportedJsons()
+                .filter { isRandomName(it.fileName) }
+                .sortedBy { it.fileName.lowercase(Locale.ROOT) }
             if (randoms.isEmpty()) {
                 onError("No hay playlists RANDOM para actualizar.")
                 return
@@ -213,6 +215,9 @@ class RandomizeImporter(
         val listView = android.widget.ListView(ctx).apply {
             choiceMode = android.widget.ListView.CHOICE_MODE_MULTIPLE
             dividerHeight = 1
+            // ✅ MEJORA TV: Permitir navegación con control remoto
+            isFocusable = true
+            isFocusableInTouchMode = true
         }
 
         val labels = sorted.map { it.fileName }.toTypedArray()
@@ -238,10 +243,8 @@ class RandomizeImporter(
         // Al desmarcar "Seleccionar todos" habilita la lista para elegir
         cbSelectAll.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked) {
-                // ✅ Si vuelve a activar "Seleccionar todos": marcar todo y deshabilitar
                 for (i in labels.indices) listView.setItemChecked(i, true)
             } else {
-                // ✅ Si lo desactiva: habilitar y arrancar con TODO desmarcado
                 for (i in labels.indices) listView.setItemChecked(i, false)
                 if (labels.isNotEmpty()) {
                     listView.post { listView.setSelection(0) }
@@ -250,17 +253,20 @@ class RandomizeImporter(
             applySelectAllState(isChecked)
         }
 
-        // Meter lista al layout con altura razonable
+        // ✅ ACTUALIZACIÓN: Usamos Weight para que el diálogo no colapse la lista
         val lp = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             (ctx.resources.displayMetrics.density * 420).toInt()
-        )
-        lp.topMargin = (ctx.resources.displayMetrics.density * 14).toInt()
+        ).apply {
+            weight = 1f // Esto asegura que la lista use el espacio y active el scroll
+            topMargin = (ctx.resources.displayMetrics.density * 14).toInt()
+        }
         root.addView(listView, lp)
 
         AlertDialog.Builder(ctx)
             .setTitle("Generar playlist RANDOM")
             .setView(root)
+            .setCancelable(true) // Asegura que no se rompa al cerrar
             .setNegativeButton("Cancelar", null)
             .setPositiveButton("Crear RANDOM") { _, _ ->
                 try {
@@ -288,8 +294,7 @@ class RandomizeImporter(
                         return@setPositiveButton
                     }
 
-                    // ✅ FORZAR COVER ÚNICO dados.jpg PARA RANDOM
-                    val randomCover = "android.resource://${context?.packageName}/drawable/dados"
+                    val randomCover = "android.resource://${ctx.packageName}/drawable/dados"
 
                     val normalized = if (noSkipIntros) {
                         merged.map { v ->
@@ -307,7 +312,6 @@ class RandomizeImporter(
                     val playlistName = resolvePlaylistName(selectAll, chosen)
                     val finalName = ensureUniqueName(playlistName)
 
-                    // ✅ FIX: ctx es Context (no nullable)
                     jsonDataManager.upsertJson(ctx, finalName, shuffled)
 
                     toast("Creada: $finalName")
@@ -489,4 +493,3 @@ class RandomizeImporter(
         return if (bases.all { it.equals(first, ignoreCase = true) }) first else null
     }
 }
-
