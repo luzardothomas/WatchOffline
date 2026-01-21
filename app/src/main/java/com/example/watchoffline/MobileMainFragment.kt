@@ -397,7 +397,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                         val listForIntent = ArrayList(importedJsons.map { it.fileName }.sortedBy { it.lowercase() })
 
                         if (listForIntent.isEmpty()) {
-                            Toast.makeText(requireContext(), "No hay archivos JSON para editar", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(requireContext(), "No hay JSONs para editar", Toast.LENGTH_SHORT).show()
                         } else {
                             // 2. Crear el Intent con los datos necesarios
                             val intent = Intent(requireContext(), ImageSearchActivity::class.java).apply {

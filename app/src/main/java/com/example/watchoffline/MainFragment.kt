@@ -549,7 +549,7 @@ class MainFragment : BrowseSupportFragment() {
                     val listForIntent = ArrayList(importedJsons.map { it.fileName }.sorted())
 
                     if (listForIntent.isEmpty()) {
-                        Toast.makeText(requireContext(), "No hay archivos JSON", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(requireContext(), "No hay JSONs", Toast.LENGTH_SHORT).show()
                     } else {
                         val intent = Intent(requireContext(), ImageSearchActivity::class.java).apply {
                             putStringArrayListExtra("TARGET_JSONS", listForIntent)
@@ -771,7 +771,10 @@ class MainFragment : BrowseSupportFragment() {
 
     private fun showDeleteAllDialog() {
         val count = jsonDataManager.getImportedJsons().size
-        if (count == 0) return
+        if (count == 0) {
+            Toast.makeText(requireContext(), "No hay JSONs para borrar", Toast.LENGTH_SHORT).show()
+            return
+        }
         AlertDialog.Builder(requireContext())
             .setTitle("Eliminar TODOS")
             .setMessage("Se borrarán $count JSONs. ¿Seguro?")
@@ -881,7 +884,7 @@ class MainFragment : BrowseSupportFragment() {
             .sortedBy { it.fileName.lowercase(java.util.Locale.ROOT) }
 
         if (imported.isEmpty()) {
-            Toast.makeText(requireContext(), "No hay archivos para eliminar", Toast.LENGTH_SHORT).show()
+            Toast.makeText(requireContext(), "No hay JSONs para eliminar", Toast.LENGTH_SHORT).show()
             return
         }
 

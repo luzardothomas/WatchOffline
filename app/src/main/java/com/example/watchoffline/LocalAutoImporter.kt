@@ -395,51 +395,72 @@ class LocalAutoImporter(
 
         val fileName = parts.last()
         val fileNoExt = fileName.substringBeforeLast(".")
+
+        // 1. Detección de Temporada/Episodio en el nombre del archivo
         val se = parseSeasonEpisodeFromFilename(path)
         val epOnly = parseEpisodeOnlyFromFilename(path)
 
-        // Si tenemos Serie/Temporada X/Archivo
-        if (parts.size >= 3) {
-            val seasonFolder = parts[parts.size - 2]
-            val seasonNum = parseSeasonFromFolderOrName(seasonFolder) // Usamos tu parser existente
+        // Regex para detectar si el nombre del archivo es SOLO metadata (ej: "t1_e1", "1x01", "s01e01")
+        // Si coincide con esto, IGNORAMOS el nombre del archivo y miramos las carpetas.
+        // Explicación: (s/t opcional) + (numeros) + (separador x/e/_) + (numeros)
+        val isMetadataFile = Regex("""(?i)^(?:s|t|season|temp|temporada)?[\s_.-]*\d+[\s_.-]*(?:x|e|ep|_)[\s_.-]*\d+$""")
+            .matches(fileNoExt)
 
-            // A veces el archivo es solo un numero "9.mp4", el regex epOnly puede fallar si espera "ep 9"
-            // Así que chequeamos si el nombre sin extensión es puramente numérico
-            val epNum = epOnly ?: fileNoExt.toIntOrNull()
+        // Regex mejorado para carpetas (agrega "season", soporta guiones bajos, espacios, puntos)
+        val seasonFolderRegex = Regex("""(?i)^(?:s|t|season|temp|temporada)[\s_.-]*(\d{1,4})$""")
 
-            if (seasonNum != null && epNum != null) {
-                val seriesFolderName = parts[parts.size - 3]
-                // Generamos una query explicita: "malcolm s07e09"
-                // La API entenderá esto perfectamente y buscará en la carpeta s07
-                return "${normalizeName(seriesFolderName)} s${pad2(seasonNum)}e${pad2(epNum)}"
+        // ------------------------------------------------------------------------
+        // PASO A: ¿El archivo tiene el nombre REAL de la serie? (ej: "Malcolm_1x01")
+        // ------------------------------------------------------------------------
+        if (!isMetadataFile && se != null) {
+            // Quitamos la parte de S01E01 para ver qué queda
+            val cleanName = fileNoExt.replace(Regex("""(?i)[\s._\-]*(?:s\d+e\d+|\d+x\d+|t\d+_e\d+).*"""), "").trim()
+
+            // Si quedan letras (ej: "Malcolm"), usamos eso.
+            if (cleanName.any { it.isLetter() }) {
+                return "${normalizeName(cleanName)} ${se.first}x${pad2(se.second)}"
             }
         }
 
-        // 1. REGLA ANIME / EPISODIOS CONTINUOS
-        // Solo usamos la carpeta abuela si la ruta es profunda (mínimo 3 niveles)
-        // Ejemplo: /Animes/Evangelion/01.mkv -> parts.size es 3
-        if (parts.size >= 3 && epOnly != null) {
-            val seriesFolderName = parts[parts.size - 3]
-
-            // Evitamos que use "0" o "emulated" chequeando que no sea solo un número
-            if (seriesFolderName.length > 1) {
-                val seriesKey = normalizeName(seriesFolderName).replace(" ", "_")
-                return "${seriesKey}_$epOnly"
+        // ------------------------------------------------------------------------
+        // PASO B: ¿El archivo es tipo "nombre_global_1"? (ej: "di_maria_1")
+        // ------------------------------------------------------------------------
+        if (!isMetadataFile) {
+            val nameWithSpaces = fileNoExt.replace(Regex("""[._\-]"""), " ").trim()
+            // Si tiene letras y NO es metadata pura, asumimos que es nombre + numero global
+            if (nameWithSpaces.any { it.isLetter() }) {
+                return normalizeName(nameWithSpaces)
             }
         }
 
-        // 2. REGLA SERIES (4x06, S01E01)
-        if (se != null) {
-            // Si no hay profundidad, usamos la primera parte de la ruta o el nombre del archivo
-            val seriesName = if (parts.size >= 3) parts[parts.size - 3]
-            else if (parts.size >= 2) parts[parts.size - 2]
-            else fileNoExt.replace(Regex("""\d+.*"""), "").trim()
+        // ------------------------------------------------------------------------
+        // PASO C: El archivo es "Mudo" o "Metadata Pura" (01.mp4, t1_e1.mp4) -> MIRAR CARPETAS
+        // ------------------------------------------------------------------------
+        if (parts.size >= 2) {
+            val parentFolder = parts[parts.size - 2]
+            val match = seasonFolderRegex.find(normalizeName(parentFolder))
 
-            return "${normalizeName(seriesName)} ${se.first}x${pad2(se.second)}"
+            if (match != null) {
+                // ---> CASO 1: PADRE ES TEMPORADA (Malcolm/season_7/05.mp4 o Malcolm/t_1/t1_e1.mp4)
+                val seasonNum = match.groupValues[1].toInt()
+
+                // Intentamos sacar el episodio del nombre del archivo (si es t1_e1 saca 1, si es 5 saca 5)
+                // Si parseSeasonEpisode falló antes, usamos el fallback numérico simple
+                val finalEp = se?.second ?: epOnly ?: fileNoExt.replace(Regex("\\D+"), "").toIntOrNull() ?: 1
+
+                if (parts.size >= 3) {
+                    // La serie es el ABUELO
+                    val grandParent = parts[parts.size - 3]
+                    return "${normalizeName(grandParent)} s${pad2(seasonNum)}e${pad2(finalEp)}"
+                }
+            } else {
+                // ---> CASO 2: PADRE ES LA SERIE (Di_Maria/01.mp4)
+                val finalEp = epOnly ?: fileNoExt.replace(Regex("\\D+"), "").toIntOrNull() ?: 1
+                return "${normalizeName(parentFolder)} $finalEp"
+            }
         }
 
-        // 3. FALLBACK PELÍCULAS
-        // Aquí es donde unimos palabras si quieres evitar espacios en la búsqueda final
+        // Fallback finalísimo
         return normalizeName(fileNoExt)
     }
 
