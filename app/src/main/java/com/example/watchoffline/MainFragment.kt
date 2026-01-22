@@ -884,7 +884,7 @@ class MainFragment : BrowseSupportFragment() {
             .sortedBy { it.fileName.lowercase(java.util.Locale.ROOT) }
 
         if (imported.isEmpty()) {
-            Toast.makeText(requireContext(), "No hay JSONs para eliminar", Toast.LENGTH_SHORT).show()
+            Toast.makeText(requireContext(), "No hay JSONs para borrar", Toast.LENGTH_SHORT).show()
             return
         }
 
