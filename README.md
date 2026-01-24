@@ -2,9 +2,7 @@
 
 ## Guía de la APP
 
-<a href="https://www.youtube.com/watch?v=AiFMui5KrTc">
-  <img src="https://img.youtube.com/vi/AiFMui5KrTc/maxresdefault.jpg" alt="Ver video" style="width:100%;">
-</a>
+[![Ver video](https://markdown-videos.deta.dev/youtube/AiFMui5KrTc)](https://youtu.be/AiFMui5KrTc)
 
 ## Objetivos de la APP
 
