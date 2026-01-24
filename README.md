@@ -2,7 +2,7 @@
 
 ## Guía de la APP
 
-[![](https://markdown-videos.deta.dev/youtube/AiFMui5KrTc)](https://youtu.be/AiFMui5KrTc)
+[![WatchOffline: Guía técnica](https://img.youtube.com/vi/AiFMui5KrTc/0.jpg)](https://www.youtube.com/watch?v=AiFMui5KrTc)
 
 ## Objetivos de la APP
 
