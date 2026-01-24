@@ -2,7 +2,9 @@
 
 ## Guía de la APP
 
-[![WatchOffline: Guía técnica](https://img.youtube.com/vi/AiFMui5KrTc/0.jpg)](https://www.youtube.com/watch?v=AiFMui5KrTc)
+<a href="https://www.youtube.com/watch?v=AiFMui5KrTc">
+  <img src="https://img.youtube.com/vi/AiFMui5KrTc/maxresdefault.jpg" alt="Ver video" style="width:100%;">
+</a>
 
 ## Objetivos de la APP
 
