@@ -2,7 +2,11 @@
 
 ## Guía de la APP
 
-[![Ver video](https://markdown-videos.deta.dev/youtube/AiFMui5KrTc?rel=0)](https://youtu.be/AiFMui5KrTc)
+<div align="center">
+  <a href="https://www.youtube.com/watch?v=AiFMui5KrTc">
+    <img src="https://img.youtube.com/vi/AiFMui5KrTc/maxresdefault.jpg" alt="Haz clic para ver el video de WatchOffline" style="width:100%; max-width:600px;">
+  </a>
+</div>
 
 ## Objetivos de la APP
 
