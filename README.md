@@ -2,7 +2,7 @@
 
 ## Guía de la APP
 
-[![Ver video](https://markdown-videos.deta.dev/youtube/AiFMui5KrTc)](https://youtu.be/AiFMui5KrTc)
+[![Ver video](https://markdown-videos.deta.dev/youtube/AiFMui5KrTc?rel=0)](https://youtu.be/AiFMui5KrTc)
 
 ## Objetivos de la APP
 
