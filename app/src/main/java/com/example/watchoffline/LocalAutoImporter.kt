@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.Dialog
 import android.content.Context
 import android.graphics.Color
+import android.os.storage.StorageManager
 import android.util.Log
 import android.view.Gravity
 import android.view.Window
@@ -349,9 +350,81 @@ class LocalAutoImporter(
     }
 
     private fun pickReadableRoots(): List<File> {
-        val candidates = mutableListOf(File("/storage/self/primary"), File("/storage/emulated/0"), File("/sdcard"))
-        try { File("/storage").listFiles()?.filter { it.isDirectory }?.let { candidates.addAll(it) } } catch (_: Exception) {}
-        return candidates.distinctBy { it.path }.filter { it.exists() && it.canRead() }.ifEmpty { listOf(File("/storage")) }
+        val candidates = ArrayList<File>()
+
+        // 1. Siempre agregamos la interna oficial
+        candidates.add(File("/storage/emulated/0"))
+
+        Log.d(tag, "=== BUSCANDO VOLÚMENES (StorageManager) ===")
+
+        // 2. Método API Android (StorageManager): La forma correcta en Android 11+
+        try {
+            val storageManager = context.getSystemService(Context.STORAGE_SERVICE) as StorageManager
+            val volumes = storageManager.storageVolumes
+
+            for (vol in volumes) {
+                val path = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                    vol.directory
+                } else null
+
+                if (path != null) {
+                    val status = if (path.canRead()) "LEGIBLE" else "ILEGIBLE (Falta Permiso)"
+                    Log.i(tag, " -> VOLUMEN SM: [${vol.mediaStoreVolumeName}] Ruta: ${path.absolutePath} | Estado: $status")
+
+                    if (path.canRead()) {
+                        candidates.add(path)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Error usando StorageManager: ${e.message}")
+        }
+
+        // 3. Fallback manual: Si StorageManager falló o devolvió solo la interna
+        // Intentamos listar /storage a la fuerza
+        val manualRoot = File("/storage")
+        if (manualRoot.exists() && manualRoot.canRead()) {
+            manualRoot.listFiles()?.forEach {
+                if (it.isDirectory && it.canRead() && !it.name.equals("emulated") && !it.name.equals("self")) {
+                    Log.i(tag, " -> VOLUMEN MANUAL (/storage): ${it.absolutePath}")
+                    candidates.add(it)
+                }
+            }
+        }
+
+        // 4. Buscar en /mnt/media_rw
+        // A veces Android monta los USB aquí y son accesibles con MANAGE_EXTERNAL_STORAGE
+        Log.d(tag, "=== INTENTANDO RUTAS ALTERNATIVAS (/mnt) ===")
+        val mediaRw = File("/mnt/media_rw")
+        if (mediaRw.exists() && mediaRw.canRead()) {
+            mediaRw.listFiles()?.forEach {
+                // Filtramos carpetas vacías o ilegibles
+                if (it.isDirectory && it.canRead() && (it.listFiles()?.isNotEmpty() == true)) {
+                    candidates.add(it)
+                }
+            }
+        }
+
+        // También probar /mnt/usb_storage
+        val usbStorage = File("/mnt/usb_storage")
+        if (usbStorage.exists() && usbStorage.canRead()) {
+            candidates.add(usbStorage)
+        }
+
+        // 5. FILTRADO FINAL Y LOGUEO DE VERDAD
+        // Usamos canonicalPath para evitar duplicados (ej: /sdcard vs /storage/emulated/0)
+        val finalRoots = candidates
+            .filter { it.exists() }
+            .distinctBy {
+                try { it.canonicalPath } catch(_:Exception) { it.absolutePath }
+            }
+
+        Log.w(tag, "=== LISTA DEFINITIVA DE ROOTS A ESCANEAR (${finalRoots.size}) ===")
+        for (f in finalRoots) {
+            Log.w(tag, " [CANDIDATO FINAL] -> ${f.absolutePath} (R:${f.canRead()} | W:${f.canWrite()})")
+        }
+
+        return finalRoots
     }
 
     private fun listLocalVideos(root: File): List<String> {
