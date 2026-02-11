@@ -68,7 +68,7 @@ class LocalAutoImporter(
     private val reSeason1 = Regex("""(?i)temporada\s*(\d{1,2})""")
     private val reSeason2 = Regex("""(?i)\btemp\s*(\d{1,2})""")
     private val reSeason3 = Regex("""(?i)\bseason\s*(\d{1,2})""")
-    private val reSeason4 = Regex("""(?i)\bs(\d{1,2})\b""")
+    private val reSeason4 = Regex("""(?i)\b[st][._\- ]*(\d{1,2})\b""")
     private val reSE1 = Regex("""(?i)\bs(\d{1,2})\s*[._\- ]*\s*e(\d{1,3})\b""")
     private val reSE2 = Regex("""(?i)\b(\d{1,2})\s*x\s*(\d{1,3})\b""")
     private val reSE_Underscore = Regex("""(?i)\b[st](\d{1,2})_e(\d{1,3})\b""")
