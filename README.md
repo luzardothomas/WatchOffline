@@ -1,4 +1,8 @@
-# WatchOffline
+# WatchOffline - Android TV & Mobile Offline Video Player
+
+> Reproductor de video offline con soporte nativo para servidores SMB, gestión inteligente de subtítulos y diseñado para una experiencia fluida al estilo de las plataformas de streaming, tanto en Android TV como en dispositivos móviles.
+
+## Tecnologías utilizadas
 
 <p align="center">
   <img src="https://img.shields.io/badge/Kotlin-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white" alt="Kotlin" />
