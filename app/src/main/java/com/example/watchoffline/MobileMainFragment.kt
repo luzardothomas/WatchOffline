@@ -35,21 +35,21 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
     private val jsonDataManager = JsonDataManager()
 
-    // ✅ SMB
+    // SMB
     private lateinit var smbGateway: SmbGateway
 
-    // ✅ Search (inline)
+    // Search (inline)
     private var currentQuery: String = ""
     private val handler = Handler(Looper.getMainLooper())
 
-    // ✅ Back button (auto-hide)
+    // Back button (auto-hide)
     private val ui = Handler(Looper.getMainLooper())
     private lateinit var btnBack: ImageButton
     private lateinit var rootViewRef: View
     private lateinit var sectionsRecyclerRef: RecyclerView
     private var backVisible = false
 
-    // ✅ LAST PLAYED (SharedPreferences)
+    // LAST PLAYED (SharedPreferences)
     private val PREFS_NAME = "watchoffline_prefs"
     private val KEY_LAST_PLAYED = "LAST_PLAYED_VIDEO_URL"
 
@@ -102,7 +102,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
 
     /**
-     * ✅ En Mobile: scrollea hasta la sección del último reproducido
+     * Scrollea hasta la sección del último reproducido
      * y le pide al adapter que lo “marque” visualmente.
      */
     private fun focusLastPlayedIfAnyMobile() {
@@ -137,7 +137,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     override fun onResume() {
         super.onResume()
 
-        // ✅ Mobile: solo scroll/mark, sin requestFocus
+        // Solo scroll/mark, sin requestFocus
         view?.post {
             focusLastPlayedIfAnyMobile()
         }
@@ -147,7 +147,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
 
     // =========================
-    // ✅ Next/Prev context
+    // Next/Prev context
     // =========================
 
     private data class PlaylistCtx(
@@ -189,7 +189,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     }
 
     override fun onDestroyView() {
-        // ✅ cleanup back-button timers/listeners
+        // cleanup back-button timers/listeners
         ui.removeCallbacks(hideBackRunnable)
         if (this::sectionsRecyclerRef.isInitialized) {
             try { sectionsRecyclerRef.clearOnScrollListeners() } catch (_: Exception) {}
@@ -209,7 +209,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     }
 
     // =========================
-    // ✅ Search UI (inline, no SearchView)
+    // Search UI
     // =========================
 
     private fun setupSearchUi(root: View) {
@@ -306,10 +306,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         val sections = buildSectionsFiltered(currentQuery)
         lastRenderedSections = sections
 
-        // ✅ Arma contexto playlist+index para items reales:
-        // - NO acciones
-        // - NO "ARMADO DE REPRODUCCIÓN"
-        // - NO launcher playlist:// (RANDOM)
+        // Arma contexto playlist+index para items reales
         playlistCtxByKey = HashMap()
         sections.forEach { section ->
             if (section.title == "ACCIONES AVANZADAS") return@forEach
@@ -333,7 +330,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
                 val url = item.videoUrl ?: ""
 
-                // ✅ Guardar SIEMPRE la última card clickeada
+                // Guardar SIEMPRE la última card clickeada
                 // (incluye playlist://RANDOM...)
                 if (!url.startsWith("__action_")) {
                     writeLastPlayed(url)
@@ -341,7 +338,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
 
                 // =========================
-                // ✅ ARMADO DE REPRODUCCIÓN (acciones RANDOM)
+                // ARMADO DE REPRODUCCIÓN
                 // =========================
                 when (url) {
                     "__action_random_generate__" -> { runRandomGenerate(); return@MobileSectionsAdapter }
@@ -351,7 +348,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                 }
 
                 // =========================
-                // ✅ Launcher playlist RANDOM (1 sola card)
+                // Launcher playlist RANDOM (1 sola card)
                 // =========================
                 if (url.startsWith("playlist://")) {
                     val playlistName = url.removePrefix("playlist://").trim()
@@ -374,7 +371,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                             putExtra(DetailsActivity.EXTRA_PLAYLIST, playlist)
                             putExtra(DetailsActivity.EXTRA_INDEX, 0)
 
-                            // 🔁 SOLO RANDOM
+                            // SOLO RANDOM
                             putExtra("EXTRA_LOOP_PLAYLIST", true)
                             putExtra("EXTRA_DISABLE_LAST_PLAYED", true)
                         }
@@ -474,7 +471,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     }
 
     // =========================
-    // ✅ Sections + Filter
+    // Sections + Filter
     // =========================
 
     private fun buildSectionsFiltered(queryRaw: String): List<MobileSection> {
@@ -552,7 +549,7 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                 val jsonMatch = normalize(jsonTitle).contains(q)
 
                 if (isRandomName(one.fileName)) {
-                    // ✅ en búsqueda: mostrar launcher SOLO si matchea el nombre del JSON RANDOM
+                    // Búsqueda: mostrar launcher SOLO si matchea el nombre del JSON RANDOM
                     if (!jsonMatch) return@mapNotNull null
 
                     val launcher = Movie(
@@ -604,7 +601,6 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
         )
     }
 
-    // ✅ este es el nuevo UX: lista simple, tap y borra esa playlist
     private fun runRandomDeleteOne() {
         RandomizeImporter(
             context = requireContext(),
@@ -953,20 +949,33 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
     // =========================
 
     private fun openSmbConnectFlow() {
-        Toast.makeText(requireContext(), "Buscando SMBs en la red...", Toast.LENGTH_SHORT).show()
+        val options = arrayOf("Servidor Local (Escanear)", "Servidor Específico (IP)")
 
+        AlertDialog.Builder(requireContext())
+            .setTitle("Seleccionar tipo de conexión")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> startLocalNetworkDiscovery()
+                    1 -> showManualIpDialog()
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun startLocalNetworkDiscovery() {
+        Toast.makeText(requireContext(), "Buscando SMBs en la red...", Toast.LENGTH_SHORT).show()
         val found = LinkedHashMap<String, SmbGateway.SmbServer>()
 
         smbGateway.discoverAll(
             onFound = { server -> found[server.id] = server },
-            onError = { err -> Toast.makeText(requireContext(), "No se pudo escanear SMB: $err", Toast.LENGTH_LONG).show() }
+            onError = { err -> Toast.makeText(requireContext(), "Error: $err", Toast.LENGTH_LONG).show() }
         )
 
         Handler(Looper.getMainLooper()).postDelayed({
             smbGateway.stopDiscovery()
-
             if (found.isEmpty()) {
-                Toast.makeText(requireContext(), "No se encontraron servidores SMB", Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), "No se encontraron servidores", Toast.LENGTH_SHORT).show()
                 return@postDelayed
             }
 
@@ -974,15 +983,94 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
             val labels = servers.map { "${it.name} (${it.host}:${it.port})" }.toTypedArray()
 
             AlertDialog.Builder(requireContext())
-                .setTitle("SMB encontrados")
+                .setTitle("Servidores encontrados")
                 .setItems(labels) { _, which ->
                     showCredentialsDialog(servers[which])
                 }
-                .setNegativeButton("Cancelar", null)
+                .setNegativeButton("Atrás", { _, _ -> openSmbConnectFlow() })
                 .show()
         }, 2000)
     }
 
+    private fun showManualIpDialog() {
+        val layout = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(50, 20, 50, 0)
+        }
+
+        val ipInput = EditText(requireContext()).apply {
+            hint = "IP (ej: 100.x.x.x)"
+            setSingleLine()
+        }
+        val shareInput = EditText(requireContext()).apply {
+            hint = "Share (ej: pelis)"
+            setSingleLine()
+        }
+
+        layout.addView(ipInput)
+        layout.addView(shareInput)
+
+        val dialog = AlertDialog.Builder(requireContext())
+            .setTitle("Conectar Servidor Dedicado")
+            .setView(layout)
+            .setPositiveButton("Conectar", null)
+            .setNegativeButton("Cancelar", null)
+            .create()
+
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val ip = ipInput.text.toString().trim()
+                val share = shareInput.text.toString().trim().replace("/", "")
+
+                if (ip.isEmpty() || share.isEmpty()) {
+                    Toast.makeText(requireContext(), "IP y Share son obligatorios", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                // Credenciales dummy porque no son necesarias
+                val creds = SmbGateway.SmbCreds("guest", "")
+                val serverId = smbGateway.makeServerId(ip, 445)
+
+                // Deshabilitamos el botón para evitar múltiples clics mientras testea
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = false
+
+                Thread {
+                    try {
+                        // 1. Validamos que el servidor responda y que el share sea accesible
+                        smbGateway.testLogin(ip, creds)
+                        smbGateway.testShareAccess(ip, creds, share)
+
+                        // 2. Si las pruebas pasan, guardamos de forma persistente
+                        smbGateway.saveCreds(
+                            serverId = serverId,
+                            host = ip,
+                            creds = creds,
+                            port = 445,
+                            serverName = "Dedicado ($ip)"
+                        )
+                        smbGateway.saveLastShare(serverId, share)
+
+                        activity?.runOnUiThread {
+                            Toast.makeText(requireContext(), "SMB conectado ✅", Toast.LENGTH_SHORT).show()
+                            dialog.dismiss()
+                        }
+                    } catch (e: Exception) {
+                        Log.e("SMB_MANUAL", "Fallo al conectar a servidor dedicado", e)
+                        activity?.runOnUiThread {
+                            dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = true
+                            val errorMsg = when {
+                                e.message?.contains("Timeout") == true -> "Tiempo de espera agotado"
+                                e.message?.contains("Access Denied") == true -> "Acceso denegado al share '$share'"
+                                else -> "Error: ${e.message}"
+                            }
+                            Toast.makeText(requireContext(), errorMsg, Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }.start()
+            }
+        }
+
+        dialog.show()
+    }
 
     private fun showCredentialsDialog(server: SmbGateway.SmbServer) {
         val layout = LinearLayout(requireContext()).apply {
@@ -1057,6 +1145,8 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
 
         dialog.show()
     }
+
+
 }
 
 data class MobileSection(

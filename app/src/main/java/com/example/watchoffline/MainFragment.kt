@@ -51,13 +51,9 @@ class MainFragment : BrowseSupportFragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-
-        // Optimización visual básica
         hideHeadersDockCompletely(view)
         disableSearchOrbFocus(view)
         view.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.default_background))
-
-        // ✅ OPTIMIZACIÓN CRÍTICA DE SCROLL (La magia para que vuele)
         setupSmoothScrolling(view)
     }
 
@@ -131,18 +127,14 @@ class MainFragment : BrowseSupportFragment() {
         searchAffordanceColor = ContextCompat.getColor(requireContext(), R.color.search_opaque)
     }
 
-    // ✅ OPTIMIZACIÓN LIST ROW CORREGIDA: Sin sombras, sin efectos, PERO CON TÍTULOS
     private fun createOptimizedListRowPresenter(): ListRowPresenter {
         return ListRowPresenter().apply {
             shadowEnabled = false        // Sin sombras (GPU heavy)
             selectEffectEnabled = false  // Sin efecto zoom/dim automático
-
-            // ❌ headerPresenter = null  <-- ESTO BORRABA LOS TÍTULOS. LO QUITAMOS.
         }
     }
 
     private fun loadRows() {
-        // Usamos el presenter ULTRA optimizado
         val rowsAdapter = ArrayObjectAdapter(createOptimizedListRowPresenter())
         val cardPresenter = CardPresenter()
 
@@ -788,25 +780,123 @@ class MainFragment : BrowseSupportFragment() {
     }
 
     private fun openSmbConnectFlow() {
-        Toast.makeText(requireContext(), "Buscando SMBs en la red...", Toast.LENGTH_SHORT).show()
+        val options = arrayOf("Servidor Local (Escanear)", "Servidor Específico (IP)")
+
+        AlertDialog.Builder(requireContext())
+            .setTitle("Seleccionar tipo de conexión")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> startLocalNetworkDiscovery()
+                    1 -> showManualIpDialog()
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun startLocalNetworkDiscovery() {
+        Toast.makeText(requireContext(), "Buscando en red local...", Toast.LENGTH_SHORT).show()
         val found = LinkedHashMap<String, SmbGateway.SmbServer>()
+
         smbGateway.discoverAll(
             onFound = { server -> found[server.id] = server },
-            onError = { err -> Toast.makeText(requireContext(), "No se pudo escanear SMB: $err", Toast.LENGTH_LONG).show() }
+            onError = { err -> Toast.makeText(requireContext(), "Error: $err", Toast.LENGTH_LONG).show() }
         )
+
         Handler(Looper.getMainLooper()).postDelayed({
             smbGateway.stopDiscovery()
             if (found.isEmpty()) {
-                Toast.makeText(requireContext(), "No se encontraron servidores SMB", Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), "No se encontraron servidores", Toast.LENGTH_SHORT).show()
                 return@postDelayed
             }
             val servers = found.values.toList()
             val labels = servers.map { "${it.name} (${it.host}:${it.port})" }.toTypedArray()
+
             AlertDialog.Builder(requireContext())
-                .setTitle("SMB encontrados")
+                .setTitle("Servidores en Red")
                 .setItems(labels) { _, which -> showCredentialsDialog(servers[which]) }
-                .setNegativeButton("Cancelar", null).show()
-        }, 2000)
+                .setNegativeButton("Atrás", { _, _ -> openSmbConnectFlow() })
+                .show()
+        }, 2500)
+    }
+
+    private fun showManualIpDialog() {
+        val layout = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(50, 20, 50, 0)
+        }
+
+        val ipInput = EditText(requireContext()).apply {
+            hint = "IP (ej: 100.x.x.x)"
+            isSingleLine = true
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_NEXT
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+        }
+
+        val shareInput = EditText(requireContext()).apply {
+            hint = "Share (ej: pelis)"
+            isSingleLine = true
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+        }
+
+        layout.addView(ipInput)
+        layout.addView(shareInput)
+
+        val dialog = AlertDialog.Builder(requireContext())
+            .setTitle("Servidor Dedicado")
+            .setView(layout)
+            .setPositiveButton("Conectar", null)
+            .setNegativeButton("Cancelar", null)
+            .create()
+
+        dialog.setOnShowListener {
+            val btn = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            btn.setOnClickListener {
+                val ip = ipInput.text.toString().trim()
+                val share = shareInput.text.toString().trim().replace("/", "")
+
+                if (ip.isEmpty() || share.isEmpty()) {
+                    Toast.makeText(requireContext(), "IP y Share requeridos", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+
+                val serverId = smbGateway.makeServerId(ip, 445)
+                val creds = SmbGateway.SmbCreds("guest", "")
+
+                btn.isEnabled = false
+
+                Thread {
+                    try {
+                        // Validamos antes de guardar
+                        smbGateway.testLogin(ip, creds)
+                        smbGateway.testShareAccess(ip, creds, share)
+
+                        smbGateway.saveCreds(serverId, ip, creds, 445, "Dedicado ($ip)")
+                        smbGateway.saveLastShare(serverId, share)
+
+                        activity?.runOnUiThread {
+                            Toast.makeText(requireContext(), "SMB conectado ✅", Toast.LENGTH_SHORT).show()
+                            dialog.dismiss()
+                        }
+                    } catch (e: Exception) {
+                        activity?.runOnUiThread {
+                            btn.isEnabled = true
+                            Toast.makeText(requireContext(), "Error: ${e.message}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }.start()
+            }
+        }
+
+        shareInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+                true
+            } else false
+        }
+
+        dialog.show()
     }
 
     private fun showCredentialsDialog(server: SmbGateway.SmbServer) {
