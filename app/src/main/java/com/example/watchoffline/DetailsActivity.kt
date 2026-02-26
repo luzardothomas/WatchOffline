@@ -25,6 +25,7 @@ class DetailsActivity : FragmentActivity() {
         }
 
         // ✅ Playlist + index (si vienen)
+        val playlistName = intent.getStringExtra("EXTRA_PLAYLIST_NAME")
         val playlist = intent.getSerializableExtra(EXTRA_PLAYLIST) as? ArrayList<Movie>
         val index = intent.getIntExtra(EXTRA_INDEX, 0)
 
@@ -34,8 +35,11 @@ class DetailsActivity : FragmentActivity() {
             arguments = Bundle().apply {
                 putSerializable("movie", movie)
 
-                // 🔥 SOLO si llega playlist real
-                if (!playlist.isNullOrEmpty()) {
+                if (!playlistName.isNullOrEmpty()) {
+                    putString("playlist_name", playlistName)
+                    putInt("index", index)
+                }
+                else if (!playlist.isNullOrEmpty()) {
                     putSerializable("playlist", playlist)
                     putInt("index", index.coerceIn(0, playlist.lastIndex))
                 }

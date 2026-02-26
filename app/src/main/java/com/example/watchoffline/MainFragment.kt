@@ -472,15 +472,20 @@ class MainFragment : BrowseSupportFragment() {
             if (movie.videoUrl?.startsWith("playlist://") == true) {
                 val url = movie.videoUrl ?: return
                 val playlistName = url.removePrefix("playlist://").trim()
+
+                // Solo verificamos que exista para no abrir un reproductor vacío
                 val imported = jsonDataManager.getImportedJsons().firstOrNull { it.fileName == playlistName }
                 if (imported == null || imported.videos.isEmpty()) {
                     Toast.makeText(requireContext(), "Playlist vacía", Toast.LENGTH_LONG).show()
                     return
                 }
-                val playlist = ArrayList<Movie>().apply { imported.videos.forEach { v -> add(v.toMovie()) } }
+
+                // Agarramos solo el primer video para la vista de detalles
+                val firstMovie = imported.videos[0].toMovie()
+
                 val intent = Intent(requireContext(), DetailsActivity::class.java).apply {
-                    putExtra(DetailsActivity.MOVIE, playlist[0])
-                    putExtra(DetailsActivity.EXTRA_PLAYLIST, playlist)
+                    putExtra(DetailsActivity.MOVIE, firstMovie)
+                    putExtra("EXTRA_PLAYLIST_NAME", playlistName)
                     putExtra(DetailsActivity.EXTRA_INDEX, 0)
                     putExtra("EXTRA_LOOP_PLAYLIST", true)
                     putExtra("EXTRA_DISABLE_LAST_PLAYED", true)

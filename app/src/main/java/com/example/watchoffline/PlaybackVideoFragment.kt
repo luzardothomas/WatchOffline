@@ -21,6 +21,7 @@ import android.widget.ListView
 import android.widget.SeekBar
 import android.widget.TextView
 import androidx.fragment.app.Fragment
+import com.example.watchoffline.JsonDataManager
 import com.example.watchoffline.Movie
 import com.example.watchoffline.R
 import org.videolan.libvlc.LibVLC
@@ -457,8 +458,20 @@ class PlaybackVideoFragment : Fragment() {
             playlist = emptyList(); currentIndex = 0; currentMovie = null; return
         }
         val argList = arguments?.getSerializable("playlist") as? ArrayList<Movie>
+        val argName = arguments?.getString("playlist_name")
         val argIndex = arguments?.getInt("index", 0) ?: 0
-        playlist = if (!argList.isNullOrEmpty()) argList else listOf(argMovie)
+
+        playlist = if (!argName.isNullOrEmpty()) {
+            // Cargamos los datos reales instanciando y llamando a loadData()
+            val jsonManager = JsonDataManager().apply { loadData(requireContext()) }
+            val videos = jsonManager.getImportedJsons().firstOrNull { it.fileName == argName }?.videos
+
+            // Mapeo directo y simple de VideoItem a Movie en una línea
+            videos?.map { Movie().apply { videoUrl = it.videoUrl; delaySkip = it.delaySkip; skipToSecond = it.skip } } ?: listOf(argMovie)
+        } else {
+            if (!argList.isNullOrEmpty()) argList else listOf(argMovie)
+        }
+
         currentIndex = argIndex.coerceIn(0, playlist.lastIndex)
         currentMovie = playlist[currentIndex]
     }

@@ -361,14 +361,12 @@ class MobileMainFragment : Fragment(R.layout.fragment_mobile_main) {
                         return@MobileSectionsAdapter
                     }
 
-                    val playlist = ArrayList<Movie>().apply {
-                        imported.videos.forEach { v -> add(v.toMovie(imported.fileName)) }
-                    }
+                    val firstMovie = imported.videos[0].toMovie(imported.fileName)
 
                     startActivity(
                         Intent(requireContext(), DetailsActivity::class.java).apply {
-                            putExtra(DetailsActivity.MOVIE, playlist[0])
-                            putExtra(DetailsActivity.EXTRA_PLAYLIST, playlist)
+                            putExtra(DetailsActivity.MOVIE, firstMovie)
+                            putExtra("EXTRA_PLAYLIST_NAME", playlistName)
                             putExtra(DetailsActivity.EXTRA_INDEX, 0)
 
                             // SOLO RANDOM
