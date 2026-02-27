@@ -34,13 +34,16 @@ import kotlin.math.max
 class SmbGateway(private val context: Context) {
 
     data class SmbServer(val id: String, val name: String, val host: String, val port: Int = 445)
-    data class SmbCreds(val username: String, val password: String, val domain: String? = null)
+    data class SmbCreds(val username: String, val password: String, val domain: String? = null, val isLocal: Boolean = true)
+
+
 
     private val tag = "SmbGateway"
 
     // ✅ LOCK: Objeto de bloqueo estricto para operaciones de escritura en SharedPreferences
     // Esto evita que dos hilos escriban al mismo tiempo y corrompan la lista.
     private val prefsLock = Any()
+
 
     private fun keySharesSetFor(serverId: String) = "shares_set_$serverId"
 
@@ -375,7 +378,8 @@ class SmbGateway(private val context: Context) {
         val cleanHost = normalizeHost(host)
         val cleanId = makeServerId(cleanHost, port)
 
-        val blob = "${creds.username}\u0000${creds.password}\u0000${creds.domain.orEmpty()}\u0000$cleanHost"
+        val localFlag = if (creds.isLocal) "1" else "0"
+        val blob = "${creds.username}\u0000${creds.password}\u0000${creds.domain.orEmpty()}\u0000$cleanHost\u0000$localFlag"
         val enc = Base64.encodeToString(blob.toByteArray(StandardCharsets.UTF_8), Base64.NO_WRAP)
 
         synchronized(prefsLock) {
@@ -426,8 +430,14 @@ class SmbGateway(private val context: Context) {
         val pass = parts[1]
         val domain = parts[2].ifBlank { null }
         val host = normalizeHost(parts[3])
+        val isLocal = if (parts.size >= 5) parts[4] == "1" else true
 
-        return host to SmbCreds(user, pass, domain)
+        return host to SmbCreds(user, pass, domain, isLocal)
+    }
+
+    fun isServerLocal(serverId: String): Boolean {
+        val credsPair = loadCreds(serverId)
+        return credsPair?.second?.isLocal ?: false
     }
 
     fun encodePath(path: String): String =

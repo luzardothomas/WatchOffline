@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.text.TextUtils
+import android.util.Log
 import android.util.StateSet
 import android.util.TypedValue
 import android.view.Gravity
@@ -785,7 +786,7 @@ class MainFragment : BrowseSupportFragment() {
     }
 
     private fun openSmbConnectFlow() {
-        val options = arrayOf("Servidor Local (Escanear)", "Servidor Específico (IP)")
+        val options = arrayOf("Servidor Local (Escanear)", "Servidor Externo (IP)")
 
         AlertDialog.Builder(requireContext())
             .setTitle("Seleccionar tipo de conexión")
@@ -831,63 +832,109 @@ class MainFragment : BrowseSupportFragment() {
             setPadding(50, 20, 50, 0)
         }
 
-        val ipInput = EditText(requireContext()).apply {
-            hint = "IP (ej: 100.x.x.x)"
-            isSingleLine = true
-            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_NEXT
-            inputType = android.text.InputType.TYPE_CLASS_TEXT
+        val userInput = EditText(requireContext()).apply {
+            hint = "Usuario"
+            setSingleLine()
+        }
+        val passInput = EditText(requireContext()).apply {
+            hint = "Contraseña"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                    android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
 
+        val ipInput = EditText(requireContext()).apply {
+            hint = "IP (ej: 100.x.x.x)"
+            setSingleLine()
+        }
+        val portInput = EditText(requireContext()).apply {
+            hint = "PORT (ej: 8000)"
+            setSingleLine()
+        }
         val shareInput = EditText(requireContext()).apply {
             hint = "Share (ej: pelis)"
-            isSingleLine = true
+            setSingleLine()
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
-            inputType = android.text.InputType.TYPE_CLASS_TEXT
         }
 
         layout.addView(ipInput)
+        layout.addView(portInput)
+        layout.addView(userInput)
+        layout.addView(passInput)
         layout.addView(shareInput)
 
         val dialog = AlertDialog.Builder(requireContext())
-            .setTitle("Servidor Dedicado")
+            .setTitle("Conectar Servidor Externo")
             .setView(layout)
             .setPositiveButton("Conectar", null)
             .setNegativeButton("Cancelar", null)
             .create()
 
         dialog.setOnShowListener {
-            val btn = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-            btn.setOnClickListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val ip = ipInput.text.toString().trim()
+                val port = portInput.text.toString().trim()
+                val user = userInput.text.toString().trim()
+                val pass = passInput.text.toString()
                 val share = shareInput.text.toString().trim().replace("/", "")
 
-                if (ip.isEmpty() || share.isEmpty()) {
-                    Toast.makeText(requireContext(), "IP y Share requeridos", Toast.LENGTH_SHORT).show()
+                if (ip.isEmpty()) {
+                    Toast.makeText(requireContext(), "IP obligatorio", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
 
-                val serverId = smbGateway.makeServerId(ip, 445)
-                val creds = SmbGateway.SmbCreds("guest", "")
+                if (port.isEmpty()) {
+                    Toast.makeText(requireContext(), "Puerto obligatorio", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
 
-                btn.isEnabled = false
+                if (user.isBlank()) {
+                    Toast.makeText(requireContext(), "Usuario requerido", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                if (share.isBlank()) {
+                    Toast.makeText(requireContext(), "Share requerido (ej: pelis)", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+
+                val creds = SmbGateway.SmbCreds(user,pass, null, false)
+                val serverId = smbGateway.makeServerId(ip, 445)
+
+                // Deshabilitamos el botón para evitar múltiples clics mientras testea
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = false
 
                 Thread {
                     try {
-                        // Validamos antes de guardar
+                        // 1. Validamos que el servidor responda y que el share sea accesible
                         smbGateway.testLogin(ip, creds)
                         smbGateway.testShareAccess(ip, creds, share)
 
-                        smbGateway.saveCreds(serverId, ip, creds, 445, "Dedicado ($ip)")
+                        // 2. Si las pruebas pasan, guardamos de forma persistente
+                        smbGateway.saveCreds(
+                            serverId = serverId,
+                            host = ip,
+                            creds = creds,
+                            port = 445,
+                            serverName = "Externo ($ip)"
+                        )
                         smbGateway.saveLastShare(serverId, share)
 
+                        val prefs = requireContext().getSharedPreferences("server_ports", Context.MODE_PRIVATE)
+                        prefs.edit().putInt("port_$serverId", port.toIntOrNull() ?: 8081).apply()
+
                         activity?.runOnUiThread {
-                            Toast.makeText(requireContext(), "SMB conectado ✅", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(requireContext(), "Servidor externo conectado ✅", Toast.LENGTH_SHORT).show()
                             dialog.dismiss()
                         }
                     } catch (e: Exception) {
+                        Log.e("SMB_MANUAL", "Fallo al conectar a servidor externo", e)
                         activity?.runOnUiThread {
-                            btn.isEnabled = true
-                            Toast.makeText(requireContext(), "Error: ${e.message}", Toast.LENGTH_LONG).show()
+                            dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = true
+                            val errorMsg = when {
+                                e.message?.contains("Timeout") == true -> "Tiempo de espera agotado"
+                                e.message?.contains("Access Denied") == true -> "Acceso denegado al share '$share'"
+                                else -> "Error: ${e.message}"
+                            }
+                            Toast.makeText(requireContext(), errorMsg, Toast.LENGTH_LONG).show()
                         }
                     }
                 }.start()
@@ -953,7 +1000,7 @@ class MainFragment : BrowseSupportFragment() {
                         smbGateway.testShareAccess(server.host, creds, share)
                         smbGateway.saveCreds(server.id, server.host, creds, server.port, server.name)
                         smbGateway.saveLastShare(server.id, share)
-                        activity?.runOnUiThread { Toast.makeText(requireContext(), "SMB conectado ✅", Toast.LENGTH_SHORT).show() }
+                        activity?.runOnUiThread { Toast.makeText(requireContext(), "Servidor local conectado ✅", Toast.LENGTH_SHORT).show() }
                     } catch (e: Exception) {
                         activity?.runOnUiThread { Toast.makeText(requireContext(), "Error: ${e.message}", Toast.LENGTH_LONG).show() }
                     }

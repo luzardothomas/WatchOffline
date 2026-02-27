@@ -48,7 +48,8 @@ class AutoImporter(
         val serverId: String, val share: String, val smbPath: String,
         val title: String, val img: String, val skip: Int, val delay: Int, val videoSrc: String,
         val groupSeries: String? = null,
-        val groupSeason: Int? = null
+        val groupSeason: Int? = null,
+        val suffix: String
     )
 
     private data class PreviewJson(val fileName: String, val videos: List<VideoItem>, val debug: String)
@@ -204,10 +205,14 @@ class AutoImporter(
                 val allRawItems = CopyOnWriteArrayList<RawItem>()
                 val scanFutures = ArrayList<java.util.concurrent.Future<*>>()
 
+
                 // === BUCLE CORREGIDO MULTI-SHARE ===
                 for (serverId in serverIds) {
                     // 1. Obtenemos TODOS los shares registrados para esa IP
                     val shares = smbGateway.getSavedShares(serverId)
+
+                    val localStatus = smbGateway.isServerLocal(serverId)
+                    val suffix = if (localStatus) "servidor_local" else "servidor_externo"
 
                     if (shares.isEmpty()) {
                         Log.w("AutoImporter", "Server $serverId no tiene shares guardados.")
@@ -219,7 +224,7 @@ class AutoImporter(
                         scanFutures.add(scanPool.submit {
                             try {
                                 Log.d("AutoImporter", "Escaneando Server: $serverId | Share: $share")
-                                processServer(serverId, share, allRawItems)
+                                processServer(serverId, share, allRawItems, suffix)
                             } catch (e: Exception) {
                                 Log.e("AutoImporter", "Error escaneando $serverId/$share", e)
                             }
@@ -249,16 +254,18 @@ class AutoImporter(
 
                 val previews = ArrayList<PreviewJson>()
                 for ((key, list) in seriesMap) {
+                    val itemSuffix = list.firstOrNull()?.suffix ?: "servidor"
                     list.sortWith(compareBy({ parseEpisodeForSort(it.smbPath) ?: Int.MAX_VALUE }, { it.smbPath }))
-                    previews.add(PreviewJson("${normalizeName(key.first)}_s${pad2(key.second)}_servidor.json",
+                    previews.add(PreviewJson("${normalizeName(key.first)}_s${pad2(key.second)}_" + itemSuffix + ".json",
                         list.map { VideoItem(it.title, it.skip, it.delay, it.img, it.img, it.videoSrc) }, "SERIES"))
                 }
 
                 val sagaMap = HashMap<String, ArrayList<RawItem>>()
                 for (m in movies) sagaMap.getOrPut(inferSagaNameFromPath(m.smbPath)) { ArrayList() }.add(m)
                 for ((saga, list) in sagaMap) {
+                    val itemSuffix = list.firstOrNull()?.suffix ?: "servidor"
                     list.sortWith(compareBy({ extractMovieSortKey(it.smbPath, it.title) }, { it.title }))
-                    val fName = if (list.size > 1) "saga_${normalizeName(saga).replace(" ", "_")}_servidor.json" else "${normalizeName(list.first().title).replace(" ", "_")}_servidor.json"
+                    val fName = if (list.size > 1) "saga_${normalizeName(saga).replace(" ", "_")}_" + itemSuffix + ".json" else "${normalizeName(list.first().title).replace(" ", "_")}_" + itemSuffix + ".json"
                     previews.add(PreviewJson(fName, list.map { VideoItem(it.title, it.skip, it.delay, it.img, it.img, it.videoSrc) }, "MOVIES"))
                 }
 
@@ -312,7 +319,7 @@ class AutoImporter(
         }.start()
     }
 
-    private fun processServer(serverId: String, share: String, destList: CopyOnWriteArrayList<RawItem>) {
+    private fun processServer(serverId: String, share: String, destList: CopyOnWriteArrayList<RawItem>, suffix: String) {
         val smbFiles = listSmbVideos(serverId, share)
         if (smbFiles.isEmpty()) return
 
@@ -330,7 +337,8 @@ class AutoImporter(
         for (p in smbFiles) {
             val q = jobMap[p] ?: ""
             val cover = coverResults[q]
-            val videoUrl = buildProxyUrl(serverId, share, p)
+            val isExternal = suffix == "servidor_externo"
+            val videoUrl = buildVideoUrl(serverId, share, p, isExternal)
             val img = resolveCoverUrl(cover?.url)
             val title = buildDisplayTitleForItem(p, cover)
 
@@ -376,7 +384,7 @@ class AutoImporter(
             destList.add(RawItem(serverId, share, p, title, img,
                 finalSkip, finalDelay, videoUrl,
                 // Pasamos los datos calculados
-                seriesNameForGroup, seasonForGroup
+                seriesNameForGroup, seasonForGroup,suffix
             ))
         }
     }
@@ -498,10 +506,36 @@ class AutoImporter(
         return out
     }
 
-    private fun buildProxyUrl(serverId: String, share: String, smbPath: String): String {
+    private fun buildVideoUrl(serverId: String, share: String, path: String, isExternal: Boolean): String {
+
+        // Limpieza y encode de la ruta del video
+        val cleanPath = path.replace("\\", "/")
+        val pathEnc = cleanPath.split("/").joinToString("/") {
+            URLEncoder.encode(it, "UTF-8").replace("+", "%20")
+        }
         val shareEnc = URLEncoder.encode(share, "UTF-8").replace("+", "%20")
-        val pathEnc = smbPath.split("/").joinToString("/") { URLEncoder.encode(it, "UTF-8").replace("+", "%20") }
-        return "http://127.0.0.1:$proxyPort/smb/$serverId/$shareEnc/$pathEnc"
+
+        if(isExternal == false) {
+            return "http://127.0.0.1:$proxyPort/smb/$serverId/$shareEnc/$pathEnc"
+        }
+
+        // Recuperamos las credenciales (user y pass) que guardamos en el diálogo
+        val data = smbGateway.loadCreds(serverId) ?: return ""
+        val host = data.first
+        val creds = data.second // Aquí vienen el usuario y la contraseña del diálogo
+
+        // Recuperamos el puerto WebDAV que guardamos en SharedPreferences
+        val prefs = context.getSharedPreferences("server_ports", Context.MODE_PRIVATE)
+        val webDavPort = prefs.getInt("port_$serverId", proxyPort)
+
+        // Escapamos caracteres especiales en la contraseña por seguridad (especialmente el $)
+        val safePass = creds.password.replace("$", "\\$")
+
+        // Construcción de la URL dinámica
+        val finalUrl = "http://${creds.username}:$safePass@$host:$webDavPort/$shareEnc/$pathEnc"
+
+        Log.d("DEBUG_URL", "URL GENERADA: $finalUrl")
+        return finalUrl
     }
 
     private fun pad2(n: Int) = n.toString().padStart(2, '0')
@@ -616,4 +650,3 @@ class AutoImporter(
         }
     }
 }
-
