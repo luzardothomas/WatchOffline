@@ -36,7 +36,7 @@ class CardPresenter : Presenter() {
     private class CardViewHolder(
         root: View,
         val cardView: ImageCardView,
-        val textContainer: LinearLayout, // <--- NUEVO: Referencia a la cinta
+        val textContainer: LinearLayout,
         val metaView: TextView,
         val titleView: TextView
     ) : Presenter.ViewHolder(root)
@@ -47,7 +47,8 @@ class CardPresenter : Presenter() {
         val ctx = parent.context
 
         if (mDefaultCardImage == null) {
-            sDefaultBackgroundColor = ContextCompat.getColor(ctx, R.color.default_background)
+            // Fondo oscuro para los bordes (letterbox)
+            sDefaultBackgroundColor = 0xFF212121.toInt()
             sSelectedBackgroundColor = ContextCompat.getColor(ctx, R.color.selected_background)
             mDefaultCardImage = ContextCompat.getDrawable(ctx, R.drawable.movie)
         }
@@ -55,7 +56,7 @@ class CardPresenter : Presenter() {
         ensurePxCache(ctx)
         val sizePx = cachedSizePx
 
-        // 1. ROOT
+        // 1. ROOT (Vuelve a ser FrameLayout)
         val root = FrameLayout(ctx).apply {
             layoutParams = ViewGroup.LayoutParams(sizePx, sizePx)
             clipToPadding = true
@@ -73,33 +74,38 @@ class CardPresenter : Presenter() {
             }
         }.apply {
             layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            setMainImageDimensions(sizePx, sizePx)
-            setMainImageScaleType(ImageView.ScaleType.CENTER_CROP)
             titleText = null
             contentText = null
             isFocusable = false
             isFocusableInTouchMode = false
+
+            // Tamaño inicial temporal (se arregla en onBind)
+            setMainImageDimensions(sizePx, sizePx)
+            setMainImageScaleType(ImageView.ScaleType.FIT_CENTER)
+
+            mainImageView.apply {
+                background = null
+                setPadding(0, 0, 0, 0)
+            }
+
             updateCardBackgroundColor(this, false)
         }
 
-        // 3. CONTENEDOR DE TEXTO (LA CINTA)
+        // 3. CONTENEDOR DE TEXTO
         val textContainer = LinearLayout(ctx).apply {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM
+                Gravity.BOTTOM // Pegado al fondo
             )
             orientation = LinearLayout.VERTICAL
-
-            // FIX 1: Usar color directo, no un Drawable compartido
             setBackgroundColor(0xFF212121.toInt())
-
             setPadding(cachedPadH, cachedPadV, cachedPadH, cachedPadV)
             isFocusable = false
             isFocusableInTouchMode = false
         }
 
-        // 4. METADATA (T01 Cap 01)
+        // 4. METADATA
         val metaView = TextView(ctx).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -142,10 +148,8 @@ class CardPresenter : Presenter() {
     override fun onBindViewHolder(viewHolder: Presenter.ViewHolder, item: Any) {
         val holder = viewHolder as CardViewHolder
         val movie = item as Movie
-
         val url = movie.cardImageUrl?.trim().orEmpty()
         val fullTitle = movie.title?.trim().orEmpty()
-
         val splitIndex = fullTitle.indexOf(" - ")
 
         if (splitIndex != -1) {
@@ -164,24 +168,28 @@ class CardPresenter : Presenter() {
 
         holder.titleView.visibility = if (fullTitle.isNotEmpty()) View.VISIBLE else View.GONE
 
-        // FIX 2: Forzar recalculado de altura (Solución al bug visual)
-        // Esto obliga a la cinta a medirse de nuevo según si el texto ocupa 1 o 2 líneas
-        holder.textContainer.requestLayout()
-
         val ctx = holder.cardView.context
         ensurePxCache(ctx)
         val sizePx = cachedSizePx
         val model: Any? = if (url.isNotEmpty()) url else mDefaultCardImage
 
+        holder.textContainer.measure(
+            View.MeasureSpec.makeMeasureSpec(sizePx, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        val exactTextHeight = holder.textContainer.measuredHeight
+        val imageAreaHeight = sizePx - exactTextHeight
+
+        val cardParams = holder.cardView.layoutParams as FrameLayout.LayoutParams
+        cardParams.height = imageAreaHeight
+        holder.cardView.layoutParams = cardParams
+        holder.cardView.setMainImageDimensions(sizePx, imageAreaHeight)
+
         Glide.with(ctx)
             .load(model)
-            .override(sizePx, sizePx)
-            .centerCrop()
+            .fitCenter()
             .diskCacheStrategy(DiskCacheStrategy.AUTOMATIC)
             .dontAnimate()
-            .thumbnail(0.25f)
-            .placeholder(mDefaultCardImage)
-            .error(mDefaultCardImage)
             .into(holder.cardView.mainImageView)
     }
 

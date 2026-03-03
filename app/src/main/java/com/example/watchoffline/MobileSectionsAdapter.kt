@@ -116,7 +116,7 @@ class MobileSectionsAdapter(
                     cover.context.getDrawable(R.drawable.bg_action_card)
                 cover.clipToOutline = true
                 cover.outlineProvider = ViewOutlineProvider.BACKGROUND
-                cover.scaleType = ImageView.ScaleType.CENTER_CROP
+                cover.scaleType = ImageView.ScaleType.FIT_CENTER
 
                 // 3) TITLE: estado NORMAL por defecto
                 title.apply {
@@ -146,14 +146,13 @@ class MobileSectionsAdapter(
                     }
 
                 } else {
-                    // ✅ VIDEO / PLAYLIST (incluye RANDOM)
                     cover.visibility = View.VISIBLE
 
                     val url = movie.cardImageUrl?.trim().orEmpty()
                     if (url.isNotEmpty()) {
                         Glide.with(cover)
                             .load(url)
-                            .centerCrop()
+                            .fitCenter()
                             .transition(DrawableTransitionOptions.withCrossFade())
                             .into(cover)
                     }
@@ -166,7 +165,6 @@ class MobileSectionsAdapter(
                 cardRoot.scaleX = if (isSelected) 1.04f else 1f
                 cardRoot.scaleY = if (isSelected) 1.04f else 1f
                 cardRoot.isSelected = isSelected
-
                 itemView.setOnClickListener { onMovieClick(movie) }
             }
 
