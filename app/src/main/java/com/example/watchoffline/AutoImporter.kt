@@ -17,8 +17,6 @@ import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import com.hierynomus.msfscc.FileAttributes
 import org.videolan.BuildConfig
-import java.io.BufferedReader
-import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -33,6 +31,7 @@ import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
+import com.example.watchoffline.LocalCoverResolver.ApiCover
 
 class AutoImporter(
     private val context: Context,
@@ -52,20 +51,17 @@ class AutoImporter(
         val suffix: String
     )
 
-    private data class PreviewJson(val fileName: String, val videos: List<VideoItem>, val debug: String)
-
-    @Keep
-    private data class ApiCover(
-        @SerializedName("type") val type: String? = null,
-        @SerializedName("id") val id: String? = null,
-        @SerializedName("dir") val dir: String? = null,
-        @SerializedName("season") val season: Int? = null,
-        @SerializedName("episode") val episode: Int? = null,
-        @SerializedName("skipSeconds") val skipToSecond: Int? = null,
-        @SerializedName("delaySeconds") val delaySkip: Int? = null,
-        @SerializedName("file") val file: String? = null,
-        @SerializedName("url") val url: String? = null
+    private data class IndexItem(
+        val id: String, val dir: String, val type: String?,
+        val aliases: List<String>?, val coverFile: String?,
+        val skipSeconds: Int?, val delaySeconds: Int?,
+        val episodeSkipDefault: Int?, val delaySkipDefault: Int?,
+        val seasonEpisodeCounts: List<Int>?,
+        val episodeSkips: Map<String, Map<String, Int>>?,
+        val delaySkips: Map<String, Map<String, Int>>?
     )
+
+    private data class PreviewJson(val fileName: String, val videos: List<VideoItem>, val debug: String)
 
     // =========================
     // Configuration & Nitros
@@ -145,18 +141,15 @@ class AutoImporter(
         val activity = context as? Activity ?: return // Si no hay activity, salimos
 
         if (!isNetworkAvailable(context)) {
-            // Ejecutamos el toast en el hilo principal por seguridad
             activity.runOnUiThread {
                 toast("No hay conexión para importar de SMB")
             }
-            // Cancelamos todo el proceso aquí mismo
             return
         }
 
         // Usamos un array de 1 elemento como contenedor seguro para la variable entre hilos
         val dialogRef = arrayOf<Dialog?>(null)
 
-        // 1. MOSTRAR DIÁLOGO (HILO PRINCIPAL)
         activity.runOnUiThread {
             // Diseño visual (Caja gris oscura)
             val layout = LinearLayout(activity).apply {
@@ -174,7 +167,6 @@ class AutoImporter(
                 setPadding(40, 0, 0, 0)
             })
 
-            // Crear y mostrar el diálogo "crudo"
             val rawDialog = Dialog(activity)
             rawDialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
             rawDialog.setContentView(layout)
@@ -195,6 +187,15 @@ class AutoImporter(
             try {
 
                 val startTime = System.nanoTime()
+                val indexStr = downloadIndexJson()
+                val seriesMapStr = downloadSeriesMapJson()
+
+                if (indexStr == null || seriesMapStr == null) {
+                    onError("No se pudo obtener el catálogo completo de la API.")
+                    return@Thread
+                }
+
+                val localResolver = LocalCoverResolver(indexStr, seriesMapStr)
 
                 val proxyOk = smbGateway.ensureProxyStarted(proxyPort)
                 if (!proxyOk) { onError("Error Proxy SMB."); return@Thread }
@@ -205,35 +206,24 @@ class AutoImporter(
                 val allRawItems = CopyOnWriteArrayList<RawItem>()
                 val scanFutures = ArrayList<java.util.concurrent.Future<*>>()
 
-
-                // === BUCLE CORREGIDO MULTI-SHARE ===
                 for (serverId in serverIds) {
-                    // 1. Obtenemos TODOS los shares registrados para esa IP
                     val shares = smbGateway.getSavedShares(serverId)
-
                     val localStatus = smbGateway.isServerLocal(serverId)
                     val suffix = if (localStatus) "servidor_local" else "servidor_externo"
 
-                    if (shares.isEmpty()) {
-                        Log.w("AutoImporter", "Server $serverId no tiene shares guardados.")
-                        continue
-                    }
+                    if (shares.isEmpty()) continue
 
-                    // 2. Lanzamos un hilo de escaneo por CADA share
                     for (share in shares) {
                         scanFutures.add(scanPool.submit {
                             try {
-                                Log.d("AutoImporter", "Escaneando Server: $serverId | Share: $share")
-                                processServer(serverId, share, allRawItems, suffix)
+                                processServer(serverId, share, allRawItems, suffix, localResolver)
                             } catch (e: Exception) {
-                                Log.e("AutoImporter", "Error escaneando $serverId/$share", e)
+                                Log.e("AutoImporter", "Error", e)
                             }
                         })
                     }
                 }
-                // ===================================
 
-                // Esperar a que terminen todos los escaneos
                 for (f in scanFutures) try { f.get() } catch (_: Exception) {}
 
                 if (allRawItems.isEmpty()) { onDone(0); return@Thread }
@@ -319,72 +309,45 @@ class AutoImporter(
         }.start()
     }
 
-    private fun processServer(serverId: String, share: String, destList: CopyOnWriteArrayList<RawItem>, suffix: String) {
+    private fun processServer(
+        serverId: String, share: String, destList: CopyOnWriteArrayList<RawItem>,
+        suffix: String, resolver: LocalCoverResolver
+    ) {
         val smbFiles = listSmbVideos(serverId, share)
         if (smbFiles.isEmpty()) return
 
-        val queriesToFetch = HashSet<String>()
-        val jobMap = HashMap<String, String>(smbFiles.size)
-
         for (p in smbFiles) {
             val q = buildQueryForPathSmart(p)
-            jobMap[p] = q
-            queriesToFetch.add(q)
-        }
 
-        val coverResults = fetchCoversParallel(queriesToFetch.toList())
+            val cover = resolver.resolve(q)
 
-        for (p in smbFiles) {
-            val q = jobMap[p] ?: ""
-            val cover = coverResults[q]
             val isExternal = suffix == "servidor_externo"
             val videoUrl = buildVideoUrl(serverId, share, p, isExternal)
-            val img = resolveCoverUrl(cover?.url)
+            val img = cover?.url ?: resolveCoverUrl(null)
             val title = buildDisplayTitleForItem(p, cover)
 
-            // --- INICIO CÁLCULO DE GRUPO (FIX PARA SERIES/PELIS) ---
             val parts = splitPathParts(p)
-
-            // 1. Detectar Temporada (Prioridad: Carpeta > Archivo > API)
             val seasonFromFolder = if (parts.size >= 2) parseSeasonFromFolderOrName(parts[parts.size - 2]) else null
             val seFile = parseSeasonEpisodeFromFilename(p)
             val finalSeason = seasonFromFolder ?: seFile?.first ?: cover?.season
 
-            // 2. Decidir si es Serie (Tiene temporada explicita o flag API)
             val isSeries = cover?.type.equals("series", ignoreCase = true) || finalSeason != null
 
-            // 3. Determinar el Nombre de la Serie para el grupo
             val seriesNameForGroup = if (isSeries) {
                 if (seasonFromFolder != null && parts.size >= 3) {
-                    parts[parts.size - 3] // Nombre de la carpeta "Malcolm"
+                    parts[parts.size - 3]
                 } else {
-                    // Si es archivo suelto o no hay carpeta de temporada, usamos API ID o nombre de archivo limpio
                     cover?.id ?: fileBaseName(p).replace(Regex("""\d+.*"""), "").trim()
                 }
             } else null
 
-            // 4. Temporada final (Si es serie pero no tiene numero, forzamos 1)
             val seasonForGroup = if (isSeries) (finalSeason ?: 1) else null
-            // --- FIN CÁLCULO ---
-
             val finalSkip = if (isSeries) (cover?.skipToSecond ?: 0) else 0
             val finalDelay = if (isSeries) (cover?.delaySkip ?: 0) else 0
 
-            if (cover != null) {
-                Log.d("DEBUG_DATA", "--- Analizando Cover ---")
-                Log.d("DEBUG_DATA", "Path: $p")
-                Log.d("DEBUG_DATA", "Query usada: $q")
-                Log.d("DEBUG_DATA", "API skipSeconds: ${cover.skipToSecond}")
-                Log.d("DEBUG_DATA", "API delaySeconds: ${cover.delaySkip}")
-                Log.d("DEBUG_DATA", "Tipo detectado por API: ${cover.type}")
-            } else {
-                Log.w("DEBUG_DATA", "⚠️ Sin respuesta de API para query: $q")
-            }
-
             destList.add(RawItem(serverId, share, p, title, img,
                 finalSkip, finalDelay, videoUrl,
-                // Pasamos los datos calculados
-                seriesNameForGroup, seasonForGroup,suffix
+                seriesNameForGroup, seasonForGroup, suffix
             ))
         }
     }
@@ -442,41 +405,6 @@ class AutoImporter(
         // 3. FALLBACK PELÍCULAS
         // Aquí es donde unimos palabras si quieres evitar espacios en la búsqueda final
         return normalizeName(fileNoExt)
-    }
-
-    private fun fetchCoversParallel(queries: List<String>): Map<String, ApiCover?> {
-        val results = ConcurrentHashMap<String, ApiCover?>()
-        val toAsk = queries.filter { !coverCache.containsKey(it) }
-        val futures = ArrayList<java.util.concurrent.Future<*>>()
-
-        for (q in queries) { if (coverCache.containsKey(q)) results[q] = coverCache[q] }
-
-        for (q in toAsk) {
-            futures.add(coverPool.submit {
-                val cover = fetchCoverFromApi(q)
-                coverCache[q] = cover
-                results[q] = cover
-            })
-        }
-        for (f in futures) try { f.get() } catch (_: Exception) {}
-        return results
-    }
-
-    private fun fetchCoverFromApi(q: String): ApiCover? {
-        val encoded = URLEncoder.encode(q, "UTF-8").replace("+", "%20")
-        val conn = openConnectionForUrl("https://$API_HOST/cover?q=$encoded")
-        return try {
-            conn.connectTimeout = COVER_TIMEOUT_MS
-            conn.readTimeout = COVER_TIMEOUT_MS
-            if (conn.responseCode in 200..299) {
-                val reader = BufferedReader(InputStreamReader(conn.inputStream))
-                val sb = StringBuilder()
-                var line: String?
-                while (reader.readLine().also { line = it } != null) sb.append(line)
-                reader.close()
-                gson.fromJson(sb.toString(), ApiCover::class.java)
-            } else null
-        } catch (e: Exception) { null }
     }
 
     private fun listSmbVideos(serverId: String, shareName: String): List<String> {
@@ -602,10 +530,6 @@ class AutoImporter(
         // 3. Extracción de metadatos del archivo
         val seFile = parseSeasonEpisodeFromFilename(absPath)
         val epFileOnly = parseEpisodeOnlyFromFilename(absPath)
-
-        // ==============================================================
-        // LÓGICA DE TEMPORADA MEJORADA
-        // ==============================================================
         val seasonFromFile = seFile?.first
 
         // Buscamos en la carpeta (ej: Temporada_7)
@@ -647,6 +571,34 @@ class AutoImporter(
         var i = 2
         while (true) {
             val cand = "${prefix}_$i.json"; if (!existing.contains(cand)) return cand; i++
+        }
+    }
+
+    private fun downloadIndexJson(): String? {
+        val conn = openConnectionForUrl("https://$API_HOST/get_index_json")
+        return try {
+            conn.connectTimeout = 5000
+            conn.readTimeout = 5000
+            if (conn.responseCode in 200..299) {
+                conn.inputStream.bufferedReader().use { it.readText() }
+            } else null
+        } catch (e: Exception) {
+            Log.e("AutoImporter", "Error descargando index", e)
+            null
+        }
+    }
+
+    private fun downloadSeriesMapJson(): String? {
+        val conn = openConnectionForUrl("https://$API_HOST/get_series_map")
+        return try {
+            conn.connectTimeout = 5000
+            conn.readTimeout = 5000
+            if (conn.responseCode in 200..299) {
+                conn.inputStream.bufferedReader().use { it.readText() }
+            } else null
+        } catch (e: Exception) {
+            Log.e("AutoImporter", "Error descargando series_map", e)
+            null
         }
     }
 }
